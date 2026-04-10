@@ -43,12 +43,14 @@ BANNER = r"""
          / o o \     "Zo... ven did your
          \ ._. /      signals first start
           |||||       to propagate?"
-         /|||||\
-        / ||||| \
-       '  |||||  '
-          (  )
-       ~~smoke~~
-
+         /|||||\             ______
+        / ||||| \            \    /
+       '  |||||  '            \  /
+          (  )                 \/
+       ~~smoke~~               |   /
+                  -------------'  /
+                  ---------------/
+                  |            |
      Dr. SigMonD — Signal Monitor Daemon
 """
 
@@ -843,6 +845,7 @@ def main() -> int:
 
     args = parser.parse_args()
     if not args.command:
+        print(BANNER)
         parser.print_help()
         return 0
 
