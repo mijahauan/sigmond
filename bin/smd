@@ -1,0 +1,856 @@
+#!/usr/bin/env python3
+"""smd — Sigmond system installer and lifecycle manager.
+
+Dr. SigMonD: "Zo... ven did your signals first start to propagate?"
+
+Usage:
+    smd install  [--components COMP,...]  [--client-dir DIR]  [--dry-run]
+    smd apply    [--dry-run]
+    smd start
+    smd stop
+    smd status
+    smd update
+    smd diag
+
+Topology file (default: /etc/sigmond/topology.toml) controls which
+components are enabled on this host.  All commands respect the topology.
+"""
+
+import argparse
+import configparser
+import os
+import shutil
+import subprocess
+import sys
+import textwrap
+import time
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+TOPOLOGY_PATH   = Path('/etc/sigmond/topology.toml')
+SIGMOND_CONF    = Path('/etc/sigmond')
+SIGMOND_LOG     = Path('/var/log/sigmond')
+
+# ---------------------------------------------------------------------------
+# Banner
+# ---------------------------------------------------------------------------
+
+BANNER = r"""
+          .---.
+         / o o \     "Zo... ven did your
+         \ ._. /      signals first start
+          |||||       to propagate?"
+         /|||||\
+        / ||||| \
+       '  |||||  '
+          (  )
+       ~~smoke~~
+
+     Dr. SigMonD — Signal Monitor Daemon
+"""
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _run(cmd: list, *, cwd=None, capture=True, sudo=False) -> subprocess.CompletedProcess:
+    if sudo and os.geteuid() != 0:
+        cmd = ['sudo'] + cmd
+    return subprocess.run(cmd, cwd=cwd,
+                          capture_output=capture, text=True)
+
+
+def _ok(msg):   print(f'  \033[32m✓\033[0m  {msg}')
+def _warn(msg): print(f'  \033[33m⚠\033[0m  {msg}')
+def _err(msg):  print(f'  \033[31m✗\033[0m  {msg}', file=sys.stderr)
+def _info(msg): print(f'     {msg}')
+
+
+def _heading(title: str):
+    print(f'\n\033[1m━━━ {title} ━━━\033[0m')
+
+
+def _need_root(cmd_name: str) -> bool:
+    if os.geteuid() != 0:
+        print(f'smd {cmd_name}: must run as root (sudo smd {cmd_name})',
+              file=sys.stderr)
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Topology
+# ---------------------------------------------------------------------------
+
+def _load_topology(path: Path, client_dir_override: str = None) -> dict:
+    """
+    Load topology.toml.  Returns a dict with:
+      topology['client_dir']     — Path to wsprdaemon-client
+      topology['components']     — dict of component_name → {enabled, description, managed}
+    Falls back to sensible defaults if topology.toml is absent.
+    """
+    import tomllib
+
+    defaults = {
+        'client_dir': Path('/home/wsprdaemon/wsprdaemon-client'),
+        'smd_bin':    Path('/usr/local/sbin/smd'),
+        'components': {
+            'radiod':    {'enabled': True,  'managed': True,  'description': 'ka9q-radio SDR daemon'},
+            'wspr':      {'enabled': True,  'managed': True,  'description': 'WSPR/FST4W decoder and uploader'},
+            'ka9q-web':  {'enabled': True,  'managed': True,  'description': 'ka9q-web radiod status UI'},
+            'grape':     {'enabled': True,  'managed': False, 'description': 'GRAPE hf-timestd recording'},
+            'rac':       {'enabled': False, 'managed': False, 'description': 'Remote access channel (frpc)'},
+        },
+    }
+
+    if client_dir_override:
+        defaults['client_dir'] = Path(client_dir_override)
+
+    if not path.exists():
+        _warn(f'No topology file at {path} — using defaults')
+        return defaults
+
+    with open(path, 'rb') as f:
+        raw = tomllib.load(f)
+
+    result = dict(defaults)
+
+    sig = raw.get('sigmond', {})
+    if 'wsprdaemon_client' in sig:
+        result['client_dir'] = Path(sig['wsprdaemon_client'])
+    if client_dir_override:
+        result['client_dir'] = Path(client_dir_override)
+    if 'smd_bin' in sig:
+        result['smd_bin'] = Path(sig['smd_bin'])
+
+    comps = raw.get('component', {})
+    for name, cfg in comps.items():
+        result['components'][name] = {
+            'enabled':     cfg.get('enabled', False),
+            'managed':     cfg.get('managed', True),
+            'description': cfg.get('description', ''),
+        }
+
+    return result
+
+
+def _enabled_components(topology: dict, only: list = None) -> list:
+    """Return sorted list of enabled component names, filtered by only if given."""
+    enabled = [n for n, c in topology['components'].items() if c['enabled']]
+    if only:
+        enabled = [n for n in enabled if n in only]
+    return sorted(enabled)
+
+
+# ---------------------------------------------------------------------------
+# Dependency management (reads wsprdaemon-client/deps.conf)
+# ---------------------------------------------------------------------------
+
+# Map each component to the deps.conf sections it needs
+COMPONENT_DEPS = {
+    'radiod':   ['ka9q-radio'],
+    'wspr':     ['ka9q-python', 'wspr-recorder', 'kiwiclient', 'ftlib-pskreporter'],
+    'ka9q-web': ['ka9q-web'],
+    'grape':    [],   # hf-timestd manages itself
+    'rac':      [],
+}
+
+# Deps that require a C build step after cloning
+BUILD_STEPS = {
+    'ka9q-radio': '_build_ka9q_radio',
+    'ka9q-web':   '_build_ka9q_web_with_onion',
+}
+
+
+def _load_deps_conf(client_dir: Path) -> configparser.ConfigParser:
+    deps_file = client_dir / 'deps.conf'
+    if not deps_file.exists():
+        _err(f'deps.conf not found at {deps_file}')
+        return None
+    cfg = configparser.ConfigParser()
+    cfg.read(deps_file)
+    return cfg
+
+
+def _ensure_venv(venv_dir: Path) -> bool:
+    if venv_dir.exists():
+        return True
+    _info(f'Creating Python venv at {venv_dir} ...')
+    r = _run([sys.executable, '-m', 'venv', str(venv_dir)])
+    if r.returncode != 0:
+        _err(f'venv creation failed: {r.stderr.strip()}')
+        return False
+    return True
+
+
+def _install_git_dep(section: str, dcfg: configparser.ConfigParser) -> bool:
+    url        = dcfg.get(section, 'url', fallback='').strip()
+    pinned     = dcfg.get(section, 'commit', fallback='').strip()
+    install_to = dcfg.get(section, 'install_to', fallback='').strip()
+
+    if not url or not install_to:
+        _err(f'[{section}] missing url or install_to in deps.conf')
+        return False
+
+    target = Path(install_to)
+
+    if not target.exists():
+        _info(f'Cloning {section} → {target} ...')
+        r = _run(['git', 'clone', url, str(target)])
+        if r.returncode != 0:
+            _err(f'git clone {section} failed: {r.stderr.strip()}')
+            return False
+        if pinned:
+            _run(['git', '-C', str(target), 'checkout', pinned])
+
+    # Verify commit
+    if pinned:
+        r = _run(['git', '-c', f'safe.directory={target}',
+                  '-C', str(target), 'rev-parse', 'HEAD'])
+        current = r.stdout.strip()
+        if current and not current.startswith(pinned[:12]):
+            _warn(f'{section}: at {current[:12]}, deps.conf pins {pinned[:12]}')
+            _info(f'To update: git -C {target} fetch && git -C {target} checkout {pinned}')
+        else:
+            _ok(f'{section}: {current[:12]}')
+
+    return True
+
+
+def _install_pypi_dep(section: str, dcfg: configparser.ConfigParser,
+                      venv_dir: Path) -> bool:
+    url    = dcfg.get(section, 'url', fallback='').strip()
+    commit = dcfg.get(section, 'commit', fallback='').strip()
+
+    pip = str(venv_dir / 'bin' / 'pip')
+    is_git = url.startswith('git+')
+    pkg_name = url.rstrip('/').split('/')[-1].replace('.git', '') if is_git else url
+
+    r = _run([pip, 'show', pkg_name])
+    if r.returncode == 0:
+        installed_ver = next(
+            (l.split(':', 1)[1].strip() for l in r.stdout.splitlines()
+             if l.startswith('Version:')), 'unknown')
+        if installed_ver == commit or (is_git and commit[:8] in r.stdout):
+            _ok(f'{section}: {installed_ver}')
+            return True
+        _warn(f'{section}: have {installed_ver}, want {commit[:12]}')
+
+    spec = f'{url}@{commit}' if is_git else f'{url}=={commit}'
+    _info(f'Installing {section} ({spec}) ...')
+    r = _run([pip, 'install', spec])
+    if r.returncode != 0:
+        _err(f'{section} install failed: {r.stderr.strip()[-400:]}')
+        return False
+    _ok(f'{section}: installed')
+    return True
+
+
+def _build_ka9q_radio(src_dir: Path) -> bool:
+    binary = Path('/usr/local/sbin/radiod')
+    # Check if installed binary matches built binary
+    built = src_dir / 'src' / 'radiod'
+    if binary.exists() and built.exists():
+        import hashlib
+        def _sha(p):
+            return hashlib.sha256(p.read_bytes()).hexdigest()
+        if _sha(binary) == _sha(built):
+            _ok('ka9q-radio: already installed and current')
+            return True
+
+    nproc = str(os.cpu_count() or 2)
+    _info(f'Building ka9q-radio (make -j{nproc}) ...')
+    r = _run(['make', f'-j{nproc}'], cwd=str(src_dir), capture=False)
+    if r is None or (hasattr(r, 'returncode') and r.returncode != 0):
+        _err('ka9q-radio build failed')
+        return False
+    r = _run(['make', 'install'], cwd=str(src_dir), sudo=True)
+    if r.returncode != 0:
+        _err(f'ka9q-radio install failed: {r.stderr.strip()}')
+        return False
+    _ok('ka9q-radio: built and installed')
+    return True
+
+
+def _build_onion(src_dir: Path) -> bool:
+    if Path('/usr/local/lib/libonion.so').exists():
+        _ok('onion: already installed')
+        return True
+    build_dir = src_dir / 'build'
+    build_dir.mkdir(exist_ok=True)
+    _info('Configuring onion ...')
+    r = _run(['cmake', '..', '-DCMAKE_INSTALL_PREFIX=/usr/local',
+              '-DHAVE_SQLITE3=OFF', '-DHAVE_REDIS=OFF', '-DHAVE_HIREDIS=OFF',
+              '-DHAVE_JPEG=OFF', '-DHAVE_PAM=OFF', '-DHAVE_SYSTEMD=OFF',
+              '-DHAVE_XML2=OFF', '-DONION_USE_SSL=ON'],
+             cwd=str(build_dir))
+    if r.returncode != 0:
+        _err(f'onion cmake failed: {r.stderr.strip()}')
+        return False
+    nproc = str(os.cpu_count() or 2)
+    _info(f'Building onion (make -j{nproc}) ...')
+    r = _run(['make', f'-j{nproc}'], cwd=str(build_dir))
+    if r.returncode != 0:
+        _err(f'onion build failed: {r.stderr[-400:]}')
+        return False
+    r = _run(['make', 'install'], cwd=str(build_dir), sudo=True)
+    if r.returncode != 0:
+        _err(f'onion install failed: {r.stderr.strip()}')
+        return False
+    _run(['ldconfig'], sudo=True)
+    _ok('onion: built and installed')
+    return True
+
+
+def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
+    # onion is a build-time dependency of ka9q-web
+    dcfg = configparser.ConfigParser()
+    deps_conf = src_dir.parent / 'wsprdaemon-client' / 'deps.conf'
+    if deps_conf.exists():
+        dcfg.read(deps_conf)
+    onion_url    = dcfg.get('ka9q-web', 'onion_url', fallback='https://github.com/davidmoreno/onion.git')
+    onion_commit = dcfg.get('ka9q-web', 'onion_commit', fallback='')
+    onion_src    = Path(dcfg.get('ka9q-web', 'onion_src', fallback='/home/wsprdaemon/onion'))
+
+    if not onion_src.exists():
+        _info(f'Cloning onion → {onion_src} ...')
+        r = _run(['git', 'clone', onion_url, str(onion_src)])
+        if r.returncode != 0:
+            _err(f'git clone onion failed: {r.stderr.strip()}')
+            return False
+        if onion_commit:
+            _run(['git', '-C', str(onion_src), 'checkout', onion_commit])
+
+    if not _build_onion(onion_src):
+        return False
+
+    binary = Path('/usr/local/sbin/ka9q-web')
+    built  = src_dir / 'ka9q-web'
+    if binary.exists() and built.exists():
+        import hashlib
+        def _sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+        if _sha(binary) == _sha(built):
+            _ok('ka9q-web: already installed and current')
+            return True
+
+    nproc = str(os.cpu_count() or 2)
+    _info(f'Building ka9q-web (make -j{nproc}) ...')
+    r = _run(['make', f'-j{nproc}'], cwd=str(src_dir))
+    if r.returncode != 0:
+        _err(f'ka9q-web build failed: {r.stderr[-400:]}')
+        return False
+    r = _run(['make', 'install'], cwd=str(src_dir), sudo=True)
+    if r.returncode != 0:
+        _err(f'ka9q-web install failed: {r.stderr.strip()}')
+        return False
+    _ok('ka9q-web: built and installed')
+    return True
+
+
+def _collect_deps_for_components(components: list) -> list:
+    """Return deduplicated ordered list of dep section names needed."""
+    seen = set()
+    result = []
+    for comp in components:
+        for dep in COMPONENT_DEPS.get(comp, []):
+            if dep not in seen:
+                seen.add(dep)
+                result.append(dep)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# System-level install steps
+# ---------------------------------------------------------------------------
+
+def _install_systemd_units(client_dir: Path) -> int:
+    unit_src = client_dir / 'systemd'
+    unit_dst = Path('/etc/systemd/system')
+    installed = []
+    for pat in ('*.service', '*.target', '*.timer'):
+        for f in unit_src.glob(pat):
+            dst = unit_dst / f.name
+            shutil.copy2(f, dst)
+            installed.append(f.name)
+    if installed:
+        _run(['systemctl', 'daemon-reload'], sudo=True)
+        _ok(f'systemd units: {len(installed)} installed')
+    else:
+        _ok('systemd units: none found in source tree')
+    return len(installed)
+
+
+def _install_smd_itself(sigmond_dir: Path, smd_bin: Path) -> bool:
+    src = sigmond_dir / 'bin' / 'smd'
+    if not src.exists():
+        return True  # running from installed location already
+    dst = smd_bin
+    if dst.exists() and src.resolve() == dst.resolve():
+        return True
+    try:
+        shutil.copy2(src, dst)
+        dst.chmod(0o755)
+        _ok(f'smd installed to {dst}')
+    except PermissionError:
+        r = _run(['cp', str(src), str(dst)], sudo=True)
+        if r.returncode != 0:
+            _err(f'could not install smd to {dst}')
+            return False
+        _run(['chmod', '755', str(dst)], sudo=True)
+        _ok(f'smd installed to {dst}')
+    return True
+
+
+def _install_wrapper_scripts(client_dir: Path) -> None:
+    sbin = Path('/usr/local/sbin')
+    scripts = ['wd-ka9q-record', 'wd-kiwi-record', 'wd-kiwi-cleanup',
+               'wd-spool-clean', 'wd-decode', 'wd-post',
+               'wd-upload-wsprnet', 'wd-upload-wsprdaemon', 'wd-ctl']
+    installed = []
+    for name in scripts:
+        src = client_dir / 'bin' / name
+        if not src.exists():
+            continue
+        dst = sbin / name
+        if dst.exists() and src.resolve() == dst.resolve():
+            continue
+        r = _run(['cp', str(src), str(dst)], sudo=True)
+        if r.returncode == 0:
+            _run(['chmod', '755', str(dst)], sudo=True)
+            installed.append(name)
+    if installed:
+        _ok(f'scripts: {len(installed)} installed to {sbin}/')
+    else:
+        _ok('scripts: all already current')
+
+
+def _install_wdlib(client_dir: Path) -> None:
+    opt_lib = Path('/opt/wsprdaemon/lib')
+    _run(['mkdir', '-p', str(opt_lib)], sudo=True)
+    wdlib_src = client_dir / 'lib' / 'wdlib'
+    wdlib_dst = opt_lib / 'wdlib'
+    if not wdlib_src.is_dir():
+        return
+    if wdlib_dst.is_symlink():
+        target = wdlib_dst.resolve()
+        if target == wdlib_src.resolve():
+            return
+        _run(['rm', str(wdlib_dst)], sudo=True)
+    elif wdlib_dst.exists():
+        _run(['rm', '-rf', str(wdlib_dst)], sudo=True)
+    _run(['ln', '-s', str(wdlib_src), str(wdlib_dst)], sudo=True)
+    _ok('wdlib: symlinked into /opt/wsprdaemon/lib/')
+
+
+def _run_wd_ctl_apply(client_dir: Path, dry_run: bool) -> bool:
+    wd_ctl = Path('/usr/local/sbin/wd-ctl')
+    if not wd_ctl.exists():
+        wd_ctl = client_dir / 'bin' / 'wd-ctl'
+    if not wd_ctl.exists():
+        _err('wd-ctl not found — cannot generate env files and start services')
+        return False
+    cmd = [str(wd_ctl), 'apply']
+    if dry_run:
+        _info('dry-run: would run: sudo ' + ' '.join(cmd))
+        return True
+    _info('Running wd-ctl apply ...')
+    r = _run(cmd, capture=False, sudo=True)
+    return r.returncode == 0
+
+
+def _ensure_sigmond_dirs() -> None:
+    for d in [SIGMOND_CONF, SIGMOND_LOG]:
+        _run(['mkdir', '-p', str(d)], sudo=True)
+
+
+# ---------------------------------------------------------------------------
+# smd install
+# ---------------------------------------------------------------------------
+
+def cmd_install(args) -> int:
+    if _need_root('install'):
+        return 1
+
+    print(BANNER)
+    topology = _load_topology(
+        Path(args.topology) if args.topology else TOPOLOGY_PATH,
+        client_dir_override=args.client_dir,
+    )
+    client_dir = topology['client_dir']
+    smd_bin    = topology['smd_bin']
+
+    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    components = _enabled_components(topology, only)
+
+    if not components:
+        print('No components enabled — check topology.toml.')
+        return 1
+
+    print(f'Installing components: {", ".join(components)}')
+    print(f'wsprdaemon-client:     {client_dir}')
+    if args.dry_run:
+        print('(dry-run mode — no changes will be made)\n')
+
+    _ensure_sigmond_dirs()
+    errors = 0
+
+    # --- 1. Install smd itself ---
+    _heading('Sigmond')
+    sigmond_dir = Path(__file__).resolve().parent.parent
+    if not args.dry_run:
+        _install_smd_itself(sigmond_dir, smd_bin)
+
+    # --- 2. Dependencies ---
+    dcfg = _load_deps_conf(client_dir)
+    if dcfg is None:
+        return 1
+
+    venv_dir = Path('/opt/wsprdaemon/venv')
+    if not args.dry_run and not _ensure_venv(venv_dir):
+        return 1
+
+    needed_deps = _collect_deps_for_components(components)
+    if needed_deps:
+        _heading('Dependencies')
+        for dep in needed_deps:
+            if dep not in dcfg.sections():
+                _warn(f'{dep}: not in deps.conf, skipping')
+                continue
+            dep_type = dcfg.get(dep, 'type', fallback='').strip()
+            if args.dry_run:
+                _info(f'would install [{dep}] ({dep_type})')
+                continue
+            if dep_type == 'git':
+                if not _install_git_dep(dep, dcfg):
+                    errors += 1
+                # Build step if this dep needs one
+                if dep in BUILD_STEPS:
+                    src_dir = Path(dcfg.get(dep, 'install_to', fallback=''))
+                    fn_name = BUILD_STEPS[dep]
+                    fn = globals()[fn_name]
+                    if src_dir.exists() and not fn(src_dir):
+                        errors += 1
+            elif dep_type == 'pypi':
+                if not _install_pypi_dep(dep, dcfg, venv_dir):
+                    errors += 1
+
+    # --- 3. Scripts, wdlib, systemd units ---
+    _heading('wsprdaemon-client')
+    if not args.dry_run:
+        _install_wdlib(client_dir)
+        _install_wrapper_scripts(client_dir)
+        _install_systemd_units(client_dir)
+    else:
+        _info('would install wdlib, scripts, and systemd units')
+
+    # --- 4. Service configuration and start (wd-ctl apply) ---
+    _heading('Services')
+    if 'wspr' in components or 'radiod' in components:
+        if not _run_wd_ctl_apply(client_dir, args.dry_run):
+            _warn('wd-ctl apply reported errors — check output above')
+            errors += 1
+
+    # --- 5. grape status check (hf-timestd manages itself) ---
+    if 'grape' in components and not args.dry_run:
+        _heading('GRAPE / hf-timestd')
+        r = _run(['systemctl', 'is-active', 'timestd-core-recorder.service'])
+        if r.returncode == 0:
+            _ok('timestd-core-recorder: running')
+        else:
+            _warn('timestd-core-recorder: not running  (hf-timestd manages its own install)')
+
+    # --- Summary ---
+    print()
+    if errors:
+        print(f'\033[31msmd install completed with {errors} error(s).\033[0m')
+        return 1
+    print(f'\033[32msmd install complete.\033[0m  Run \033[1msmd status\033[0m to verify.')
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# smd apply
+# ---------------------------------------------------------------------------
+
+def cmd_apply(args) -> int:
+    if _need_root('apply'):
+        return 1
+    topology = _load_topology(
+        Path(args.topology) if args.topology else TOPOLOGY_PATH,
+    )
+    _heading('apply')
+    ok = _run_wd_ctl_apply(topology['client_dir'], getattr(args, 'dry_run', False))
+    return 0 if ok else 1
+
+
+# ---------------------------------------------------------------------------
+# smd start / stop
+# ---------------------------------------------------------------------------
+
+def _service_target_for_components(components: list) -> list:
+    """Return systemd targets/services to start/stop for the given components."""
+    units = []
+    if any(c in components for c in ('wspr', 'radiod', 'ka9q-web', 'rac')):
+        units.append('wsprdaemon.target')
+    if 'grape' in components:
+        units.append('timestd-core-recorder.service')
+        units.append('grape-daily.timer')
+    return units
+
+
+def cmd_start(args) -> int:
+    if _need_root('start'):
+        return 1
+    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    components = _enabled_components(topology, only)
+    units = _service_target_for_components(components)
+    _heading('start')
+    for unit in units:
+        r = _run(['systemctl', 'start', unit], sudo=True)
+        if r.returncode == 0:
+            _ok(f'{unit}')
+        else:
+            _err(f'{unit}: {r.stderr.strip()}')
+    return 0
+
+
+def cmd_stop(args) -> int:
+    if _need_root('stop'):
+        return 1
+    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    components = _enabled_components(topology, only)
+    units = _service_target_for_components(components)
+    _heading('stop')
+    for unit in reversed(units):
+        r = _run(['systemctl', 'stop', unit], sudo=True)
+        if r.returncode == 0:
+            _ok(f'{unit}')
+        else:
+            _err(f'{unit}: {r.stderr.strip()}')
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# smd status
+# ---------------------------------------------------------------------------
+
+_STATUS_SERVICES = {
+    'radiod':   ['radiod@*.service'],
+    'wspr':     ['wd-decode@*.service', 'wd-post@*.service',
+                 'wd-upload-wsprnet@*.service', 'wd-upload-wsprdaemon@*.service'],
+    'ka9q-web': ['wd-ka9q-web@*.service'],
+    'grape':    ['timestd-core-recorder.service', 'grape-daily.timer'],
+    'rac':      ['frpc@*.service'],
+}
+
+
+def cmd_status(args) -> int:
+    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    components = _enabled_components(topology, only)
+
+    _heading('status')
+    any_bad = False
+
+    for comp in components:
+        patterns = _STATUS_SERVICES.get(comp, [])
+        print(f'\n  {comp}:')
+        if not patterns:
+            _info('(no managed services)')
+            continue
+        # Expand globs via systemctl list-units
+        r = _run(['systemctl', 'list-units', '--no-legend', '--no-pager',
+                  '--all', '--output=json'] + patterns)
+        if r.returncode != 0:
+            # Fallback: check each pattern with is-active
+            for pat in patterns:
+                r2 = _run(['systemctl', 'is-active', pat])
+                state = r2.stdout.strip() or 'unknown'
+                sym = '✓' if state == 'active' else '✗'
+                color = '\033[32m' if state == 'active' else '\033[31m'
+                print(f'    {color}{sym}\033[0m  {pat}: {state}')
+            continue
+
+        import json as _json
+        try:
+            units = _json.loads(r.stdout)
+        except Exception:
+            units = []
+
+        if not units:
+            _info('(no instances running)')
+            continue
+
+        for u in units:
+            name   = u.get('unit', u.get('name', '?'))
+            active = u.get('active', u.get('activestate', '?'))
+            sub    = u.get('sub', u.get('substate', ''))
+            state  = f'{active}({sub})' if sub and sub != active else active
+            color  = '\033[32m' if active == 'active' else '\033[31m'
+            sym    = '✓' if active == 'active' else '✗'
+            print(f'    {color}{sym}\033[0m  {name}: {state}')
+            if active not in ('active', 'inactive'):
+                any_bad = True
+
+    print()
+    return 1 if any_bad else 0
+
+
+# ---------------------------------------------------------------------------
+# smd update
+# ---------------------------------------------------------------------------
+
+def cmd_update(args) -> int:
+    if _need_root('update'):
+        return 1
+    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    client_dir = topology['client_dir']
+
+    _heading('update')
+    _info(f'Pulling wsprdaemon-client ({client_dir}) ...')
+    r = _run(['git', '-C', str(client_dir), 'pull'], capture=False)
+    if r.returncode != 0:
+        _err('git pull failed')
+        return 1
+
+    # Re-run install to pick up any changed deps / units / scripts
+    args.client_dir  = None
+    args.components  = None
+    args.dry_run     = False
+    args.topology    = getattr(args, 'topology', None)
+    return cmd_install(args)
+
+
+# ---------------------------------------------------------------------------
+# smd diag
+# ---------------------------------------------------------------------------
+
+def cmd_diag(args) -> int:
+    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    client_dir = topology['client_dir']
+
+    _heading('diagnostics')
+    errors = 0
+
+    # Network
+    for host in ['wsprnet.org', 'graphs.wsprdaemon.org', 'logs.wsprdaemon.org']:
+        r = _run(['ping', '-c1', '-W2', host])
+        if r.returncode == 0:
+            _ok(f'network: {host} reachable')
+        else:
+            _warn(f'network: {host} unreachable')
+
+    # Deps commit check
+    dcfg = _load_deps_conf(client_dir)
+    if dcfg:
+        print()
+        _info('Dependency versions:')
+        for dep in dcfg.sections():
+            dep_type   = dcfg.get(dep, 'type', fallback='').strip()
+            pinned     = dcfg.get(dep, 'commit', fallback='').strip()
+            install_to = dcfg.get(dep, 'install_to', fallback='').strip()
+            if dep_type == 'git' and install_to:
+                r = _run(['git', '-c', f'safe.directory={install_to}',
+                          '-C', install_to, 'rev-parse', 'HEAD'])
+                current = r.stdout.strip()
+                if r.returncode != 0 or not current:
+                    _warn(f'{dep}: not installed at {install_to}')
+                    errors += 1
+                elif current.startswith(pinned[:12]):
+                    _ok(f'{dep}: {current[:12]}')
+                else:
+                    _warn(f'{dep}: have {current[:12]}, want {pinned[:12]}')
+                    errors += 1
+
+    # Service health
+    print()
+    cmd_status(args)
+
+    print()
+    if errors:
+        print(f'\033[33mdiag: {errors} issue(s) found\033[0m')
+    else:
+        print('\033[32mdiag: all checks passed\033[0m')
+    return 0 if not errors else 1
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog='smd',
+        description='Sigmond — HamSCI suite installer and lifecycle manager',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent('''\
+            commands:
+              install   install and configure all enabled components
+              apply     reconcile running services with current config
+              start     start all managed services
+              stop      stop all managed services
+              status    show service health
+              update    pull latest code and re-apply
+              diag      run diagnostics
+        '''),
+    )
+    parser.add_argument('--topology', metavar='FILE',
+                        help=f'topology file (default: {TOPOLOGY_PATH})')
+    sub = parser.add_subparsers(dest='command')
+
+    # install
+    p = sub.add_parser('install', help='install and configure components')
+    p.add_argument('--components', metavar='C1,C2',
+                   help='comma-separated subset (default: all enabled in topology)')
+    p.add_argument('--client-dir', metavar='DIR',
+                   help='path to wsprdaemon-client (overrides topology)')
+    p.add_argument('--dry-run', action='store_true',
+                   help='show what would be done without making changes')
+
+    # apply
+    p = sub.add_parser('apply', help='reconcile services with current config')
+    p.add_argument('--dry-run', action='store_true')
+
+    # start
+    p = sub.add_parser('start', help='start managed services')
+    p.add_argument('--components', metavar='C1,C2')
+
+    # stop
+    p = sub.add_parser('stop', help='stop managed services')
+    p.add_argument('--components', metavar='C1,C2')
+
+    # status
+    p = sub.add_parser('status', help='show service health')
+    p.add_argument('--components', metavar='C1,C2')
+
+    # update
+    sub.add_parser('update', help='pull latest code and re-apply')
+
+    # diag
+    p = sub.add_parser('diag', help='run cross-component diagnostics')
+    p.add_argument('--components', metavar='C1,C2')
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        return 0
+
+    dispatch = {
+        'install': cmd_install,
+        'apply':   cmd_apply,
+        'start':   cmd_start,
+        'stop':    cmd_stop,
+        'status':  cmd_status,
+        'update':  cmd_update,
+        'diag':    cmd_diag,
+    }
+    return dispatch[args.command](args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,39 @@
+# /etc/sigmond/topology.toml
+# Sigmond topology registry — edit and copy to /etc/sigmond/topology.toml
+#
+# Each [component.*] section controls whether smd installs and manages
+# that component.  Set enabled = false to skip a component entirely.
+
+[sigmond]
+# Absolute path to the wsprdaemon-client source tree.
+# This is where deps.conf, bin/, systemd/, and lib/ live.
+wsprdaemon_client = "/home/wsprdaemon/wsprdaemon-client"
+
+# Where to install smd itself (must be in PATH)
+smd_bin = "/usr/local/sbin/smd"
+
+[component.radiod]
+enabled = true
+description = "ka9q-radio SDR daemon — receives and multicasts RF channels"
+# managed = true means smd start/stop will control it
+managed = true
+
+[component.wspr]
+enabled = true
+description = "WSPR/FST4W decoder, poster, and uploader"
+# Requires radiod or a Kiwi SDR source
+
+[component.ka9q-web]
+enabled = true
+description = "ka9q-web radiod status web UI"
+
+[component.grape]
+enabled = true
+description = "GRAPE HF time-standard IQ recording (hf-timestd)"
+# hf-timestd manages its own systemd units via its own deploy mechanism.
+# smd install will verify the service is running but does not install hf-timestd.
+managed = false
+
+[component.rac]
+enabled = false
+description = "Remote access channel (frpc reverse tunnel)"
