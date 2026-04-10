@@ -1,0 +1,94 @@
+# /etc/sigmond/coordination.toml — example
+#
+# This is sigmond's cross-client coordination config.  It is the
+# authoritative source for everything that no single HamSCI client owns:
+# station identity, the named radiod instances on this LAN, CPU budgets
+# on the local host, and the registry of client instances bound to
+# those radiods.
+#
+# Each client remains runnable in isolation using only its own native
+# config file.  This file is what lets sigmond point multiple clients
+# at the right radiod(s) and enforce station-wide invariants.
+
+[host]
+call = "AI6VN"
+grid = "CM88mc"
+lat  = 37.50
+lon  = -122.25
+
+# ---------------------------------------------------------------------------
+# Radiod instances.
+#
+# Each [radiod."<id>"] entry declares one ka9q-radio instance that
+# sigmond clients may bind to.  The id (the quoted key) is the stable
+# handle; status_dns/samprate/cores are looked up by clients via
+# /etc/sigmond/coordination.env.
+#
+# host = "localhost" means the instance runs on this machine and sigmond
+# manages its build, CPU affinity, and systemd unit.  Any other host is
+# treated as a remote peer on the LAN: sigmond still publishes its facts
+# into coordination.env so local clients can reach it, but does not
+# install or tune it.
+# ---------------------------------------------------------------------------
+
+[radiod."k3lr-rx888"]
+host        = "localhost"
+status_dns  = "k3lr-rx888-status.local"
+samprate_hz = 64800000
+cores       = "0-1"
+radio_conf  = "/etc/radio/radiod@k3lr-rx888.conf"
+
+# Example of a remote radiod elsewhere on the LAN.  Uncomment to use.
+# [radiod."shack-airspy"]
+# host        = "shack.local"
+# status_dns  = "airspy-status.local"
+# samprate_hz = 10000000
+
+# ---------------------------------------------------------------------------
+# Local CPU budget.  Describes this host only; per-radiod core claims
+# live in each [radiod."<id>"] cores field above.
+# ---------------------------------------------------------------------------
+
+[cpu]
+suite_cores           = "0-11"
+worker_cores          = "2-11"
+reserved_cpus         = ""
+owns_timestd_affinity = true
+
+# ---------------------------------------------------------------------------
+# Client instance registry.
+#
+# Each [[clients.<type>]] entry is one instance.  The instance name
+# becomes the systemd unit %i (e.g. hf-timestd@rx888-a.service).  Multi-
+# instance of the same client type is just multiple entries.
+# ---------------------------------------------------------------------------
+
+[[clients.wspr]]
+instance = "default"
+# wsprdaemon-client's per-receiver radiod references live in its own
+# wsprdaemon.conf [receiver:*] sections.
+
+[[clients.hf-timestd]]
+instance         = "default"
+radiod_id        = "k3lr-rx888"
+timing_authority = "rtp"
+physics_enabled  = false
+
+[[clients.ka9q-web]]
+instance  = "k3lr-rx888"
+radiod_id = "k3lr-rx888"
+port      = 8081
+
+# [[clients.rac]]
+# instance = "default"
+# enabled  = true
+# channel  = 117
+# server   = "remote.wsprdaemon.org"
+
+# [[clients.psk-recorder]]
+# instance  = "rx888-psk"
+# radiod_id = "k3lr-rx888"
+
+[disk_budget]
+root_path    = "/var"
+warn_percent = 80

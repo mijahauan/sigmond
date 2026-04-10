@@ -26,6 +26,23 @@ import textwrap
 import time
 from pathlib import Path
 
+# Bootstrap: add sibling lib/ to sys.path so `import sigmond` works when
+# running from the repo, from /usr/local/sbin/smd, or from a symlink.
+_SCRIPT = Path(__file__).resolve()
+for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
+                   Path('/opt/sigmond/lib'),             # installed layout
+                   Path('/usr/local/lib/sigmond')):      # alt installed
+    if (_candidate / 'sigmond' / '__init__.py').exists():
+        sys.path.insert(0, str(_candidate))
+        break
+
+try:
+    from sigmond.commands.validate import cmd_validate
+    from sigmond.commands.config   import cmd_config_show, cmd_config_migrate
+    _HAS_SIGMOND_LIB = True
+except ImportError:
+    _HAS_SIGMOND_LIB = False
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -843,6 +860,32 @@ def main() -> int:
     p = sub.add_parser('diag', help='run cross-component diagnostics')
     p.add_argument('--components', metavar='C1,C2')
 
+    # validate (Phase 1)
+    p = sub.add_parser('validate',
+                       help='run cross-client harmonization rules (read-only)')
+    p.add_argument('--json', action='store_true',
+                   help='emit machine-readable JSON')
+
+    # config (Phase 1)
+    p_config = sub.add_parser('config',
+                              help='inspect or migrate sigmond coordination config')
+    config_sub = p_config.add_subparsers(dest='config_command')
+
+    p = config_sub.add_parser('show',
+                              help='dump effective coordination + client view')
+    p.add_argument('--json', action='store_true')
+
+    p = config_sub.add_parser('migrate',
+                              help='extract coordination.toml from wsprdaemon.conf')
+    p.add_argument('--from', dest='from_', metavar='FILE',
+                   help='source wsprdaemon.conf (default: /etc/wsprdaemon/wsprdaemon.conf)')
+    p.add_argument('--to', metavar='FILE',
+                   help='destination coordination.toml (default: /etc/sigmond/coordination.toml)')
+    p.add_argument('--write', action='store_true',
+                   help='write the migrated file (otherwise print to stdout)')
+    p.add_argument('--force', action='store_true',
+                   help='overwrite target even if it already exists')
+
     args = parser.parse_args()
     if not args.command:
         print(BANNER)
@@ -858,6 +901,23 @@ def main() -> int:
         'update':  cmd_update,
         'diag':    cmd_diag,
     }
+
+    if args.command in ('validate', 'config'):
+        if not _HAS_SIGMOND_LIB:
+            print('smd: sigmond library not found; install lib/sigmond alongside bin/smd',
+                  file=sys.stderr)
+            return 1
+        if args.command == 'validate':
+            return cmd_validate(args)
+        # config
+        sub_cmd = getattr(args, 'config_command', None)
+        if sub_cmd == 'show':
+            return cmd_config_show(args)
+        if sub_cmd == 'migrate':
+            return cmd_config_migrate(args)
+        p_config.print_help()
+        return 0
+
     return dispatch[args.command](args)
 
 
