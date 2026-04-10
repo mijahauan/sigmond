@@ -369,39 +369,44 @@ def _collect_deps_for_components(components: list) -> list:
 def _install_systemd_units(client_dir: Path) -> int:
     unit_src = client_dir / 'systemd'
     unit_dst = Path('/etc/systemd/system')
-    installed = []
+    linked = []
     for pat in ('*.service', '*.target', '*.timer'):
         for f in unit_src.glob(pat):
+            src = f.resolve()
             dst = unit_dst / f.name
-            shutil.copy2(f, dst)
-            installed.append(f.name)
-    if installed:
+            if dst.is_symlink() and dst.resolve() == src:
+                continue
+            r = _run(['ln', '-sf', str(src), str(dst)], sudo=True)
+            if r.returncode == 0:
+                linked.append(f.name)
+            else:
+                _err(f'could not symlink {f.name}: {r.stderr.strip()}')
+    if linked:
         _run(['systemctl', 'daemon-reload'], sudo=True)
-        _ok(f'systemd units: {len(installed)} installed')
+        _ok(f'systemd units: {len(linked)} symlinked')
     else:
-        _ok('systemd units: none found in source tree')
-    return len(installed)
+        _ok('systemd units: all symlinks already current')
+    return len(linked)
+
+
+def _symlink(src: Path, dst: Path, label: str) -> bool:
+    """Create or update a symlink dst → src.  Uses sudo if needed."""
+    src = src.resolve()
+    if dst.is_symlink() and dst.resolve() == src:
+        return True   # already correct
+    r = _run(['ln', '-sf', str(src), str(dst)], sudo=True)
+    if r.returncode != 0:
+        _err(f'could not symlink {dst}: {r.stderr.strip()}')
+        return False
+    _ok(f'{label}: {dst} → {src}')
+    return True
 
 
 def _install_smd_itself(sigmond_dir: Path, smd_bin: Path) -> bool:
     src = sigmond_dir / 'bin' / 'smd'
     if not src.exists():
         return True  # running from installed location already
-    dst = smd_bin
-    if dst.exists() and src.resolve() == dst.resolve():
-        return True
-    try:
-        shutil.copy2(src, dst)
-        dst.chmod(0o755)
-        _ok(f'smd installed to {dst}')
-    except PermissionError:
-        r = _run(['cp', str(src), str(dst)], sudo=True)
-        if r.returncode != 0:
-            _err(f'could not install smd to {dst}')
-            return False
-        _run(['chmod', '755', str(dst)], sudo=True)
-        _ok(f'smd installed to {dst}')
-    return True
+    return _symlink(src, smd_bin, 'smd')
 
 
 def _install_wrapper_scripts(client_dir: Path) -> None:
@@ -409,22 +414,23 @@ def _install_wrapper_scripts(client_dir: Path) -> None:
     scripts = ['wd-ka9q-record', 'wd-kiwi-record', 'wd-kiwi-cleanup',
                'wd-spool-clean', 'wd-decode', 'wd-post',
                'wd-upload-wsprnet', 'wd-upload-wsprdaemon', 'wd-ctl']
-    installed = []
+    linked = []
     for name in scripts:
         src = client_dir / 'bin' / name
         if not src.exists():
             continue
         dst = sbin / name
-        if dst.exists() and src.resolve() == dst.resolve():
+        if dst.is_symlink() and dst.resolve() == src.resolve():
             continue
-        r = _run(['cp', str(src), str(dst)], sudo=True)
+        r = _run(['ln', '-sf', str(src.resolve()), str(dst)], sudo=True)
         if r.returncode == 0:
-            _run(['chmod', '755', str(dst)], sudo=True)
-            installed.append(name)
-    if installed:
-        _ok(f'scripts: {len(installed)} installed to {sbin}/')
+            linked.append(name)
+        else:
+            _err(f'could not symlink {name}: {r.stderr.strip()}')
+    if linked:
+        _ok(f'scripts: {len(linked)} symlinked in {sbin}/')
     else:
-        _ok('scripts: all already current')
+        _ok('scripts: all symlinks already current')
 
 
 def _install_wdlib(client_dir: Path) -> None:
