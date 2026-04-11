@@ -1,0 +1,50 @@
+{
+  "client": "hf-timestd",
+  "version": "7.0.0",
+  "git": {
+    "sha": "96beda99f5c6b9e2ab452444825001c5d3320e95",
+    "short": "96beda9",
+    "ref": "main",
+    "dirty": false,
+    "source": "/opt/git/hf-timestd/src/hf_timestd"
+  },
+  "contract_version": "0.2",
+  "config_path": "/etc/hf-timestd/timestd-config.toml",
+  "instances": [
+    {
+      "instance": "default",
+      "radiod_id": null,
+      "host": "localhost",
+      "required_cores": [],
+      "preferred_cores": "worker",
+      "frequencies_hz": [
+        2500000,
+        5000000,
+        10000000,
+        15000000,
+        20000000,
+        25000000,
+        3330000,
+        7850000,
+        14670000
+      ],
+      "ka9q_channels": 9,
+      "data_destination": "239.45.120.115",
+      "disk_writes": [
+        {
+          "path": "/var/lib/timestd",
+          "mb_per_day": 0.0,
+          "retention_days": 0
+        }
+      ],
+      "uses_timing_calibration": false,
+      "provides_timing_calibration": true,
+      "radiod_status_dns": "bee3-status.local"
+    }
+  ],
+  "deps": {
+    "git": [],
+    "pypi": []
+  },
+  "issues": []
+}

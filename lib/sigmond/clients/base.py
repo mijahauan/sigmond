@@ -30,6 +30,8 @@ class InstanceView:
     disk_writes:                list = field(default_factory=list)    # list[DiskWrite]
     uses_timing_calibration:    bool = False
     provides_timing_calibration: bool = False
+    data_destination:           Optional[str] = None                  # v0.2 §7
+    chain_delay_ns_applied:     Optional[int] = None                  # v0.2 §8
     # radiod-only metadata: populated by RadiodAdapter, ignored elsewhere.
     radiod_samprate_hz:         int = 0
     radiod_status_dns:          str = ""
@@ -38,11 +40,12 @@ class InstanceView:
 
 @dataclass
 class ClientView:
-    client_type: str
-    installed:   bool = False
-    config_path: Optional[Path] = None
-    instances:   list = field(default_factory=list)                   # list[InstanceView]
-    issues:      list = field(default_factory=list)                   # list[str]
+    client_type:      str
+    installed:        bool = False
+    config_path:      Optional[Path] = None
+    contract_version: Optional[str] = None                            # v0.2 added
+    instances:        list = field(default_factory=list)              # list[InstanceView]
+    issues:           list = field(default_factory=list)              # list[str]
 
 
 class ClientAdapter:

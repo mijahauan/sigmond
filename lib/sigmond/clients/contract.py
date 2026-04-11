@@ -23,6 +23,9 @@ from typing import Optional
 from .base import ClientAdapter, ClientView, DiskWrite, InstanceView
 
 
+SUPPORTED_CONTRACT_VERSION = "0.2"
+
+
 class ContractAdapter(ClientAdapter):
     """Default adapter for any contract-conformant client."""
 
@@ -75,6 +78,16 @@ class ContractAdapter(ClientAdapter):
         if cfg_path:
             view.config_path = Path(cfg_path)
 
+        version = data.get('contract_version')
+        if version:
+            view.contract_version = str(version)
+            if view.contract_version != SUPPORTED_CONTRACT_VERSION:
+                view.issues.append(
+                    f"contract_version mismatch: client reports "
+                    f"{view.contract_version}, sigmond supports "
+                    f"{SUPPORTED_CONTRACT_VERSION}"
+                )
+
         for raw in (data.get('instances') or []):
             view.instances.append(_instance_from_contract(raw))
 
@@ -118,6 +131,10 @@ def _instance_from_contract(raw: dict) -> InstanceView:
             mb_per_day=float(dw.get('mb_per_day') or 0.0),
             retention_days=int(dw.get('retention_days') or 0),
         ))
+    if raw.get('data_destination') is not None:
+        iv.data_destination = str(raw['data_destination'])
+    if raw.get('chain_delay_ns_applied') is not None:
+        iv.chain_delay_ns_applied = int(raw['chain_delay_ns_applied'])
     if 'radiod_status_dns' in raw:
         iv.radiod_status_dns = str(raw['radiod_status_dns'] or '')
     if 'radiod_samprate_hz' in raw:

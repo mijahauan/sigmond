@@ -1,7 +1,8 @@
 # HamSCI Client Contract
 
-**Version:** 0.2 (draft)
-**Status:** Draft for review.  v0.2 adds:
+**Version:** 0.2
+**Status:** Adopted. First full v0.2 implementation is `hf-timestd`
+v7.0.0 — see §9. v0.2 adds:
 
 - **§7 — deterministic data multicast destination.**  A single station
   running multiple peer clients (hf-timestd, wsprdaemon, psk-recorder,
@@ -75,21 +76,32 @@ Two subcommands are mandatory. Both emit JSON to stdout and exit 0 on
 success.
 
 **`<client> inventory --json`** — print the client's resource view per
-instance. Shape:
+instance. Shape (example is the live v0.2 output from `hf-timestd` on
+bee3, the reference implementation — see §9):
 
 ```json
 {
   "client": "hf-timestd",
-  "version": "6.12.0",
+  "version": "7.0.0",
+  "contract_version": "0.2",
+  "config_path": "/etc/hf-timestd/timestd-config.toml",
+  "git": {
+    "sha": "96beda99f5c6b9e2ab452444825001c5d3320e95",
+    "short": "96beda9",
+    "ref": "main",
+    "dirty": false
+  },
   "instances": [
     {
       "instance": "default",
-      "radiod_id": "k3lr-rx888",
+      "radiod_id": "bee3-rx888",
       "host": "localhost",
       "required_cores": [],
       "preferred_cores": "worker",
       "frequencies_hz": [2500000, 3330000, 5000000],
       "ka9q_channels": 9,
+      "data_destination": "239.45.120.115",
+      "radiod_status_dns": "bee3-status.local",
       "disk_writes": [
         {"path": "/var/lib/timestd", "mb_per_day": 14000, "retention_days": 7}
       ],
@@ -101,9 +113,16 @@ instance. Shape:
     "git": [
       {"name": "ka9q-python", "commit": "abc1234"}
     ]
-  }
+  },
+  "issues": []
 }
 ```
+
+`contract_version` is the version of this document the client was built
+against. Sigmond compares it to its own supported version and warns on
+mismatch (see Migration and versioning, below). `git` is optional but
+recommended — it lets `smd diag` answer "what's running?" without
+shelling into the client.
 
 **`<client> validate --json`** — self-validate every instance's config.
 Shape:
@@ -119,6 +138,17 @@ Shape:
 
 These are the only hooks sigmond relies on to learn about a client.
 Sigmond shells them out as subprocesses — it never imports client code.
+
+**Stdout cleanliness — hard requirement.** Both subcommands must emit
+**only** the JSON document to stdout. No banners, no "Logging
+configured" lines, no progress dots. Any human-readable text — warnings,
+info messages, banner — must go to stderr. Clients that initialize a
+logger at import time need an explicit guard in `main()` (or equivalent)
+that redirects the root logger to stderr before parsing args, so the
+routine "Logging configured" line never lands in the JSON pipe. A
+malformed first byte on stdout makes the whole inventory unparseable for
+sigmond's `ContractAdapter`; this was the failure mode that prompted
+adding the guard to `hf-timestd` in commit `339dec4`.
 
 ### 4. Systemd units
 
@@ -266,11 +296,26 @@ Including `station_id` and `instrument_id` in the id ensures that the
 same client type running on two hosts, or two instruments on the same
 host, still lands on distinct groups.
 
-**Override.**  Clients MUST honor an explicit override in their native
-config if present, so operators can resolve collisions without a code
-change.  For hf-timestd the key is `[ka9q] data_destination = "239.x.y.z"`;
-other clients SHOULD use the equivalent key in their own config
-dialect.
+**Override and resolution order.**  Clients MUST honor an explicit
+override in their native config if present, so operators can resolve
+collisions without a code change.  The reference implementation in
+`hf-timestd` uses a three-step precedence that other clients SHOULD
+mirror:
+
+1. **Operator override** — `[ka9q] data_destination = "239.x.y.z"` in
+   the client's native config. Used to resolve hand-diagnosed
+   collisions. No other code path can override this.
+2. **Legacy key** — a pre-v0.2 config key (for hf-timestd this is
+   `[core] radiod_multicast_group`). Honored for rollback compatibility
+   for one contract release, then removed. New clients SHOULD skip this
+   step entirely.
+3. **Derived default** — `generate_multicast_ip("<client>:<station>:<instrument>")`.
+   This is what a blank install lands on.
+
+The resolved value is what the client passes to every
+`control.ensure_channel(destination=...)` call and what it reports in
+`inventory --json`. Do not resolve lazily per-channel — resolve once at
+startup and reuse, so `inventory` and runtime never diverge.
 
 **Sigmond side.**  Sigmond MUST NOT pre-allocate or override data
 multicast addresses on a client's behalf.  Sigmond MAY read each
@@ -402,6 +447,40 @@ lands, hf-timestd will apply the correction to its own channels only
 will be published to `inventory --json` unconditionally, and sigmond
 will warn but not fail if it sees a non-null `chain_delay_ns_applied`
 with no matching `RADIOD_*_CHAIN_DELAY_NS` in coordination.env.
+
+### 9. Reference implementation: hf-timestd v7.0.0
+
+`hf-timestd` at tag [`v7.0.0`](https://github.com/mijahauan/hf-timestd/releases/tag/v7.0.0)
+is the first full v0.2-conformant client. When in doubt about the
+shape of a subcommand, the wording of an error, or the precedence
+order for data-destination resolution, read hf-timestd's code — the
+contract follows what hf-timestd ships, not the other way round.
+
+Concrete pointers:
+
+- **`inventory` / `validate` subcommands** —
+  [cli.py](https://github.com/mijahauan/hf-timestd/blob/v7.0.0/src/hf_timestd/cli.py),
+  commit [`339dec4`](https://github.com/mijahauan/hf-timestd/commit/339dec4).
+  Note the stdout-cleanliness guard at the top of `main()`.
+- **§7 data-destination resolution** —
+  [`core_recorder_v2.__init__`](https://github.com/mijahauan/hf-timestd/blob/v7.0.0/src/hf_timestd/core/core_recorder_v2.py),
+  commit [`2b83793`](https://github.com/mijahauan/hf-timestd/commit/2b83793).
+  Implements the 3-step precedence above. The resolved address is
+  passed to every `StreamRecorderConfig(destination=...)` and to the
+  L6 BPSK PPS `ensure_channel()` call.
+- **`deploy.toml`** — at repo root; real worked example of `[build]`,
+  `[install.steps]`, `[systemd]`, and `[deps]`.
+- **§8 chain-delay hook** — hf-timestd is the *calibrator* for chain
+  delay, so its current code applies the correction only to its own
+  channels; the `RADIOD_<id>_CHAIN_DELAY_NS` *publish* side is the
+  sigmond Phase 4 work. A peer client (e.g. psk-recorder) reading the
+  env var is the simpler side and can be added today against any v0.2
+  client by imitating what's in §8's code snippet.
+
+If a retrofit or greenfield build uncovers a gap between the contract
+as written here and what hf-timestd ships, fix the contract — update
+this document and bump the version — rather than adding a
+per-client special case to sigmond's `ContractAdapter`.
 
 ## What sigmond promises in return
 
