@@ -10,7 +10,7 @@ The CLI entry point is **`smd`**.
 
 ## Authors
 
-- Rob Robinett (AI6VN) — wsprdaemon architect
+- Rob Robinett (AI6VN, GitHub: rrobinett) — wsprdaemon architect
 - Michael Hauan (AC0G, GitHub: mijahauan) — hf-timestd / ka9q-python / wspr-recorder /ka9q-update / psk-recorder author
 - Repo: https://github.com/mijahauan/sigmond
 
