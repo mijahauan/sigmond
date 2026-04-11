@@ -1,8 +1,20 @@
 # HamSCI Client Contract
 
-**Version:** 0.1 (draft — Phase 1)
-**Status:** Draft for review. Phase 2 retrofit of `hf-timestd` and
-`wsprdaemon-client` will drive the first round of revisions.
+**Version:** 0.2 (draft)
+**Status:** Draft for review.  v0.2 adds:
+
+- **§7 — deterministic data multicast destination.**  A single station
+  running multiple peer clients (hf-timestd, wsprdaemon, psk-recorder,
+  ka9q-web, future clients) must not collide on radiod's default data
+  multicast group.  The rule applies whether or not sigmond is
+  coordinating the station.
+- **§8 — radiod-scoped facts (BPSK PPS chain delay).**  Some corrections
+  are properties of the radiod instance, not of any individual client,
+  and must reach every client of that radiod.  First concrete case is
+  WB6CXC BPSK PPS chain-delay calibration measured by hf-timestd and
+  applied by every peer client.  Full implementation depends on sigmond
+  Phase 4, but the client-side hook is in the contract now so new
+  clients are born aware of it.
 
 ## What this is
 
@@ -208,6 +220,189 @@ rewrite.
 Clients are forbidden from speaking radiod's control protocol
 directly.
 
+### 7. Deterministic data multicast destination (v0.2)
+
+**Rule.** Every client that subscribes to radiod RTP data streams MUST
+request its own data multicast destination when creating channels, and
+MUST derive that destination deterministically from a per-client
+identifier.  Clients MUST NOT rely on radiod's default data multicast
+group for production.
+
+**Why this is in the contract and not left to coordination.**  A single
+station routinely runs several peer clients (hf-timestd, wsprdaemon,
+psk-recorder, ka9q-web, future clients) without sigmond present.  If
+each client leaves `destination` unset, every client lands on radiod's
+configured default group (one multicast address, 5004/udp) and every
+client's socket sees every other client's RTP packets.  The kernel
+fans each packet out to every joined socket, every client's decoder
+wakes up to SSRC-filter it, and jitter rises well before CPU does.
+By making each client's destination a property of the client identity,
+standalone installs are automatically non-overlapping and sigmond never
+has to mediate address allocation.
+
+**Derivation.**  Use `ka9q.generate_multicast_ip(unique_id)` with a
+`unique_id` of shape `"<client-name>:<station_id>:<instrument_id>"`.
+The helper is part of `ka9q-python`'s public API:
+
+```python
+from ka9q import generate_multicast_ip
+
+client_id    = f"{CLIENT_NAME}:{station_id}:{instrument_id}"
+destination  = generate_multicast_ip(client_id)  # e.g. '239.7.245.164'
+
+channel_info = control.ensure_channel(
+    frequency_hz=freq,
+    preset="iq",
+    sample_rate=24000,
+    destination=destination,
+    ...
+)
+```
+
+`generate_multicast_ip()` hashes the id with SHA-256 and takes the
+first three bytes as the last three octets of `239.x.y.z` — pure
+function, zero-config, collision probability ≈ 1 / 16.7 M per pair.
+Including `station_id` and `instrument_id` in the id ensures that the
+same client type running on two hosts, or two instruments on the same
+host, still lands on distinct groups.
+
+**Override.**  Clients MUST honor an explicit override in their native
+config if present, so operators can resolve collisions without a code
+change.  For hf-timestd the key is `[ka9q] data_destination = "239.x.y.z"`;
+other clients SHOULD use the equivalent key in their own config
+dialect.
+
+**Sigmond side.**  Sigmond MUST NOT pre-allocate or override data
+multicast addresses on a client's behalf.  Sigmond MAY read each
+client's chosen destination from the `inventory --json` output (see
+below) and use it for diagnostics, routing, or collision detection.
+If sigmond detects two clients claiming the same address, that is a
+hard error surfaced through `smd diag` — sigmond does not silently
+reassign.
+
+**Inventory surface.**  Every instance entry in `<client> inventory --json`
+MUST include a `data_destination` field — the multicast IP the instance
+is currently configured to use — so that sigmond and operators can see
+the binding without running `ss`/`ipcs`.  For clients that expose
+multiple streams on distinct groups (rare), this MAY be an array; the
+common case is a scalar string.
+
+```json
+{
+  "instances": [
+    {
+      "instance": "default",
+      "radiod_id": "bee3-rx888",
+      "data_destination": "239.7.245.164",
+      "ka9q_channels": 9,
+      ...
+    }
+  ]
+}
+```
+
+**Standalone requirement — the hard rule.**  Running two peer clients
+on the same host with no sigmond present MUST NOT result in multicast
+collisions.  A new client type is contract-conformant only if a blank
+install with default configs on the same host as an existing conformant
+client produces two distinct multicast groups with no operator action.
+
+### 8. Radiod-scoped facts: BPSK PPS chain delay (v0.2)
+
+Some per-radiod facts do not belong to any one client but MUST reach
+every client that subscribes to that radiod.  The first of these is
+the BPSK PPS chain-delay correction measured by an hf-timestd instance
+running WB6CXC's injector hardware: it tells every consumer of that
+radiod's RTP streams how many nanoseconds to subtract from RTP-derived
+UTC to get a true GPS-disciplined timestamp.  That correction is a
+property of the *analog front-end + ADC + radiod pipeline*, not of
+any individual client, so every client of that radiod — wsprdaemon,
+psk-recorder, ka9q-web, a second hf-timestd instance in a different
+timing role — has to apply the same number.
+
+**Distribution.**  When sigmond is present, the authoritative source
+is `/etc/sigmond/coordination.env`:
+
+```
+RADIOD_BEE3_RX888_CHAIN_DELAY_NS=4250
+RADIOD_BEE3_RX888_CHAIN_DELAY_SOURCE=hf-timestd@bee3
+RADIOD_BEE3_RX888_CHAIN_DELAY_UPDATED=2026-04-11T07:24:31Z
+```
+
+The key format is `RADIOD_<id>_CHAIN_DELAY_NS`, matching sigmond's
+existing convention for per-radiod facts (see `RADIOD_<id>_STATUS`,
+`RADIOD_<id>_SAMPRATE`).  When the calibrating hf-timestd instance
+locks a new chain-delay value, it calls into sigmond via a hook
+(`smd radiod-fact set <id> chain_delay_ns <value>`, or equivalent
+write to coordination.env — mechanism TBD in sigmond Phase 4); sigmond
+rewrites coordination.env atomically and sends SIGHUP (or systemd
+reload) to every service whose unit file has
+`EnvironmentFile=-/etc/sigmond/coordination.env`.
+
+**Client-side requirement.**  Every client that reads RTP data from a
+radiod MUST, on startup and on reload, check for
+`RADIOD_<id>_CHAIN_DELAY_NS` in the environment and apply it to every
+sample-to-UTC conversion derived from that radiod.  Clients that do
+not do timing-critical work (e.g. ka9q-web's waterfall) MAY ignore it
+but MUST NOT propagate the raw RTP-derived UTC to downstream consumers
+without correction.  The application is a simple subtraction:
+
+```python
+utc_corrected = utc_raw - chain_delay_ns / 1e9
+```
+
+and this happens once, at the boundary between radiod-observed samples
+and whatever the client treats as "now".  Clients MUST surface the
+value they are currently applying in their `inventory --json` output
+as a new field:
+
+```json
+{
+  "instance": "default",
+  "radiod_id": "bee3-rx888",
+  "chain_delay_ns_applied": 4250,
+  ...
+}
+```
+
+A `null` or missing value means "no correction is being applied"
+(either sigmond has not published one, or the client is running
+standalone without the hook).  Sigmond's `smd diag` surfaces any
+mismatch across peer clients of the same radiod.
+
+**Standalone behaviour.**  Without sigmond, each client reads
+`chain_delay_ns` from its own config as a fallback:
+
+```toml
+[ka9q]
+radiod_id        = "bee3-rx888"
+radiod_status    = "bee3-status.local"
+chain_delay_ns   = 4250    # optional, overridden by coordination.env when sigmond is present
+```
+
+This preserves the standalone-safe property: an operator without
+sigmond can still apply a manually measured chain delay by setting it
+in their client config.
+
+**Why it belongs in the contract.**  Without this rule, the only
+client that knows about chain delay is the one running the calibrator
+— and that's the only client whose timestamps are correct.  Every
+other peer of that radiod silently reports timing that is offset by
+the chain delay.  Making the distribution part of the contract is
+the mechanism that lets hf-timestd measure the correction, publish
+it via sigmond, and have psk-recorder + wsprdaemon + any other client
+pick it up automatically.  The calibration is hf-timestd's
+responsibility; the *distribution* is sigmond's; the *application* is
+every peer client's.
+
+**Dependency note.**  §8 depends on sigmond Phase 4 (sigmond takes
+over cross-client write paths into coordination.env).  Until Phase 4
+lands, hf-timestd will apply the correction to its own channels only
+(current behaviour in `core_recorder_v2._l6_on_samples`), the field
+will be published to `inventory --json` unconditionally, and sigmond
+will warn but not fail if it sees a non-null `chain_delay_ns_applied`
+with no matching `RADIOD_*_CHAIN_DELAY_NS` in coordination.env.
+
 ## What sigmond promises in return
 
 - Never writes inside a client's native config file.
@@ -226,6 +421,14 @@ directly.
   sigmond's generic `contract.py` adapter. Sigmond will warn when a
   client's inventory output claims a newer version than the sigmond
   on the host supports.
+- **v0.1 → v0.2** added §7 (deterministic data multicast destination)
+  and the `data_destination` field in `inventory --json`.  v0.1 clients
+  still pass validation on a v0.2 sigmond; sigmond treats a missing
+  `data_destination` as a contract warning, not an error, for one
+  release.
 - Existing clients (`hf-timestd`, `wsprdaemon-client`) are being
-  retrofitted in Phase 2 of the sigmond plan. Expect 1-2 revisions
-  to this doc as the retrofit surfaces real issues.
+  retrofitted alongside the contract bump.  `hf-timestd` lands §7
+  compliance in the same cycle that retires its legacy v1 recorder
+  stack (`channel_recorder.py`), which was the source of the now-dead
+  `generate_timestd_multicast_ip` helper that partially implemented
+  this rule but was never reachable from the production V2 path.
