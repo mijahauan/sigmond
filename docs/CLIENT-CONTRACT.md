@@ -1,14 +1,36 @@
 # HamSCI Client Contract
 
-**Version:** 0.2
+**Version:** 0.3
 **Status:** Adopted. First full v0.2 implementation is `hf-timestd`
-v7.0.0 — see §9. v0.2 adds:
+v7.0.0 — see §9.  First greenfield v0.3 implementation is
+`psk-recorder` v0.1.0.  v0.3 adds:
 
-- **§7 — deterministic data multicast destination.**  A single station
-  running multiple peer clients (hf-timestd, wsprdaemon, psk-recorder,
-  ka9q-web, future clients) must not collide on radiod's default data
-  multicast group.  The rule applies whether or not sigmond is
-  coordinating the station.
+- **§7 revised — data multicast is now a `ka9q-python` concern.**
+  Clients MUST NOT pass `destination=` to `ensure_channel()`.
+  `ka9q-python` derives the multicast group deterministically and
+  returns the resolved address in `ChannelInfo`.  Clients read it for
+  `inventory --json` but never select it.  This simplifies every
+  client and eliminates the `generate_multicast_ip()` call-site
+  pattern from v0.2.  Operator overrides belong in radiod config, not
+  in client config.  The standalone collision-avoidance property is
+  preserved because `ka9q-python` still uses per-client-identity
+  derivation internally.
+- **§10 (new) — logging discipline and discovery.**  Clients MUST log
+  to stderr (systemd journal).  File logs, if any, live under
+  `/var/log/<client>/` and are surfaced in `inventory --json` via a
+  new `log_paths` object.
+- **§11 (new) — runtime log level controlled by sigmond.**  Sigmond
+  publishes `<CLIENT>_LOG_LEVEL` in `coordination.env`; clients honor
+  it on startup and on SIGHUP.  Enables `smd log --level=DEBUG <client>`
+  without config edits or restarts.
+
+Previous v0.2 additions (unchanged):
+
+- **§7 (original motivation) — deterministic data multicast destination.**
+  A single station running multiple peer clients must not collide on
+  radiod's default data multicast group.  The rule applies whether or
+  not sigmond is coordinating the station.  (v0.3 moves the derivation
+  from client code into `ka9q-python`; the requirement is preserved.)
 - **§8 — radiod-scoped facts (BPSK PPS chain delay).**  Some corrections
   are properties of the radiod instance, not of any individual client,
   and must reach every client of that radiod.  First concrete case is
@@ -250,87 +272,68 @@ rewrite.
 Clients are forbidden from speaking radiod's control protocol
 directly.
 
-### 7. Deterministic data multicast destination (v0.2)
+### 7. Deterministic data multicast destination (v0.2, revised v0.3)
 
 **Rule.** Every client that subscribes to radiod RTP data streams MUST
-request its own data multicast destination when creating channels, and
-MUST derive that destination deterministically from a per-client
-identifier.  Clients MUST NOT rely on radiod's default data multicast
-group for production.
+use `ka9q-python`'s `RadiodControl.ensure_channel()` for channel
+creation.  Clients MUST NOT pass a `destination=` argument to
+`ensure_channel()`.  `ka9q-python` derives the multicast destination
+deterministically and returns the resolved address in `ChannelInfo`.
+Clients read this value for `inventory --json` reporting but never
+select or compute it.
 
-**Why this is in the contract and not left to coordination.**  A single
-station routinely runs several peer clients (hf-timestd, wsprdaemon,
-psk-recorder, ka9q-web, future clients) without sigmond present.  If
-each client leaves `destination` unset, every client lands on radiod's
-configured default group (one multicast address, 5004/udp) and every
-client's socket sees every other client's RTP packets.  The kernel
-fans each packet out to every joined socket, every client's decoder
-wakes up to SSRC-filter it, and jitter rises well before CPU does.
-By making each client's destination a property of the client identity,
-standalone installs are automatically non-overlapping and sigmond never
-has to mediate address allocation.
+**Why this changed from v0.2.**  v0.2 required clients to call
+`generate_multicast_ip()` themselves and pass `destination=` on every
+`ensure_channel()` call.  This duplicated logic across every client,
+created a maintenance surface for the derivation formula, and required
+each client to carry station-id / instrument-id fields solely for
+multicast derivation.  Moving the derivation into `ka9q-python` means:
+(a) every client automatically gets the collision-avoidance property
+with zero per-client code, (b) the derivation formula can evolve in
+one place, and (c) clients without PSWS station identifiers (e.g.
+`psk-recorder`) work correctly without any special handling.
 
-**Derivation.**  Use `ka9q.generate_multicast_ip(unique_id)` with a
-`unique_id` of shape `"<client-name>:<station_id>:<instrument_id>"`.
-The helper is part of `ka9q-python`'s public API:
+**Motivation (unchanged from v0.2).**  A single station routinely runs
+several peer clients (hf-timestd, wsprdaemon, psk-recorder, ka9q-web,
+future clients) without sigmond present.  If every client lands on
+radiod's default data multicast group, the kernel fans each RTP packet
+to every joined socket, jitter rises, and decoding quality degrades.
+`ka9q-python` assigns per-client destinations that are automatically
+non-overlapping.  Sigmond never has to mediate address allocation.
+
+**Client code.**  Channel creation is a simple `ensure_channel()` call
+with no destination argument:
 
 ```python
-from ka9q import generate_multicast_ip
-
-client_id    = f"{CLIENT_NAME}:{station_id}:{instrument_id}"
-destination  = generate_multicast_ip(client_id)  # e.g. '239.7.245.164'
-
 channel_info = control.ensure_channel(
     frequency_hz=freq,
-    preset="iq",
-    sample_rate=24000,
-    destination=destination,
-    ...
+    preset="usb",
+    sample_rate=12000,
 )
+# ka9q-python allocated the destination; read it for inventory:
+resolved_destination = channel_info.destination
 ```
 
-`generate_multicast_ip()` hashes the id with SHA-256 and takes the
-first three bytes as the last three octets of `239.x.y.z` — pure
-function, zero-config, collision probability ≈ 1 / 16.7 M per pair.
-Including `station_id` and `instrument_id` in the id ensures that the
-same client type running on two hosts, or two instruments on the same
-host, still lands on distinct groups.
-
-**Override and resolution order.**  Clients MUST honor an explicit
-override in their native config if present, so operators can resolve
-collisions without a code change.  The reference implementation in
-`hf-timestd` uses a three-step precedence that other clients SHOULD
-mirror:
-
-1. **Operator override** — `[ka9q] data_destination = "239.x.y.z"` in
-   the client's native config. Used to resolve hand-diagnosed
-   collisions. No other code path can override this.
-2. **Legacy key** — a pre-v0.2 config key (for hf-timestd this is
-   `[core] radiod_multicast_group`). Honored for rollback compatibility
-   for one contract release, then removed. New clients SHOULD skip this
-   step entirely.
-3. **Derived default** — `generate_multicast_ip("<client>:<station>:<instrument>")`.
-   This is what a blank install lands on.
-
-The resolved value is what the client passes to every
-`control.ensure_channel(destination=...)` call and what it reports in
-`inventory --json`. Do not resolve lazily per-channel — resolve once at
-startup and reuse, so `inventory` and runtime never diverge.
+**Operator override.**  If an operator needs to force a specific
+multicast group (e.g. to resolve a rare collision), the override goes
+in radiod's config or in a `ka9q-python`-level configuration, NOT in
+the client's config.  Client configs SHOULD NOT contain a
+`data_destination` field.  Clients that previously implemented the
+v0.2 three-step override precedence (operator override → legacy key →
+derived default) SHOULD remove it when upgrading to v0.3 and delete
+any `data_destination` / `radiod_multicast_group` config keys.
 
 **Sigmond side.**  Sigmond MUST NOT pre-allocate or override data
 multicast addresses on a client's behalf.  Sigmond MAY read each
-client's chosen destination from the `inventory --json` output (see
-below) and use it for diagnostics, routing, or collision detection.
-If sigmond detects two clients claiming the same address, that is a
-hard error surfaced through `smd diag` — sigmond does not silently
-reassign.
+client's resolved destination from the `inventory --json` output and
+use it for diagnostics, routing, or collision detection.  If sigmond
+detects two clients claiming the same address, that is a hard error
+surfaced through `smd diag` — sigmond does not silently reassign.
 
 **Inventory surface.**  Every instance entry in `<client> inventory --json`
 MUST include a `data_destination` field — the multicast IP the instance
-is currently configured to use — so that sigmond and operators can see
-the binding without running `ss`/`ipcs`.  For clients that expose
-multiple streams on distinct groups (rare), this MAY be an array; the
-common case is a scalar string.
+is currently using, as reported by `ka9q-python` — so that sigmond and
+operators can see the binding without running `ss`/`ipcs`.
 
 ```json
 {
@@ -351,6 +354,14 @@ on the same host with no sigmond present MUST NOT result in multicast
 collisions.  A new client type is contract-conformant only if a blank
 install with default configs on the same host as an existing conformant
 client produces two distinct multicast groups with no operator action.
+This property is now guaranteed by `ka9q-python` rather than by
+per-client derivation code.
+
+**Migration from v0.2.**  `hf-timestd` v7.0.0 implements the v0.2
+pattern (client-side `generate_multicast_ip()` + `destination=`).  A
+follow-up release should remove that code and rely on `ka9q-python`
+once the library ships the internal derivation.  Until then, hf-timestd
+remains conformant — it just does more work than necessary.
 
 ### 8. Radiod-scoped facts: BPSK PPS chain delay (v0.2)
 
@@ -448,13 +459,122 @@ will be published to `inventory --json` unconditionally, and sigmond
 will warn but not fail if it sees a non-null `chain_delay_ns_applied`
 with no matching `RADIOD_*_CHAIN_DELAY_NS` in coordination.env.
 
-### 9. Reference implementation: hf-timestd v7.0.0
+### 10. Logging discipline and discovery (v0.3)
 
-`hf-timestd` at tag [`v7.0.0`](https://github.com/mijahauan/hf-timestd/releases/tag/v7.0.0)
-is the first full v0.2-conformant client. When in doubt about the
-shape of a subcommand, the wording of an error, or the precedence
-order for data-destination resolution, read hf-timestd's code — the
-contract follows what hf-timestd ships, not the other way round.
+Sigmond needs to locate a client's logs for diagnostics (`smd log`,
+`smd diag`) without guessing directory layouts.  This section
+standardizes where clients log and how they tell sigmond about it.
+
+**Primary log channel.**  Clients MUST log normal operation to stderr.
+When running under systemd, stderr is captured by the journal.
+`smd log <client>` is then a thin wrapper around
+`journalctl -u <unit>`.
+
+**File logs (optional).**  Clients MAY additionally write persistent
+file logs (spot logs, decode output, structured event logs).  If they
+do:
+
+1. All file logs MUST live under `/var/log/<client-name>/`.  Clients
+   MUST NOT write logs anywhere else on the filesystem.
+2. The systemd unit MAY use `StandardOutput=append:/var/log/<client>/...`
+   for the process log, but this duplicates the journal and is not
+   required.
+3. Clients MUST surface every file-log path in `inventory --json`
+   under a top-level `log_paths` object:
+
+```json
+{
+  "client": "psk-recorder",
+  "log_paths": {
+    "process": "/var/log/psk-recorder/bee1-rx888.log",
+    "spots": {
+      "ft8": "/var/log/psk-recorder/bee1-rx888-ft8.log",
+      "ft4": "/var/log/psk-recorder/bee1-rx888-ft4.log"
+    }
+  },
+  ...
+}
+```
+
+The keys inside `log_paths` are client-defined; sigmond treats the
+object as opaque and presents all paths to the operator via
+`smd log <client> --files`.  If a client writes no file logs,
+`log_paths` SHOULD be omitted (not an empty object).
+
+**Sigmond side.**  `smd log <client>` defaults to
+`journalctl -u <unit> --follow`.  With `--files`, it reads
+`log_paths` from the client's inventory and tails the named files.
+
+### 11. Runtime log level controlled by sigmond (v0.3)
+
+Sigmond can adjust a client's verbosity at runtime without editing the
+client's config file or restarting the service.
+
+**Environment variable.**  Sigmond MAY publish a per-client log level
+in `coordination.env`:
+
+```
+PSK_RECORDER_LOG_LEVEL=DEBUG
+```
+
+The variable name is `<CLIENT_NAME>_LOG_LEVEL` where `<CLIENT_NAME>`
+is the client's name in SCREAMING_SNAKE_CASE with hyphens replaced by
+underscores (e.g. `hf-timestd` → `HF_TIMESTD_LOG_LEVEL`,
+`psk-recorder` → `PSK_RECORDER_LOG_LEVEL`).
+
+Sigmond MAY also publish a generic fallback:
+
+```
+CLIENT_LOG_LEVEL=WARNING
+```
+
+**Values.**  Standard Python `logging` level names: `DEBUG`, `INFO`,
+`WARNING`, `ERROR`, `CRITICAL`.  Case-insensitive.
+
+**Client-side requirement.**  Every client MUST resolve its log level
+on startup using this precedence (highest-priority first):
+
+1. **Command-line flag** — `--log-level <level>` for one-shot debug
+   runs.
+2. **Client-specific env var** — `<CLIENT>_LOG_LEVEL`.
+3. **Generic env var** — `CLIENT_LOG_LEVEL`.
+4. **Client config** — e.g. `[logging] level = "INFO"` in the client's
+   native config.
+5. **Default** — `INFO`.
+
+Clients running as long-lived daemons MUST install a `SIGHUP` handler
+that re-reads the environment variables (steps 2 and 3) and re-applies
+the resolved level to the root logger without restarting RTP streams
+or other active work.  This makes `smd log --level=DEBUG <client>` a
+one-step operation: sigmond rewrites `coordination.env` and sends
+`SIGHUP` to the unit.
+
+**Inventory surface.**  Clients SHOULD report their current effective
+log level in `inventory --json` as a top-level field:
+
+```json
+{
+  "client": "psk-recorder",
+  "log_level": "INFO",
+  ...
+}
+```
+
+This lets `smd diag` show at a glance which clients are running in
+debug mode without parsing logs.
+
+**Interaction with §3 stdout cleanliness.**  The log-level mechanism
+applies to the daemon and status subcommands.  The `inventory` and
+`validate` subcommands MUST still suppress all logging to stdout
+regardless of the configured level — the §3 stdout-cleanliness guard
+takes priority.
+
+### 9. Reference implementations
+
+**v0.2 reference: hf-timestd v7.0.0.**
+[`hf-timestd` v7.0.0](https://github.com/mijahauan/hf-timestd/releases/tag/v7.0.0)
+is the first full v0.2-conformant client. It remains the reference for
+§1–§6, §8, and the stdout-cleanliness guard in §3.
 
 Concrete pointers:
 
@@ -462,24 +582,34 @@ Concrete pointers:
   [cli.py](https://github.com/mijahauan/hf-timestd/blob/v7.0.0/src/hf_timestd/cli.py),
   commit [`339dec4`](https://github.com/mijahauan/hf-timestd/commit/339dec4).
   Note the stdout-cleanliness guard at the top of `main()`.
-- **§7 data-destination resolution** —
-  [`core_recorder_v2.__init__`](https://github.com/mijahauan/hf-timestd/blob/v7.0.0/src/hf_timestd/core/core_recorder_v2.py),
-  commit [`2b83793`](https://github.com/mijahauan/hf-timestd/commit/2b83793).
-  Implements the 3-step precedence above. The resolved address is
-  passed to every `StreamRecorderConfig(destination=...)` and to the
-  L6 BPSK PPS `ensure_channel()` call.
 - **`deploy.toml`** — at repo root; real worked example of `[build]`,
   `[install.steps]`, `[systemd]`, and `[deps]`.
 - **§8 chain-delay hook** — hf-timestd is the *calibrator* for chain
   delay, so its current code applies the correction only to its own
   channels; the `RADIOD_<id>_CHAIN_DELAY_NS` *publish* side is the
-  sigmond Phase 4 work. A peer client (e.g. psk-recorder) reading the
-  env var is the simpler side and can be added today against any v0.2
-  client by imitating what's in §8's code snippet.
+  sigmond Phase 4 work.
+
+**v0.3 retrofit needed for hf-timestd:**
+- §7: remove client-side `generate_multicast_ip()` and
+  `destination=` from `ensure_channel()` calls; delete the
+  `data_destination` override / `radiod_multicast_group` legacy key
+  from config. Read `data_destination` from `ChannelInfo` instead.
+- §10: add `log_paths` to `inventory --json` output, pointing at
+  `/var/log/hf-timestd/`.
+- §11: honor `HF_TIMESTD_LOG_LEVEL` and `CLIENT_LOG_LEVEL` env vars
+  on startup and SIGHUP. Install a SIGHUP handler in the recorder's
+  main loop.
+- Bump `contract_version` in inventory output from `"0.2"` to `"0.3"`.
+
+**v0.3 greenfield reference: psk-recorder v0.1.0.**
+[`psk-recorder`](https://github.com/mijahauan/psk-recorder) is the
+first client built against v0.3 from day one.  It implements §7
+(no `destination=`), §10 (log paths in inventory), and §11 (runtime
+log level) natively.
 
 If a retrofit or greenfield build uncovers a gap between the contract
-as written here and what hf-timestd ships, fix the contract — update
-this document and bump the version — rather than adding a
+as written here and what the reference clients ship, fix the contract
+— update this document and bump the version — rather than adding a
 per-client special case to sigmond's `ContractAdapter`.
 
 ## What sigmond promises in return
@@ -491,6 +621,10 @@ per-client special case to sigmond's `ContractAdapter`.
   apply`.
 - Writes CPU affinity drop-ins in the client's own
   `<unit>.d/10-sigmond-cpu-affinity.conf` path and nowhere else.
+- MAY publish per-client log levels in coordination.env and send
+  SIGHUP to the client's unit after changes (§11).
+- MAY read `log_paths` from inventory to locate client file logs
+  (§10).
 - Never requires the client to depend on sigmond code or shell out to
   `smd`.
 
@@ -505,9 +639,17 @@ per-client special case to sigmond's `ContractAdapter`.
   still pass validation on a v0.2 sigmond; sigmond treats a missing
   `data_destination` as a contract warning, not an error, for one
   release.
-- Existing clients (`hf-timestd`, `wsprdaemon-client`) are being
-  retrofitted alongside the contract bump.  `hf-timestd` lands §7
-  compliance in the same cycle that retires its legacy v1 recorder
-  stack (`channel_recorder.py`), which was the source of the now-dead
-  `generate_timestd_multicast_ip` helper that partially implemented
-  this rule but was never reachable from the production V2 path.
+- **v0.2 → v0.3** revises §7 (data multicast derivation moves into
+  `ka9q-python`; clients drop `destination=` and `generate_multicast_ip()`
+  call sites), adds §10 (logging discipline + `log_paths` in inventory),
+  and §11 (runtime log level via `<CLIENT>_LOG_LEVEL` env var + SIGHUP).
+  v0.2 clients still pass validation on a v0.3 sigmond; sigmond treats
+  a missing `log_paths` or `log_level` as informational, not an error.
+  Clients that still pass `destination=` to `ensure_channel()` remain
+  operationally correct — `ka9q-python` honors an explicit destination —
+  but should remove the call-site when upgrading.
+- **Clients requiring v0.3 retrofit:** `hf-timestd` (§7 simplification,
+  §10, §11 — see §9 retrofit checklist above).  `wsprdaemon-client`
+  needs the full v0.2 + v0.3 retrofit (contract subcommands, deploy.toml,
+  logging).
+- `psk-recorder` is built greenfield against v0.3; no retrofit needed.
