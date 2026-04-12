@@ -44,6 +44,8 @@ class ClientView:
     installed:        bool = False
     config_path:      Optional[Path] = None
     contract_version: Optional[str] = None                            # v0.2 added
+    log_paths:        Optional[dict] = None                           # v0.3 §10
+    log_level:        Optional[str] = None                            # v0.3 §11
     instances:        list = field(default_factory=list)              # list[InstanceView]
     issues:           list = field(default_factory=list)              # list[str]
 

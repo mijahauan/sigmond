@@ -23,7 +23,7 @@ from typing import Optional
 from .base import ClientAdapter, ClientView, DiskWrite, InstanceView
 
 
-SUPPORTED_CONTRACT_VERSION = "0.2"
+SUPPORTED_CONTRACT_VERSION = "0.3"
 
 
 class ContractAdapter(ClientAdapter):
@@ -87,6 +87,11 @@ class ContractAdapter(ClientAdapter):
                     f"{view.contract_version}, sigmond supports "
                     f"{SUPPORTED_CONTRACT_VERSION}"
                 )
+
+        if data.get('log_paths'):
+            view.log_paths = data['log_paths']
+        if data.get('log_level'):
+            view.log_level = str(data['log_level'])
 
         for raw in (data.get('instances') or []):
             view.instances.append(_instance_from_contract(raw))

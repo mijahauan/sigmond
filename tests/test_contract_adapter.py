@@ -114,8 +114,28 @@ class ReadViewTests(unittest.TestCase):
 
     def test_contract_version_captured(self):
         view = self._run()
-        self.assertEqual(view.contract_version, SUPPORTED_CONTRACT_VERSION)
-        self.assertEqual(view.issues, [])
+        self.assertEqual(view.contract_version, "0.2")
+
+    def test_v02_client_on_v03_sigmond_warns(self):
+        """hf-timestd v7.0.0 reports contract_version 0.2.  A v0.3
+        sigmond must still parse it successfully but emit a mismatch
+        warning — v0.2 clients remain operational, not rejected."""
+        view = self._run()
+        self.assertTrue(view.installed)
+        self.assertTrue(
+            any('contract_version mismatch' in i for i in view.issues),
+            f"expected mismatch issue for v0.2 client, got {view.issues}",
+        )
+
+    def test_v03_client_no_mismatch(self):
+        raw = json.loads(self.inventory_json)
+        raw['contract_version'] = '0.3'
+        view = self._run(stdout=json.dumps(raw))
+        self.assertEqual(view.contract_version, '0.3')
+        self.assertFalse(
+            any('contract_version mismatch' in i for i in view.issues),
+            f"unexpected mismatch issue for v0.3 client: {view.issues}",
+        )
 
     def test_contract_version_mismatch_raises_issue(self):
         raw = json.loads(self.inventory_json)
@@ -164,6 +184,49 @@ class ReadViewTests(unittest.TestCase):
         view = self._run(stdout=dirty)
         self.assertFalse(view.installed)
         self.assertTrue(any('malformed JSON' in i for i in view.issues))
+
+
+class V03FieldTests(unittest.TestCase):
+    """Tests for v0.3 additions: log_paths and log_level."""
+
+    def setUp(self):
+        self.inventory_json = (FIXTURES / 'hf-timestd-inventory.json').read_text()
+        self.adapter = _HFTimestdAdapter()
+
+    def _run(self, stdout):
+        with mock.patch.object(
+            self.adapter, 'find_binary', return_value='/usr/local/bin/hf-timestd'
+        ), mock.patch(
+            'sigmond.clients.contract.subprocess.run',
+            return_value=FakeCompleted(stdout),
+        ):
+            return self.adapter.read_view()
+
+    def test_log_paths_captured(self):
+        raw = json.loads(self.inventory_json)
+        raw['contract_version'] = '0.3'
+        raw['log_paths'] = {
+            'process': '/var/log/hf-timestd/core-recorder.log',
+        }
+        view = self._run(json.dumps(raw))
+        self.assertEqual(view.log_paths, {
+            'process': '/var/log/hf-timestd/core-recorder.log',
+        })
+
+    def test_log_paths_absent_stays_none(self):
+        view = self._run(self.inventory_json)
+        self.assertIsNone(view.log_paths)
+
+    def test_log_level_captured(self):
+        raw = json.loads(self.inventory_json)
+        raw['contract_version'] = '0.3'
+        raw['log_level'] = 'DEBUG'
+        view = self._run(json.dumps(raw))
+        self.assertEqual(view.log_level, 'DEBUG')
+
+    def test_log_level_absent_stays_none(self):
+        view = self._run(self.inventory_json)
+        self.assertIsNone(view.log_level)
 
 
 class ValidateNativeTests(unittest.TestCase):
