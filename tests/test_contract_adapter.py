@@ -116,10 +116,10 @@ class ReadViewTests(unittest.TestCase):
         view = self._run()
         self.assertEqual(view.contract_version, "0.2")
 
-    def test_v02_client_on_v03_sigmond_warns(self):
-        """hf-timestd v7.0.0 reports contract_version 0.2.  A v0.3
+    def test_v02_client_on_v04_sigmond_warns(self):
+        """hf-timestd v7.0.0 reports contract_version 0.2.  A v0.4
         sigmond must still parse it successfully but emit a mismatch
-        warning — v0.2 clients remain operational, not rejected."""
+        warning — older clients remain operational, not rejected."""
         view = self._run()
         self.assertTrue(view.installed)
         self.assertTrue(
@@ -127,14 +127,24 @@ class ReadViewTests(unittest.TestCase):
             f"expected mismatch issue for v0.2 client, got {view.issues}",
         )
 
-    def test_v03_client_no_mismatch(self):
+    def test_v03_client_on_v04_sigmond_warns(self):
         raw = json.loads(self.inventory_json)
         raw['contract_version'] = '0.3'
         view = self._run(stdout=json.dumps(raw))
         self.assertEqual(view.contract_version, '0.3')
+        self.assertTrue(
+            any('contract_version mismatch' in i for i in view.issues),
+            f"expected mismatch issue for v0.3 client on v0.4 sigmond, got {view.issues}",
+        )
+
+    def test_v04_client_no_mismatch(self):
+        raw = json.loads(self.inventory_json)
+        raw['contract_version'] = '0.4'
+        view = self._run(stdout=json.dumps(raw))
+        self.assertEqual(view.contract_version, '0.4')
         self.assertFalse(
             any('contract_version mismatch' in i for i in view.issues),
-            f"unexpected mismatch issue for v0.3 client: {view.issues}",
+            f"unexpected mismatch issue for v0.4 client: {view.issues}",
         )
 
     def test_contract_version_mismatch_raises_issue(self):
