@@ -1,9 +1,18 @@
 # HamSCI Client Contract
 
-**Version:** 0.3
+**Version:** 0.4
 **Status:** Adopted. First full v0.2 implementation is `hf-timestd`
 v7.0.0 — see §9.  First greenfield v0.3 implementation is
-`psk-recorder` v0.1.0.  v0.3 adds:
+`psk-recorder` v0.1.0, which also surfaced the v0.4 hardening items in
+§12.  v0.4 adds:
+
+- **§12 (new) — validate hardening and deploy safety.**  Six concrete
+  checks surfaced by the psk-recorder Phase 1 deploy on 2026-04-13.
+  Three are MUST (entry-point reachability, SSRC uniqueness, deployed
+  config path disclosure); three are SHOULD (decoder-mutation of
+  spool, Pattern A canonical layout, ka9q-python PyPI-lag check).
+
+v0.3 adds:
 
 - **§7 revised — data multicast is now a `ka9q-python` concern.**
   Clients MUST NOT pass `destination=` to `ensure_channel()`.
@@ -612,6 +621,133 @@ as written here and what the reference clients ship, fix the contract
 — update this document and bump the version — rather than adding a
 per-client special case to sigmond's `ContractAdapter`.
 
+### 12. Validate hardening and deploy safety (v0.4)
+
+These six items were surfaced during the `psk-recorder` Phase 1 deploy
+on 2026-04-13.  Each is labeled **MUST** (a hard `validate` check,
+exit nonzero on violation) or **SHOULD** (a warning in `validate`
+output and/or an operator-docs requirement).
+
+#### 12.1 Entry-point reachability (MUST)
+
+The command declared in `deploy.toml`'s `[systemd].exec_start` (or the
+equivalent default, typically `python -m <module>`) MUST actually
+reach the daemon's `main()`.  `validate` MUST assert the invocation
+would dispatch past the module-load phase — a missing
+`if __name__ == "__main__": main()` guard in the CLI module is a
+contract violation, not a user bug.
+
+*Rationale:* `psk-recorder` shipped with `python -m psk_recorder.cli`
+as the unit's `ExecStart`, but `cli.py` had no `__main__` guard.  The
+module loaded and returned, systemd saw a clean exit 0 in ~100 ms
+with no log output, and `Type=notify` reported failure with no
+diagnostic.  See
+[psk-recorder 520e39f](https://github.com/mijahauan/psk-recorder/commit/520e39f).
+
+*Acceptance:* a reference check is "import the CLI module under a
+sentinel `__name__` and assert `main()` is registered as the entry";
+a simpler sufficient check is a grep-style assertion on the CLI
+source.  Either satisfies the MUST.
+
+#### 12.2 SSRC uniqueness across a radiod block (MUST)
+
+`ka9q.addressing.compute_ssrc(freq, preset, sample_rate, encoding)`
+is a pure function of its arguments.  Two channels with identical
+`(freq, preset, sample_rate, encoding)` tuples collide on SSRC, and
+`ka9q-python`'s `MultiStream` keys its slot dict by SSRC — the second
+`add_channel()` silently overwrites the first's callback, dropping
+one sink without any error.
+
+`validate` MUST reject a config that produces duplicate SSRC tuples
+within a single `[[radiod]]` block, naming both offending entries.
+This turns a silent runtime drop into a config-time error.
+
+*Rationale:* `psk-recorder` initially shipped with FT4 1.840 MHz and
+FT8 1.840 MHz both configured (same preset `usb`, same 12 kHz rate,
+same `s16be` encoding).  The running daemon reported "20 channels
+provisioned" but only 19 active; the FT4 160 m sink was silently
+dead.  FT4 has no standard 160 m calling frequency, so the entry was
+bogus — but a uniqueness check would have caught it at first
+`validate` run.  See
+[psk-recorder be4a050](https://github.com/mijahauan/psk-recorder/commit/be4a050).
+
+#### 12.3 Deployed config path disclosure (MUST)
+
+`validate --json` and `inventory --json` MUST include the **absolute
+path of the config file actually loaded**, as a top-level field
+`config_path`.  Clients with a precedence chain (env override →
+`/etc/<client>/…` → repo template) MUST report the chosen path, not
+the first candidate.
+
+*Rationale:* the repo's `config/<client>-config.toml` and the
+installed `/etc/<client>/<client>-config.toml` drift the moment
+`install.sh` copies the template on first install.  During the
+psk-recorder Phase 1 deploy, an edit to the repo template was
+committed, pushed, and restarted — with no effect on the running
+daemon, because it was reading `/etc/psk-recorder/...`.  Making the
+loaded path visible in inventory/validate output eliminates the class
+of "I edited the config and nothing changed" bugs for both operators
+and agents.
+
+*Acceptance:* `inventory --json | jq -r .config_path` prints a single
+absolute path; that path is the one the daemon would load if started
+now.
+
+#### 12.4 Decoder subprocesses may mutate the spool (SHOULD)
+
+External decoder processes (e.g. `decode_ft8`) are permitted to
+delete, rename, or rewrite files in the spool directory.  Clients
+that require file retention (debugging snapshots, `keep_wav=true`,
+post-hoc analysis) MUST snapshot the file **before** forking the
+decoder, into a directory the client controls exclusively.  Under
+`ProtectSystem=strict` systemd units, the snapshot destination must
+be listed in `ReadWritePaths`; `/tmp` is not writable under that
+hardening.
+
+*Rationale:* `decode_ft8` unconditionally unlinks the WAV it just
+decoded.  psk-recorder's `keep_wav=true` code path does the right
+thing locally (it skips its own unlink) but cannot retain the file
+because the decoder subprocess deletes it first.  The contract
+shouldn't dictate the decoder's behavior, but clients must be aware
+that shared-spool lifecycle is not under their control.
+
+Clients SHOULD document this in their config reference next to any
+retention flag.
+
+#### 12.5 Pattern A canonical repo layout (SHOULD)
+
+The canonical repo location for a HamSCI client on a managed host is
+**`/opt/git/<client>`**, owned `mjh:<service-group>` and
+group-writable, with a convenience symlink `~/git/<client> →
+/opt/git/<client>`.  The service user must be a member of
+`<service-group>`.
+
+Anti-pattern: `install.sh` writing a symlink `/opt/git/<client> →
+~/git/<client>`.  This fails the mode-700 home-traversability check
+for service users and must not be shipped in new client install
+scripts.  `hf-timestd` and `psk-recorder` both originally hit this
+trap; both now use Pattern A.
+
+Sigmond deployment docs and new-client install scripts SHOULD codify
+Pattern A as the default and ban the reverse symlink.
+
+#### 12.6 ka9q-python PyPI lag (SHOULD)
+
+Clients that pin `ka9q-python>=X.Y.Z` in `pyproject.toml` depend on
+PyPI having that version published.  `validate` SHOULD check the
+installed `ka9q-python.__version__` against the client's declared
+minimum and emit a warning — not just an import error — if the
+installed version is older than the minimum.  An installed version
+*equal to* the minimum passes; a version older than what PyPI
+currently offers when the client's minimum was bumped is a red flag
+that `pip install -U` has not run or that the wheel was not yet
+published at install time.
+
+*Rationale:* psk-recorder's Phase 1 unit file required `MultiStream`,
+which landed in `ka9q-python` 3.8.0; PyPI only had 3.7.1 at deploy
+time.  The fix was a same-day PyPI publish.  A version check in
+`validate` would have surfaced this before the service restart.
+
 ## What sigmond promises in return
 
 - Never writes inside a client's native config file.
@@ -652,4 +788,18 @@ per-client special case to sigmond's `ContractAdapter`.
   §10, §11 — see §9 retrofit checklist above).  `wsprdaemon-client`
   needs the full v0.2 + v0.3 retrofit (contract subcommands, deploy.toml,
   logging).
-- `psk-recorder` is built greenfield against v0.3; no retrofit needed.
+- **v0.3 → v0.4** adds §12 (validate hardening and deploy safety).
+  Three MUST items: §12.1 entry-point reachability, §12.2 SSRC
+  uniqueness, §12.3 `config_path` in inventory/validate output.
+  Three SHOULD items: §12.4 decoder-mutation awareness, §12.5
+  Pattern A canonical layout, §12.6 ka9q-python PyPI-lag check.
+  v0.3 clients still pass validation on a v0.4 sigmond; sigmond
+  treats a missing `config_path` or absent SSRC-uniqueness check as
+  a contract warning, not an error, for one release.
+- **Clients requiring v0.4 retrofit:** `psk-recorder` v0.1.1 (add
+  §12.2 uniqueness check to `validate`, §12.3 `config_path` field —
+  the Phase 1 deploy proved both items live), `hf-timestd` (same two
+  items, bundled with the v0.3 retrofit work).  `wsprdaemon-client`
+  targets v0.4 directly.
+- `psk-recorder` was built greenfield against v0.3; v0.4 additions
+  are a minor-release retrofit, not a fresh rewrite.

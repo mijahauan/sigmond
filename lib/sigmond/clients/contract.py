@@ -23,7 +23,7 @@ from typing import Optional
 from .base import ClientAdapter, ClientView, DiskWrite, InstanceView
 
 
-SUPPORTED_CONTRACT_VERSION = "0.3"
+SUPPORTED_CONTRACT_VERSION = "0.4"
 
 
 class ContractAdapter(ClientAdapter):
