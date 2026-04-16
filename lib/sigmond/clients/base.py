@@ -46,6 +46,7 @@ class ClientView:
     contract_version: Optional[str] = None                            # v0.2 added
     log_paths:        Optional[dict] = None                           # v0.3 §10
     log_level:        Optional[str] = None                            # v0.3 §11
+    deploy_toml_path: Optional[Path] = None                           # v0.5 §3 amendment
     instances:        list = field(default_factory=list)              # list[InstanceView]
     issues:           list = field(default_factory=list)              # list[str]
 

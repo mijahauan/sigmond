@@ -4,16 +4,24 @@
 Dr. SigMonD: "Zo... ven did your signals first start to propagate?"
 
 Usage:
-    smd install  [--components COMP,...]  [--client-dir DIR]  [--dry-run]
-    smd apply    [--dry-run]
-    smd start
-    smd stop
-    smd status
+    smd install    [--components COMP,...]  [--client-dir DIR]  [--dry-run]
+    smd apply      [--dry-run]
+    smd start      [<component> [<instance>]]
+    smd stop       [<component> [<instance>]]
+    smd restart    [<component> [<instance>]]
+    smd reload     [--via=auto|systemd|socket]  [<component>]
+    smd list       [--json]  [<component>]
+    smd status     [<component>]
     smd update
     smd diag
 
 Topology file (default: /etc/sigmond/topology.toml) controls which
 components are enabled on this host.  All commands respect the topology.
+
+Lifecycle verbs (start/stop/restart/reload/list/status):
+  Without <component>: operate on all enabled components.
+  With <component>: operate on that component's instances.
+  With <component> <instance>: operate on a single instance only.
 """
 
 import argparse
@@ -39,6 +47,7 @@ for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
 try:
     from sigmond.commands.validate import cmd_validate
     from sigmond.commands.config   import cmd_config_show, cmd_config_migrate
+    from sigmond.lifecycle         import resolve_units, UnitRef
     _HAS_SIGMOND_LIB = True
 except ImportError:
     _HAS_SIGMOND_LIB = False
@@ -612,34 +621,32 @@ def cmd_apply(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# smd start / stop
+# smd start / stop / restart / reload
 # ---------------------------------------------------------------------------
-
-def _service_target_for_components(components: list) -> list:
-    """Return systemd targets/services to start/stop for the given components."""
-    units = []
-    if any(c in components for c in ('wspr', 'radiod', 'ka9q-web', 'rac')):
-        units.append('wsprdaemon.target')
-    if 'grape' in components:
-        units.append('timestd-core-recorder.service')
-        units.append('grape-daily.timer')
-    return units
-
 
 def cmd_start(args) -> int:
     if _need_root('start'):
         return 1
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
     only = [c.strip() for c in args.components.split(',')] if args.components else None
-    components = _enabled_components(topology, only)
-    units = _service_target_for_components(components)
+    enabled = _enabled_components(topology, only)
+
+    try:
+        units = resolve_units(enabled, enabled)
+    except ValueError as exc:
+        _err(f"component resolution failed: {exc}")
+        return 1
+
+    # Filter to configured instances only (not orphaned)
+    units = [u for u in units if not u.orphaned]
+
     _heading('start')
     for unit in units:
-        r = _run(['systemctl', 'start', unit], sudo=True)
+        r = _run(['systemctl', 'start', unit.unit], sudo=True)
         if r.returncode == 0:
-            _ok(f'{unit}')
+            _ok(f'{unit.unit}')
         else:
-            _err(f'{unit}: {r.stderr.strip()}')
+            _err(f'{unit.unit}: {r.stderr.strip()}')
     return 0
 
 
@@ -648,82 +655,187 @@ def cmd_stop(args) -> int:
         return 1
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
     only = [c.strip() for c in args.components.split(',')] if args.components else None
-    components = _enabled_components(topology, only)
-    units = _service_target_for_components(components)
+    enabled = _enabled_components(topology, only)
+
+    try:
+        units = resolve_units(enabled, enabled)
+    except ValueError as exc:
+        _err(f"component resolution failed: {exc}")
+        return 1
+
+    # Filter to configured instances only
+    units = [u for u in units if not u.orphaned]
+
     _heading('stop')
+    # Stop in reverse order
     for unit in reversed(units):
-        r = _run(['systemctl', 'stop', unit], sudo=True)
+        r = _run(['systemctl', 'stop', unit.unit], sudo=True)
         if r.returncode == 0:
-            _ok(f'{unit}')
+            _ok(f'{unit.unit}')
         else:
-            _err(f'{unit}: {r.stderr.strip()}')
+            _err(f'{unit.unit}: {r.stderr.strip()}')
     return 0
 
 
-# ---------------------------------------------------------------------------
-# smd status
-# ---------------------------------------------------------------------------
+def cmd_restart(args) -> int:
+    if _need_root('restart'):
+        return 1
+    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    enabled = _enabled_components(topology, only)
 
-_STATUS_SERVICES = {
-    'radiod':   ['radiod@*.service'],
-    'wspr':     ['wd-decode@*.service', 'wd-post@*.service',
-                 'wd-upload-wsprnet@*.service', 'wd-upload-wsprdaemon@*.service'],
-    'ka9q-web': ['wd-ka9q-web@*.service'],
-    'grape':    ['timestd-core-recorder.service', 'grape-daily.timer'],
-    'rac':      ['frpc@*.service'],
-}
+    try:
+        units = resolve_units(enabled, enabled)
+    except ValueError as exc:
+        _err(f"component resolution failed: {exc}")
+        return 1
 
+    # Filter to configured instances only
+    units = [u for u in units if not u.orphaned]
+
+    _heading('restart')
+    any_failed = False
+    for unit in units:
+        # Reset any failed state before restarting
+        _run(['systemctl', 'reset-failed', unit.unit], sudo=True)
+        r = _run(['systemctl', 'restart', unit.unit], sudo=True)
+        if r.returncode == 0:
+            _ok(f'{unit.unit}')
+        else:
+            _err(f'{unit.unit}: {r.stderr.strip()}')
+            any_failed = True
+    return 1 if any_failed else 0
+
+
+def cmd_reload(args) -> int:
+    if _need_root('reload'):
+        return 1
+    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    enabled = _enabled_components(topology, only)
+
+    try:
+        units = resolve_units(enabled, enabled)
+    except ValueError as exc:
+        _err(f"component resolution failed: {exc}")
+        return 1
+
+    # Filter to configured instances only
+    units = [u for u in units if not u.orphaned]
+
+    _heading('reload')
+    any_failed = False
+    for unit in units:
+        # Try systemctl reload first; fall back to try-restart
+        r = _run(['systemctl', 'reload', unit.unit], sudo=True)
+        if r.returncode == 0:
+            _ok(f'{unit.unit}')
+        else:
+            # Fall back to try-restart
+            r = _run(['systemctl', 'try-restart', unit.unit], sudo=True)
+            if r.returncode == 0:
+                _ok(f'{unit.unit} (via try-restart)')
+            else:
+                _err(f'{unit.unit}: {r.stderr.strip()}')
+                any_failed = True
+    return 1 if any_failed else 0
+
+
+# smd status / list
+# ---------------------------------------------------------------------------
 
 def cmd_status(args) -> int:
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
     only = [c.strip() for c in args.components.split(',')] if args.components else None
-    components = _enabled_components(topology, only)
+    enabled = _enabled_components(topology, only)
+
+    try:
+        units = resolve_units(enabled, enabled)
+    except ValueError as exc:
+        _err(f"component resolution failed: {exc}")
+        return 1
 
     _heading('status')
     any_bad = False
 
-    for comp in components:
-        patterns = _STATUS_SERVICES.get(comp, [])
+    # Group by component for display
+    by_component: dict[str, list[UnitRef]] = {}
+    for unit in units:
+        if unit.component not in by_component:
+            by_component[unit.component] = []
+        by_component[unit.component].append(unit)
+
+    for comp in sorted(by_component.keys()):
+        comp_units = by_component[comp]
         print(f'\n  {comp}:')
-        if not patterns:
+        if not comp_units:
             _info('(no managed services)')
             continue
-        # Expand globs via systemctl list-units
-        r = _run(['systemctl', 'list-units', '--no-legend', '--no-pager',
-                  '--all', '--output=json'] + patterns)
-        if r.returncode != 0:
-            # Fallback: check each pattern with is-active
-            for pat in patterns:
-                r2 = _run(['systemctl', 'is-active', pat])
-                state = r2.stdout.strip() or 'unknown'
-                sym = '✓' if state == 'active' else '✗'
-                color = '\033[32m' if state == 'active' else '\033[31m'
-                print(f'    {color}{sym}\033[0m  {pat}: {state}')
-            continue
 
-        import json as _json
-        try:
-            units = _json.loads(r.stdout)
-        except Exception:
-            units = []
+        for unit_ref in comp_units:
+            # Check unit state
+            r = _run(['systemctl', 'is-active', unit_ref.unit])
+            state = r.stdout.strip() or 'unknown'
+            sym = '✓' if state == 'active' else '✗'
+            color = '\033[32m' if state == 'active' else '\033[31m'
 
-        if not units:
-            _info('(no instances running)')
-            continue
+            orphan_tag = ' [orphaned]' if unit_ref.orphaned else ''
+            print(f'    {color}{sym}\033[0m  {unit_ref.unit}: {state}{orphan_tag}')
 
-        for u in units:
-            name   = u.get('unit', u.get('name', '?'))
-            active = u.get('active', u.get('activestate', '?'))
-            sub    = u.get('sub', u.get('substate', ''))
-            state  = f'{active}({sub})' if sub and sub != active else active
-            color  = '\033[32m' if active == 'active' else '\033[31m'
-            sym    = '✓' if active == 'active' else '✗'
-            print(f'    {color}{sym}\033[0m  {name}: {state}')
-            if active not in ('active', 'inactive'):
+            if state not in ('active', 'inactive'):
                 any_bad = True
 
     print()
     return 1 if any_bad else 0
+
+
+def cmd_list(args) -> int:
+    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    enabled = _enabled_components(topology, only)
+
+    try:
+        units = resolve_units(enabled, enabled)
+    except ValueError as exc:
+        _err(f"component resolution failed: {exc}")
+        return 1
+
+    if args.json:
+        import json as _json
+        units_data = []
+        for unit_ref in units:
+            r = _run(['systemctl', 'is-active', unit_ref.unit])
+            state = r.stdout.strip() or 'unknown'
+            units_data.append({
+                'component': unit_ref.component,
+                'unit': unit_ref.unit,
+                'template': unit_ref.template,
+                'instance': unit_ref.instance,
+                'kind': unit_ref.kind,
+                'source': unit_ref.source,
+                'active_state': state,
+                'orphaned': unit_ref.orphaned,
+            })
+        print(_json.dumps(units_data, indent=2))
+    else:
+        _heading('list')
+        by_component: dict[str, list[UnitRef]] = {}
+        for unit in units:
+            if unit.component not in by_component:
+                by_component[unit.component] = []
+            by_component[unit.component].append(unit)
+
+        for comp in sorted(by_component.keys()):
+            print(f'\n  {comp}:')
+            for unit_ref in sorted(by_component[comp], key=lambda u: u.unit):
+                r = _run(['systemctl', 'is-active', unit_ref.unit])
+                state = r.stdout.strip() or 'unknown'
+                sym = '✓' if state == 'active' else '✗'
+                color = '\033[32m' if state == 'active' else '\033[31m'
+                orphan_tag = ' [orphaned]' if unit_ref.orphaned else ''
+                print(f'    {color}{sym}\033[0m  {unit_ref.unit}: {state}{orphan_tag}')
+
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -853,6 +965,22 @@ def main() -> int:
     p = sub.add_parser('status', help='show service health')
     p.add_argument('--components', metavar='C1,C2')
 
+    # restart (NEW)
+    p = sub.add_parser('restart', help='restart managed services')
+    p.add_argument('--components', metavar='C1,C2')
+
+    # reload (NEW)
+    p = sub.add_parser('reload', help='reload managed services (signal or restart)')
+    p.add_argument('--components', metavar='C1,C2')
+    p.add_argument('--via', choices=['auto', 'systemd', 'socket'], default='auto',
+                   help='routing strategy for reload (default: auto)')
+
+    # list (NEW)
+    p = sub.add_parser('list', help='list resolved units for components')
+    p.add_argument('--components', metavar='C1,C2')
+    p.add_argument('--json', action='store_true',
+                   help='emit machine-readable JSON')
+
     # update
     sub.add_parser('update', help='pull latest code and re-apply')
 
@@ -897,6 +1025,9 @@ def main() -> int:
         'apply':   cmd_apply,
         'start':   cmd_start,
         'stop':    cmd_stop,
+        'restart': cmd_restart,
+        'reload':  cmd_reload,
+        'list':    cmd_list,
         'status':  cmd_status,
         'update':  cmd_update,
         'diag':    cmd_diag,

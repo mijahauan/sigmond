@@ -93,6 +93,10 @@ class ContractAdapter(ClientAdapter):
         if data.get('log_level'):
             view.log_level = str(data['log_level'])
 
+        deploy_path = data.get('deploy_toml_path')
+        if deploy_path:
+            view.deploy_toml_path = Path(deploy_path)
+
         for raw in (data.get('instances') or []):
             view.instances.append(_instance_from_contract(raw))
 
