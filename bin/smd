@@ -180,6 +180,15 @@ def _load_topology(path: Path, client_dir_override: str = None) -> dict:
             'grape':     {'enabled': True,  'managed': False, 'description': 'GRAPE hf-timestd recording'},
             'rac':       {'enabled': False, 'managed': False, 'description': 'Remote access channel (frpc)'},
         },
+        'cpu_freq': {
+            'radiod_max_mhz': 3200,   # CPUs running radiod — high-performance
+            'other_max_mhz':  1400,   # All remaining CPUs  — power-efficient
+        },
+        # Empty strings → computed from hardware at runtime
+        'cpu_affinity': {
+            'radiod_cpus': '',   # e.g. "12-15"
+            'other_cpus':  '',   # e.g. "2-11"
+        },
     }
 
     if client_dir_override:
@@ -209,6 +218,22 @@ def _load_topology(path: Path, client_dir_override: str = None) -> dict:
             'managed':     cfg.get('managed', True),
             'description': cfg.get('description', ''),
         }
+
+    cf = raw.get('cpu_freq', {})
+    if cf:
+        result['cpu_freq'] = dict(defaults['cpu_freq'])
+        if 'radiod_max_mhz' in cf:
+            result['cpu_freq']['radiod_max_mhz'] = int(cf['radiod_max_mhz'])
+        if 'other_max_mhz' in cf:
+            result['cpu_freq']['other_max_mhz'] = int(cf['other_max_mhz'])
+
+    ca = raw.get('cpu_affinity', {})
+    if ca:
+        result['cpu_affinity'] = dict(defaults['cpu_affinity'])
+        if 'radiod_cpus' in ca:
+            result['cpu_affinity']['radiod_cpus'] = str(ca['radiod_cpus'])
+        if 'other_cpus' in ca:
+            result['cpu_affinity']['other_cpus'] = str(ca['other_cpus'])
 
     return result
 
@@ -785,6 +810,548 @@ def cmd_stop(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# CPU affinity management
+# ---------------------------------------------------------------------------
+
+# Drop-in filename written by smd (separate from foreign tools' names).
+_SMD_AFFINITY_DROP_IN = 'smd-cpu-affinity.conf'
+
+# Drop-in filenames installed by other tools that smd supersedes.
+_FOREIGN_AFFINITY_DROP_INS = [
+    'cpu-affinity.conf',          # hf-timestd setup-cpu-affinity.sh
+    '99-wdctl-cpu-affinity.conf', # wd-ctl apply
+]
+
+# hf-timestd units that watch radiod for reinstalls and re-apply its drop-in.
+_HFTIMESTD_AFFINITY_UNITS = [
+    'timestd-radiod-affinity.path',
+    'timestd-radiod-affinity.service',
+]
+
+# Service template → cpu group.  Covers all smd-managed services.
+# radiod instances are handled separately (per-instance, one physical core each).
+_AFFINITY_UNITS = {
+    # wsprdaemon group
+    'wd-decode@.service':                'other',
+    'wd-ka9q-record@.service':           'other',
+    'wd-kiwi-record@.service':           'other',
+    'wd-post@.service':                  'other',
+    'wd-upload-wsprnet@.service':        'other',
+    'wd-upload-wsprdaemon@.service':     'other',
+    'wd-ka9q-web@.service':              'other',
+    'wd-spool-clean.service':            'other',
+    # hf-timestd / grape group
+    'timestd-core-recorder.service':     'other',
+    'timestd-fusion.service':            'other',
+    'timestd-l2-calibration.service':    'other',
+    'timestd-metrology@.service':        'other',
+    'timestd-physics.service':           'other',
+    'timestd-vtec.service':              'other',
+    'timestd-iono-reanalysis.service':   'other',
+    'timestd-radiod-monitor.service':    'other',
+    'timestd-chrony-monitor.service':    'other',
+    'timestd-pipeline-watchdog.service': 'other',
+    'timestd-prune.service':             'other',
+    'timestd-raw-cleanup.service':       'other',
+    'grape-daily.service':               'other',
+}
+
+
+def _cpu_list_str(cpus: set) -> str:
+    """Return sorted space-separated CPU list, e.g. '2 3 12 13 14 15'."""
+    return ' '.join(str(c) for c in sorted(cpus))
+
+
+def _parse_cpu_mask(s: str) -> set:
+    """Parse a Cpus_allowed_list or systemd CPUAffinity string into a set of ints.
+
+    Handles space/comma-separated tokens and hyphenated ranges, e.g.
+    '0-3 8 12-15'  →  {0, 1, 2, 3, 8, 12, 13, 14, 15}
+    """
+    parts: set = set()
+    for token in s.replace(',', ' ').split():
+        if '-' in token:
+            a, b = token.split('-', 1)
+            try:
+                parts.update(range(int(a), int(b) + 1))
+            except ValueError:
+                pass
+        else:
+            try:
+                parts.add(int(token))
+            except ValueError:
+                pass
+    return parts
+
+
+def _get_physical_cores() -> list:
+    """Return an ordered list of CPU sets, one set per physical core.
+
+    Reads /sys/devices/system/cpu/cpu*/topology/thread_siblings_list so that
+    HT sibling pairs are grouped.  Ordered by lowest logical CPU in each group.
+    Falls back to treating each logical CPU as its own core (no HT, or VM).
+    """
+    seen: set = set()
+    core_map: dict = {}
+    n = os.cpu_count() or 1
+    for cpu in range(n):
+        p = Path(f'/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list')
+        try:
+            siblings = _parse_cpu_mask(p.read_text().strip())
+        except OSError:
+            siblings = {cpu}
+        key = frozenset(siblings)
+        if key not in seen:
+            seen.add(key)
+            core_map[min(siblings)] = siblings
+    return [core_map[k] for k in sorted(core_map)]
+
+
+def _get_radiod_instances() -> list:
+    """Return sorted list of radiod@*.service unit names known to systemd."""
+    import json as _json
+    r = _run(['systemctl', 'list-units', '--no-legend', '--no-pager',
+              '--all', '--output=json', 'radiod@*.service'])
+    try:
+        return sorted(u.get('unit', '') for u in _json.loads(r.stdout)
+                      if u.get('unit', ''))
+    except Exception:
+        return []
+
+
+def _compute_affinity_plan(topology: dict) -> tuple:
+    """Return (radiod_plan, other_cpus).
+
+    radiod_plan : dict  {unit_name: cpu_set}
+    other_cpus  : set of all CPUs not claimed by any radiod instance.
+    """
+    cores     = _get_physical_cores()
+    instances = _get_radiod_instances()
+
+    radiod_plan: dict = {}
+    for i, unit in enumerate(instances):
+        if i < len(cores):
+            radiod_plan[unit] = cores[i]
+        else:
+            _warn(f'{unit}: more radiod instances than cores — sharing core {len(cores)-1}')
+            radiod_plan[unit] = cores[-1]
+
+    radiod_all: set = set()
+    for cpus in radiod_plan.values():
+        radiod_all.update(cpus)
+
+    ca         = topology.get('cpu_affinity', {})
+    other_spec = ca.get('other_cpus', '').strip()
+    if other_spec:
+        other_cpus = _parse_cpu_mask(other_spec)
+    else:
+        other_cpus = set(range(os.cpu_count() or 16)) - radiod_all
+
+    return radiod_plan, other_cpus
+
+
+def _get_radiod_cpus() -> set:
+    """Return the set of CPU numbers assigned to radiod via systemd CPUAffinity."""
+    import json as _json
+
+    r = _run(['systemctl', 'list-units', '--no-legend', '--no-pager',
+              '--all', '--output=json', 'radiod@*.service'])
+    try:
+        units = _json.loads(r.stdout)
+    except Exception:
+        units = []
+
+    cpus: set = set()
+    for u in units:
+        name = u.get('unit', '')
+        if not name:
+            continue
+        r2 = _run(['systemctl', 'show', '-p', 'CPUAffinity', '--value', name])
+        mask = r2.stdout.strip()
+        if mask:
+            cpus.update(_parse_cpu_mask(mask))
+
+    return cpus
+
+
+def _read_proc_cpus(pid_or_tid: str) -> str | None:
+    """Return Cpus_allowed_list string for a PID or TID, or None on error."""
+    try:
+        text = Path(f'/proc/{pid_or_tid}/status').read_text()
+        line = next((l for l in text.splitlines()
+                     if l.startswith('Cpus_allowed_list:')), None)
+        return line.split(':', 1)[1].strip() if line else None
+    except OSError:
+        return None
+
+
+def _thread_affinity_groups(pid: str) -> dict:
+    """Return {cpu_mask: [(tid, thread_name), ...]} for every thread in pid."""
+    groups: dict = {}
+    task_dir = Path(f'/proc/{pid}/task')
+    if not task_dir.exists():
+        return groups
+    for td in task_dir.iterdir():
+        tid = td.name
+        try:
+            text = (td / 'status').read_text()
+        except OSError:
+            continue
+        name_line = next((l for l in text.splitlines() if l.startswith('Name:')), '')
+        tname = name_line.split(':', 1)[1].strip() if name_line else tid
+        mask_line = next((l for l in text.splitlines()
+                          if l.startswith('Cpus_allowed_list:')), '')
+        mask = mask_line.split(':', 1)[1].strip() if mask_line else '?'
+        groups.setdefault(mask, []).append((tid, tname))
+    return groups
+
+
+def _write_affinity_drop_in(unit: str, cpus: set, label: str) -> bool:
+    """Write /etc/systemd/system/<unit>.d/smd-cpu-affinity.conf."""
+    import tempfile
+    cpu_str  = _cpu_list_str(cpus)
+    drop_dir = Path(f'/etc/systemd/system/{unit}.d')
+    drop_in  = drop_dir / _SMD_AFFINITY_DROP_IN
+    content  = textwrap.dedent(f'''\
+        # CPU affinity managed by smd — do not edit manually.
+        # Role: {label}
+        # Regenerate: sudo smd diag cpu-affinity --apply
+        [Service]
+        CPUAffinity=
+        CPUAffinity={cpu_str}
+        AllowedCPUs=
+        AllowedCPUs={cpu_str}
+    ''')
+    r = _run(['mkdir', '-p', str(drop_dir)], sudo=True)
+    if r.returncode != 0:
+        _err(f'{unit}: cannot create {drop_dir}')
+        return False
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.conf',
+                                         delete=False, dir='/tmp') as f:
+            f.write(content)
+            tmp = f.name
+        r = _run(['mv', tmp, str(drop_in)], sudo=True)
+        if r.returncode != 0:
+            _err(f'{unit}: mv failed')
+            return False
+    except OSError as e:
+        _err(f'{unit}: {e}')
+        return False
+    return True
+
+
+def _remove_foreign_affinity_drop_ins() -> list:
+    """Remove cpu-affinity drop-ins written by hf-timestd and wd-ctl."""
+    results = []
+    for name in _FOREIGN_AFFINITY_DROP_INS:
+        for p in sorted(Path('/etc/systemd/system').glob(f'*.d/{name}')):
+            r = _run(['rm', '-f', str(p)], sudo=True)
+            results.append((p, r.returncode == 0))
+    return results
+
+
+def _disable_hftimestd_affinity_watcher() -> None:
+    """Disable and stop the hf-timestd units that monitor radiod for reinstalls."""
+    for unit in _HFTIMESTD_AFFINITY_UNITS:
+        r = _run(['systemctl', 'is-enabled', '--quiet', unit])
+        if r.returncode == 0:
+            _run(['systemctl', 'disable', '--now', unit], sudo=True)
+            _ok(f'disabled + stopped {unit}')
+        else:
+            _info(f'{unit}: not enabled (skipping)')
+
+
+def _apply_cpu_affinity_runtime(unit: str, cpus: set) -> bool:
+    """Apply CPUAffinity/AllowedCPUs to a running unit without restarting it."""
+    cpu_str = _cpu_list_str(cpus)
+    r = _run(['systemctl', 'set-property', '--runtime', unit,
+              f'CPUAffinity={cpu_str}', f'AllowedCPUs={cpu_str}'], sudo=True)
+    if r.returncode == 0:
+        return True
+    r2 = _run(['systemctl', 'show', '-p', 'MainPID', '--value', unit])
+    pid = r2.stdout.strip()
+    if pid and pid != '0':
+        mask = ','.join(str(c) for c in sorted(cpus))
+        r3 = _run(['taskset', '-a', '-cp', mask, pid], sudo=True)
+        return r3.returncode == 0
+    return False
+
+
+def cmd_diag_cpu_affinity(args) -> int:
+    """Show CPU affinity of every running smd-managed service process."""
+    import json as _json
+
+    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    show_all_threads = getattr(args, 'threads', False)
+
+    _heading('diag: CPU affinity')
+
+    # Build the full set of unit patterns to check: radiod instances + _AFFINITY_UNITS
+    radiod_instances = _get_radiod_instances()
+    unit_patterns = radiod_instances + [
+        u.replace('@.service', '@*.service') if '@.' in u else u
+        for u in _AFFINITY_UNITS
+    ]
+
+    any_found = False
+    for pattern in unit_patterns:
+        r = _run(['systemctl', 'list-units', '--no-legend', '--no-pager',
+                  '--all', '--output=json', pattern])
+        if r.returncode != 0 or not r.stdout.strip():
+            continue
+        try:
+            units = _json.loads(r.stdout)
+        except Exception:
+            units = []
+
+        for u in units:
+            name   = u.get('unit', u.get('name', ''))
+            active = u.get('active', u.get('activestate', ''))
+            if not name:
+                continue
+
+            r2 = _run(['systemctl', 'show', '-p', 'MainPID', '--value', name])
+            pid_str = r2.stdout.strip()
+            if not pid_str or pid_str == '0':
+                _info(f'{name}: not running ({active})')
+                continue
+
+            pid = pid_str
+            any_found = True
+
+            r_sd = _run(['systemctl', 'show', '-p', 'CPUAffinity', '--value', name])
+            systemd_mask = r_sd.stdout.strip()
+            proc_cpus    = _read_proc_cpus(pid) or '?'
+
+            sd_set   = _parse_cpu_mask(systemd_mask)
+            proc_set = _parse_cpu_mask(proc_cpus)
+            mismatch = bool(sd_set) and sd_set != proc_set
+
+            sd_note = f'  [systemd CPUAffinity: {systemd_mask}]' if systemd_mask else ''
+            if mismatch:
+                _warn(f'{name}  (pid {pid})  actual CPUs: {proc_cpus}{sd_note}')
+                _info(f'       radiod overrides systemd affinity via sched_setaffinity()')
+            else:
+                _ok(f'{name}  (pid {pid})  CPUs: {proc_cpus}{sd_note}')
+
+            thread_groups = _thread_affinity_groups(pid)
+            if not thread_groups:
+                continue
+
+            if show_all_threads:
+                display_masks = sorted(thread_groups)
+            else:
+                display_masks = sorted(m for m in thread_groups if m != proc_cpus)
+
+            if display_masks:
+                total_threads = sum(len(v) for v in thread_groups.values())
+                if not show_all_threads:
+                    diff_count = sum(len(thread_groups[m]) for m in display_masks)
+                    _info(f'       {total_threads} threads — showing {diff_count} with non-process affinity:')
+                else:
+                    _info(f'       {total_threads} threads:')
+                for mask in display_masks:
+                    threads = thread_groups[mask]
+                    unique_names = sorted(set(n for _, n in threads))
+                    name_str = ', '.join(unique_names)
+                    if len(name_str) > 60:
+                        name_str = name_str[:57] + '...'
+                    diff_flag = '  ← differs' if mask != proc_cpus else ''
+                    print(f'         CPUs {mask:<10s}  ×{len(threads):>3}  {name_str}{diff_flag}')
+            elif not show_all_threads and thread_groups:
+                total = sum(len(v) for v in thread_groups.values())
+                _info(f'       {total} threads — all share process affinity ({proc_cpus})')
+
+    if not any_found:
+        _info('No active managed service processes found.')
+
+    if getattr(args, 'apply', False):
+        if os.geteuid() != 0:
+            _err('--apply requires root  (sudo smd diag cpu-affinity --apply)')
+            return 1
+
+        radiod_plan, other_cpus = _compute_affinity_plan(topology)
+
+        _heading('cpu-affinity apply')
+        if radiod_plan:
+            for unit, cpus in radiod_plan.items():
+                _info(f'radiod  {unit}: CPUs {_cpu_list_str(cpus)}')
+        else:
+            _info('radiod: (no running instances found)')
+        _info(f'other   CPUs: {_cpu_list_str(other_cpus)}')
+        print()
+
+        _info('Disabling hf-timestd affinity watcher units ...')
+        _disable_hftimestd_affinity_watcher()
+        print()
+
+        _info('Removing foreign affinity drop-ins ...')
+        removed = _remove_foreign_affinity_drop_ins()
+        if removed:
+            for path, ok in removed:
+                (_ok if ok else _warn)(
+                    f'{"removed" if ok else "could not remove"} {path}')
+        else:
+            _info('(none found)')
+        print()
+
+        _info('Writing smd affinity drop-ins ...')
+        errors = 0
+
+        for unit, cpus in radiod_plan.items():
+            label = f'radiod instance → CPUs {_cpu_list_str(cpus)}'
+            if _write_affinity_drop_in(unit, cpus, label):
+                _ok(f'{unit}: {label}')
+            else:
+                errors += 1
+
+        stale = Path('/etc/systemd/system/radiod@.service.d') / _SMD_AFFINITY_DROP_IN
+        if stale.exists():
+            _run(['rm', '-f', str(stale)], sudo=True)
+            _info('removed stale radiod@.service template drop-in')
+
+        for unit in _AFFINITY_UNITS:
+            label = f'other → CPUs {_cpu_list_str(other_cpus)}'
+            if _write_affinity_drop_in(unit, other_cpus, label):
+                _ok(f'{unit}: {label}')
+            else:
+                errors += 1
+        print()
+
+        _info('Running systemctl daemon-reload ...')
+        r = _run(['systemctl', 'daemon-reload'], sudo=True)
+        _ok('daemon-reload done') if r.returncode == 0 else _warn('daemon-reload reported errors')
+        print()
+
+        _info('Applying to running units via systemctl set-property --runtime ...')
+        for unit, cpus in radiod_plan.items():
+            if _apply_cpu_affinity_runtime(unit, cpus):
+                _ok(f'{unit}: applied')
+            else:
+                _info(f'{unit}: not running or set-property unsupported')
+
+        for unit in _AFFINITY_UNITS:
+            glob_pat = unit.replace('@.service', '@*.service')
+            r2 = _run(['systemctl', 'list-units', '--no-legend', '--no-pager',
+                       '--state=running', '--output=json', glob_pat])
+            try:
+                instances = [u.get('unit', '') for u in _json.loads(r2.stdout)
+                             if u.get('unit', '')]
+            except Exception:
+                instances = []
+            if not instances and '@' not in unit:
+                instances = [unit]
+            for inst in instances:
+                if _apply_cpu_affinity_runtime(inst, other_cpus):
+                    _ok(f'{inst}: applied')
+                else:
+                    _info(f'{inst}: not running or set-property unsupported')
+        print()
+
+        if errors:
+            _err(f'{errors} drop-in(s) failed to write')
+            return 1
+        _ok('CPU affinity policy applied')
+        _info('(Services will fully enforce AllowedCPUs via cgroup after next restart)')
+
+    print()
+    return 0
+
+
+def cmd_diag_cpu_freq(args) -> int:
+    """Show and optionally apply per-CPU scaling_max_freq based on radiod CPU assignment."""
+    topology  = getattr(args, '_topology_override', None) or \
+                _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    cfg       = topology.get('cpu_freq', {})
+    radiod_max_mhz = cfg.get('radiod_max_mhz', 3200)
+    other_max_mhz  = cfg.get('other_max_mhz',  1400)
+    do_apply  = getattr(args, 'apply', False)
+
+    _heading('diag: CPU frequencies')
+
+    if do_apply and os.geteuid() != 0:
+        _err('--apply requires root  (sudo smd diag cpu-freq --apply)')
+        return 1
+
+    radiod_cpus = _get_radiod_cpus()
+    cpu_count   = os.cpu_count() or 1
+
+    _info(f'Policy:  radiod CPUs → {radiod_max_mhz} MHz max  |  '
+          f'other CPUs → {other_max_mhz} MHz max')
+    if radiod_cpus:
+        _info(f'Radiod CPUs (CPUAffinity): {sorted(radiod_cpus)}')
+    else:
+        _warn('No radiod CPUAffinity detected — radiod may not be running')
+    print()
+    _info('  (Configure limits in /etc/sigmond/topology.toml  [cpu_freq])')
+    print()
+
+    changes = 0
+    errors  = 0
+
+    for cpu in range(cpu_count):
+        role       = 'radiod' if cpu in radiod_cpus else 'other '
+        target_mhz = radiod_max_mhz if cpu in radiod_cpus else other_max_mhz
+        target_khz = target_mhz * 1000
+
+        freq_dir = Path(f'/sys/devices/system/cpu/cpu{cpu}/cpufreq')
+        if not freq_dir.exists():
+            _warn(f'cpu{cpu:2d}: no cpufreq sysfs — driver not loaded or VM?')
+            continue
+
+        try:
+            current_khz = int((freq_dir / 'scaling_max_freq').read_text().strip())
+        except (OSError, ValueError) as e:
+            _warn(f'cpu{cpu:2d}: cannot read scaling_max_freq: {e}')
+            continue
+
+        avail_path = freq_dir / 'scaling_available_frequencies'
+        if avail_path.exists():
+            try:
+                avail = sorted(int(f) for f in avail_path.read_text().split() if f.isdigit())
+                candidates = [f for f in avail if f <= target_khz]
+                nearest_khz = max(candidates) if candidates else (avail[0] if avail else target_khz)
+            except (ValueError, IndexError):
+                nearest_khz = target_khz
+        else:
+            nearest_khz = target_khz
+
+        current_mhz = current_khz  // 1000
+        nearest_mhz = nearest_khz // 1000
+
+        if current_khz == nearest_khz:
+            _ok(f'cpu{cpu:2d}  [{role}]  {current_mhz:5d} MHz  ✓')
+        else:
+            arrow = f'{current_mhz} → {nearest_mhz} MHz'
+            if do_apply:
+                try:
+                    (freq_dir / 'scaling_max_freq').write_text(str(nearest_khz))
+                    _ok(f'cpu{cpu:2d}  [{role}]  {arrow}  applied')
+                    changes += 1
+                except OSError as e:
+                    _err(f'cpu{cpu:2d}: write failed: {e}')
+                    errors += 1
+            else:
+                _warn(f'cpu{cpu:2d}  [{role}]  {arrow}  (run with --apply to set)')
+                changes += 1
+
+    print()
+    if do_apply:
+        if errors:
+            _err(f'{errors} CPU(s) failed to update')
+            return 1
+        _ok(f'{changes} CPU(s) updated' if changes else 'All CPUs already match policy')
+    else:
+        if changes:
+            _info(f'{changes} CPU(s) differ from policy')
+        else:
+            _ok('All CPUs match policy')
+
+    return 0
+
+
 def cmd_restart(args) -> int:
     if _need_root('restart'):
         return 1
@@ -1255,6 +1822,137 @@ def cmd_diag(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# smd completion
+# ---------------------------------------------------------------------------
+
+_BASH_COMPLETION = r"""
+# bash completion for smd
+# Source this file or drop it in /etc/bash_completion.d/smd
+# Generate with: smd completion bash
+
+_smd_complete() {
+    local cur prev words cword
+    _init_completion 2>/dev/null || {
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+        words=("${COMP_WORDS[@]}")
+        cword=$COMP_CWORD
+    }
+
+    local top_cmds="install apply start stop status restart reload list log update diag validate config completion"
+    local components="radiod wspr ka9q-web grape rac"
+
+    if [[ "$prev" == "--components" ]]; then
+        COMPREPLY=($(compgen -W "$components" -- "$cur"))
+        return
+    fi
+
+    if [[ "$prev" =~ ^(--topology|--from|--to|--client-dir)$ ]]; then
+        COMPREPLY=($(compgen -f -- "$cur"))
+        return
+    fi
+
+    case $cword in
+        1)
+            COMPREPLY=($(compgen -W "$top_cmds" -- "$cur"))
+            ;;
+        2)
+            case "${words[1]}" in
+                install)
+                    COMPREPLY=($(compgen -W "--components --client-dir --dry-run --topology" -- "$cur"))
+                    ;;
+                apply)
+                    COMPREPLY=($(compgen -W "--dry-run --topology" -- "$cur"))
+                    ;;
+                start|stop|status|restart|reload)
+                    COMPREPLY=($(compgen -W "--components --topology" -- "$cur"))
+                    ;;
+                diag)
+                    COMPREPLY=($(compgen -W "cpu-affinity cpu-freq --components --topology" -- "$cur"))
+                    ;;
+                validate)
+                    COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
+                    ;;
+                config)
+                    COMPREPLY=($(compgen -W "show migrate" -- "$cur"))
+                    ;;
+                completion)
+                    COMPREPLY=($(compgen -W "bash" -- "$cur"))
+                    ;;
+            esac
+            ;;
+        *)
+            case "${words[1]}" in
+                install)
+                    COMPREPLY=($(compgen -W "--components --client-dir --dry-run --topology" -- "$cur"))
+                    ;;
+                apply)
+                    COMPREPLY=($(compgen -W "--dry-run --topology" -- "$cur"))
+                    ;;
+                start|stop|status|restart|reload)
+                    COMPREPLY=($(compgen -W "--components --topology" -- "$cur"))
+                    ;;
+                diag)
+                    case "${words[2]}" in
+                        cpu-affinity)
+                            COMPREPLY=($(compgen -W "--components --threads --apply --topology" -- "$cur"))
+                            ;;
+                        cpu-freq)
+                            COMPREPLY=($(compgen -W "--apply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "cpu-affinity cpu-freq --components --topology" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
+                validate)
+                    COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
+                    ;;
+                config)
+                    case "${words[2]}" in
+                        show)
+                            COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
+                            ;;
+                        migrate)
+                            COMPREPLY=($(compgen -W "--from --to --write --force --topology" -- "$cur"))
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "show migrate" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
+                completion)
+                    COMPREPLY=($(compgen -W "bash" -- "$cur"))
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+complete -F _smd_complete smd
+"""
+
+
+def cmd_completion(args) -> int:
+    sub = getattr(args, 'completion_command', None)
+    if sub == 'bash':
+        print(_BASH_COMPLETION.strip())
+        return 0
+    print('Usage: smd completion bash')
+    print()
+    print('To enable tab completion for the current session:')
+    print('  source <(smd completion bash)')
+    print()
+    print('To install permanently (system-wide):')
+    print('  sudo smd completion bash > /etc/bash_completion.d/smd')
+    print()
+    print('To install for your user only:')
+    print('  mkdir -p ~/.local/share/bash-completion/completions')
+    print('  smd completion bash > ~/.local/share/bash-completion/completions/smd')
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1265,13 +1963,16 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent('''\
             commands:
-              install   install and configure all enabled components
-              apply     reconcile running services with current config
-              start     start all managed services
-              stop      stop all managed services
-              status    show service health
-              update    pull latest code and re-apply
-              diag      run diagnostics
+              install            install and configure all enabled components
+              apply              reconcile running services with current config
+              start              start all managed services
+              stop               stop all managed services
+              status             show service health
+              update             pull latest code and re-apply
+              diag               run diagnostics  (see: smd diag --help)
+              diag cpu-affinity  show CPU affinity of all managed service processes
+              diag cpu-freq      show/apply CPU frequency limits per radiod policy
+              completion bash    emit bash tab-completion script
         '''),
     )
     parser.add_argument('--topology', metavar='FILE',
@@ -1340,9 +2041,32 @@ def main() -> int:
     # update
     sub.add_parser('update', help='pull latest code and re-apply')
 
-    # diag
-    p = sub.add_parser('diag', help='run cross-component diagnostics')
+    # diag  (with its own sub-commands)
+    p_diag = sub.add_parser('diag', help='run cross-component diagnostics')
+    p_diag.add_argument('--components', metavar='C1,C2')
+    diag_sub = p_diag.add_subparsers(dest='diag_command')
+
+    p = diag_sub.add_parser('cpu-affinity',
+                             help='show CPU affinity of all managed service processes')
     p.add_argument('--components', metavar='C1,C2')
+    p.add_argument('--threads', action='store_true',
+                   help='show every thread grouped by CPU mask (default: only differing threads)')
+    p.add_argument('--apply', action='store_true',
+                   help='remove foreign affinity drop-ins and write smd-managed ones (requires root)')
+
+    p = diag_sub.add_parser('cpu-freq',
+                             help='show (and optionally apply) per-CPU frequency limits')
+    p.add_argument('--apply', action='store_true',
+                   help='write scaling_max_freq to sysfs (requires root)')
+    p.add_argument('--radiod-max-mhz', type=int, metavar='MHZ',
+                   help='override radiod CPU max frequency (default: from topology.toml or 3200)')
+    p.add_argument('--other-max-mhz', type=int, metavar='MHZ',
+                   help='override other CPU max frequency (default: from topology.toml or 1400)')
+
+    # completion
+    p_completion = sub.add_parser('completion', help='emit shell tab-completion script')
+    completion_sub = p_completion.add_subparsers(dest='completion_command')
+    completion_sub.add_parser('bash', help='emit bash completion script (source or install)')
 
     # validate (Phase 1)
     p = sub.add_parser('validate',
@@ -1387,8 +2111,24 @@ def main() -> int:
         'log':     cmd_log,
         'status':  cmd_status,
         'update':  cmd_update,
-        'diag':    cmd_diag,
     }
+
+    if args.command == 'completion':
+        return cmd_completion(args)
+
+    if args.command == 'diag':
+        diag_cmd = getattr(args, 'diag_command', None)
+        if diag_cmd == 'cpu-affinity':
+            return cmd_diag_cpu_affinity(args)
+        if diag_cmd == 'cpu-freq':
+            topo = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+            if getattr(args, 'radiod_max_mhz', None):
+                topo['cpu_freq']['radiod_max_mhz'] = args.radiod_max_mhz
+            if getattr(args, 'other_max_mhz', None):
+                topo['cpu_freq']['other_max_mhz'] = args.other_max_mhz
+            args._topology_override = topo
+            return cmd_diag_cpu_freq(args)
+        return cmd_diag(args)
 
     if args.command in ('validate', 'config'):
         if not _HAS_SIGMOND_LIB:
