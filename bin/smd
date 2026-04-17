@@ -4,13 +4,14 @@
 Dr. SigMonD: "Zo... ven did your signals first start to propagate?"
 
 Usage:
-    smd install    [--components COMP,...]  [--client-dir DIR]  [--dry-run]
+    smd install    [<client>]  [--components COMP,...]  [--dry-run]  [--yes]
     smd apply      [--dry-run]
     smd start      [<component> [<instance>]]
     smd stop       [<component> [<instance>]]
     smd restart    [<component> [<instance>]]
     smd reload     [--via=auto|systemd|socket]  [<component>]
-    smd list       [--json]  [<component>]
+    smd list       [--json]  [--available | --all]  [<component>]
+    smd log        [--files | --level LEVEL]  [<client>]
     smd status     [<component>]
     smd update
     smd diag
@@ -48,6 +49,13 @@ try:
     from sigmond.commands.validate import cmd_validate
     from sigmond.commands.config   import cmd_config_show, cmd_config_migrate
     from sigmond.lifecycle         import resolve_units, UnitRef
+    from sigmond.catalog           import load_catalog, CatalogEntry, get_entry, resolve_name, find_client_binary
+    from sigmond.installer         import install_client as _do_install_client
+    from sigmond.log_cmd           import (
+        follow_journal, follow_files, flatten_log_paths,
+        get_inventory_log_paths, set_log_level, send_sighup,
+        client_env_key,
+    )
     _HAS_SIGMOND_LIB = True
 except ImportError:
     _HAS_SIGMOND_LIB = False
@@ -107,6 +115,46 @@ def _need_root(cmd_name: str) -> bool:
               file=sys.stderr)
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Client contract queries
+# ---------------------------------------------------------------------------
+
+def _get_client_inventory(client_name: str, timeout: float = 5.0):
+    """Call <client> inventory --json. Returns parsed dict or None."""
+    import json as _json
+    binary = find_client_binary(client_name) if _HAS_SIGMOND_LIB else shutil.which(client_name)
+    if not binary:
+        return None
+    try:
+        r = subprocess.run(
+            [binary, 'inventory', '--json'],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if r.returncode != 0:
+            return None
+        return _json.loads(r.stdout)
+    except (subprocess.SubprocessError, _json.JSONDecodeError, OSError):
+        return None
+
+
+def _get_client_validate(client_name: str, timeout: float = 5.0):
+    """Call <client> validate --json. Returns parsed dict or None."""
+    import json as _json
+    binary = find_client_binary(client_name) if _HAS_SIGMOND_LIB else shutil.which(client_name)
+    if not binary:
+        return None
+    try:
+        r = subprocess.run(
+            [binary, 'validate', '--json'],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if r.returncode != 0:
+            return None
+        return _json.loads(r.stdout)
+    except (subprocess.SubprocessError, _json.JSONDecodeError, OSError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -179,11 +227,15 @@ def _enabled_components(topology: dict, only: list = None) -> list:
 
 # Map each component to the deps.conf sections it needs
 COMPONENT_DEPS = {
-    'radiod':   ['ka9q-radio'],
-    'wspr':     ['ka9q-python', 'wspr-recorder', 'kiwiclient', 'ftlib-pskreporter'],
-    'ka9q-web': ['ka9q-web'],
-    'grape':    [],   # hf-timestd manages itself
-    'rac':      [],
+    'radiod':              ['ka9q-radio'],
+    'wspr':                ['ka9q-python', 'wspr-recorder', 'kiwiclient', 'ftlib-pskreporter'],
+    'wsprdaemon-client':   ['ka9q-python', 'wspr-recorder', 'kiwiclient', 'ftlib-pskreporter'],
+    'ka9q-web':            ['ka9q-web'],
+    'grape':               [],   # legacy alias for hf-timestd
+    'hf-timestd':          [],   # manages itself
+    'psk-recorder':        [],   # manages itself
+    'wspr-recorder':       [],   # manages itself
+    'rac':                 [],
 }
 
 # Deps that require a C build step after cloning
@@ -505,6 +557,62 @@ def _ensure_sigmond_dirs() -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_install(args) -> int:
+    client = getattr(args, 'client', None)
+    if client:
+        return _install_single_client(args)
+    return _install_full_suite(args)
+
+
+def _install_single_client(args) -> int:
+    """Catalog-driven install of a single client: smd install <client>."""
+    client = args.client
+    dry_run = getattr(args, 'dry_run', False)
+    yes = getattr(args, 'yes', False)
+
+    try:
+        catalog = load_catalog()
+    except FileNotFoundError as exc:
+        _err(str(exc))
+        return 1
+
+    entry = get_entry(client, catalog)
+    if entry is None:
+        _err(f"unknown client '{client}' — see: smd list --available")
+        return 1
+
+    if not entry.install_script:
+        _err(f"'{entry.name}' has no install_script in the catalog")
+        _info(f"for radiod/ka9q-web, use: smd install  (full-suite legacy path)")
+        return 1
+
+    _heading(f'install {entry.name}')
+    _info(f'repo:   {entry.repo}')
+    _info(f'script: {entry.install_script}')
+
+    if dry_run:
+        _info('(dry-run) would clone repo and run install.sh')
+        return 0
+
+    if _need_root('install'):
+        return 1
+
+    try:
+        result = _do_install_client(entry, dry_run=dry_run, yes=yes, pull=True)
+    except RuntimeError as exc:
+        _err(str(exc))
+        return 1
+
+    if result:
+        _ok(f'{entry.name} installed successfully')
+        _info(f'next: edit /etc/{entry.name}/ config, then: smd start --components {entry.name}')
+        return 0
+    else:
+        _err(f'{entry.name} install failed')
+        return 1
+
+
+def _install_full_suite(args) -> int:
+    """Legacy full-suite install (wsprdaemon-client-centric)."""
     if _need_root('install'):
         return 1
 
@@ -785,11 +893,115 @@ def cmd_status(args) -> int:
             if state not in ('active', 'inactive'):
                 any_bad = True
 
+    # Inventory enrichment for installed clients
+    if _HAS_SIGMOND_LIB:
+        try:
+            catalog = load_catalog()
+        except FileNotFoundError:
+            catalog = {}
+        seen = set()
+        for comp in sorted(by_component.keys()):
+            entry = get_entry(comp, catalog) if catalog else None
+            if entry is None or entry.kind != 'client' or entry.name in seen:
+                continue
+            seen.add(entry.name)
+            inv = _get_client_inventory(entry.name)
+            if inv is None:
+                continue
+            version = inv.get('version', '?')
+            contract = inv.get('contract_version', '?')
+            instances = inv.get('instances', [])
+            issues = inv.get('issues', [])
+            git = inv.get('git', {})
+            sha = git.get('short', '')
+            sha_tag = f'  ({sha})' if sha else ''
+
+            print(f'\n  {entry.name}  v{version}{sha_tag}  contract={contract}')
+            for inst in instances:
+                name = inst.get('instance', '?')
+                channels = inst.get('ka9q_channels', 0)
+                freqs = inst.get('frequencies_hz', [])
+                modes = inst.get('modes', [])
+                parts = [f'{channels} ch'] if channels else []
+                if modes:
+                    parts.append(f'modes={",".join(str(m) for m in modes)}')
+                elif freqs:
+                    parts.append(f'{len(freqs)} freqs')
+                _info(f'{name}: {", ".join(parts)}' if parts else name)
+            for issue in issues:
+                sev = issue.get('severity', 'warn') if isinstance(issue, dict) else 'warn'
+                msg = issue.get('message', str(issue)) if isinstance(issue, dict) else str(issue)
+                if sev == 'fail':
+                    _err(msg)
+                else:
+                    _warn(msg)
+
     print()
     return 1 if any_bad else 0
 
 
 def cmd_list(args) -> int:
+    show_available = getattr(args, 'available', False)
+    show_all = getattr(args, 'all', False)
+
+    if show_available or show_all:
+        return _list_catalog(args, include_configured=show_all)
+    return _list_configured(args)
+
+
+def _list_catalog(args, *, include_configured: bool) -> int:
+    import json as _json
+
+    try:
+        catalog = load_catalog()
+    except FileNotFoundError as exc:
+        _err(str(exc))
+        return 1
+
+    if args.json:
+        out = []
+        for name, entry in sorted(catalog.items()):
+            d = {
+                'name': entry.name,
+                'kind': entry.kind,
+                'description': entry.description,
+                'repo': entry.repo,
+                'uses': list(entry.uses),
+                'contract': entry.contract,
+                'install_script': entry.install_script,
+                'installed': entry.is_installed(),
+            }
+            out.append(d)
+        print(_json.dumps(out, indent=2))
+    else:
+        servers = [(n, e) for n, e in sorted(catalog.items()) if e.kind == 'server']
+        clients = [(n, e) for n, e in sorted(catalog.items()) if e.kind == 'client']
+
+        _heading('catalog — available')
+        if servers:
+            print(f'\n  Servers ({len(servers)})')
+            for _, entry in servers:
+                _print_catalog_entry(entry)
+        if clients:
+            print(f'\n  Clients ({len(clients)})')
+            for _, entry in clients:
+                _print_catalog_entry(entry)
+
+    if include_configured:
+        print()
+        return _list_configured(args)
+    return 0
+
+
+def _print_catalog_entry(entry) -> None:
+    installed = entry.is_installed()
+    sym = '✓' if installed else '·'
+    color = '\033[32m' if installed else '\033[90m'
+    contract_tag = f'  contract={entry.contract}' if entry.contract else ''
+    print(f'    {color}{sym}\033[0m  {entry.name:22s} {entry.description}{contract_tag}')
+
+
+def _list_configured(args) -> int:
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
     only = [c.strip() for c in args.components.split(',')] if args.components else None
     enabled = _enabled_components(topology, only)
@@ -818,7 +1030,7 @@ def cmd_list(args) -> int:
             })
         print(_json.dumps(units_data, indent=2))
     else:
-        _heading('list')
+        _heading('configured units')
         by_component: dict[str, list[UnitRef]] = {}
         for unit in units:
             if unit.component not in by_component:
@@ -836,6 +1048,93 @@ def cmd_list(args) -> int:
                 print(f'    {color}{sym}\033[0m  {unit_ref.unit}: {state}{orphan_tag}')
 
     return 0
+
+
+# ---------------------------------------------------------------------------
+# smd log
+# ---------------------------------------------------------------------------
+
+def cmd_log(args) -> int:
+    client = getattr(args, 'client', None)
+    level = getattr(args, 'level', None)
+    files = getattr(args, 'files', False)
+
+    # --- set log level mode ---
+    if level:
+        topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+        key = set_log_level(client, level)
+        _ok(f'{key}={level.upper()} written to coordination.env')
+
+        if client:
+            only = [client]
+            enabled = _enabled_components(topology, only)
+            if not enabled:
+                enabled = [client]
+            try:
+                units = resolve_units(enabled, _enabled_components(topology))
+                unit_names = [u.unit for u in units if not u.orphaned]
+            except (ValueError, Exception):
+                unit_names = []
+
+            if unit_names:
+                failed = send_sighup(unit_names)
+                for u in unit_names:
+                    if u in failed:
+                        _warn(f'SIGHUP {u}: failed')
+                    else:
+                        _ok(f'SIGHUP {u}')
+            else:
+                _info(f'no units resolved for {client} — SIGHUP skipped')
+        else:
+            _info('CLIENT_LOG_LEVEL set; send SIGHUP to individual clients to apply')
+        return 0
+
+    # --- follow mode (requires a client name) ---
+    if not client:
+        _err('smd log: specify a client name (e.g. smd log psk-recorder)')
+        return 1
+
+    if files:
+        log_paths = get_inventory_log_paths(client)
+        if not log_paths:
+            _err(f'{client}: no log_paths in inventory (is {client} installed?)')
+            return 1
+        paths = flatten_log_paths(log_paths)
+        if not paths:
+            _err(f'{client}: log_paths is empty')
+            return 1
+        missing = [p for p in paths if not Path(p).exists()]
+        if missing:
+            for m in missing:
+                _warn(f'not found: {m}')
+        existing = [p for p in paths if Path(p).exists()]
+        if not existing:
+            _err(f'{client}: none of the log files exist yet')
+            return 1
+        _info(f'tailing {len(existing)} file(s) for {client}...')
+        follow_files(existing)
+        return 0  # unreachable after exec
+
+    # --- default: journalctl follow ---
+    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    only = [client]
+    enabled = _enabled_components(topology, only)
+    if not enabled:
+        enabled = [client]
+    try:
+        all_enabled = _enabled_components(topology)
+        units = resolve_units(enabled, all_enabled)
+        unit_names = [u.unit for u in units if not u.orphaned]
+    except (ValueError, Exception):
+        unit_names = []
+
+    if not unit_names:
+        _warn(f'no units resolved for {client} — trying journalctl with pattern')
+        unit_names = [f'{client}*']
+
+    _info(f'following journal for: {", ".join(unit_names)}')
+    follow_journal(unit_names)
+    return 0  # unreachable after exec
 
 
 # ---------------------------------------------------------------------------
@@ -904,6 +1203,45 @@ def cmd_diag(args) -> int:
                     _warn(f'{dep}: have {current[:12]}, want {pinned[:12]}')
                     errors += 1
 
+    # Client self-validation
+    if _HAS_SIGMOND_LIB:
+        try:
+            catalog = load_catalog()
+        except FileNotFoundError:
+            catalog = {}
+
+        if catalog:
+            only = [c.strip() for c in args.components.split(',')] if getattr(args, 'components', None) else None
+            enabled = _enabled_components(topology, only)
+            print()
+            _info('Client validation:')
+            seen = set()
+            for comp in enabled:
+                entry = get_entry(comp, catalog)
+                if entry is None or entry.kind != 'client' or entry.name in seen:
+                    continue
+                seen.add(entry.name)
+                val = _get_client_validate(entry.name)
+                if val is None:
+                    _info(f'  {entry.name}: validate unavailable')
+                    continue
+                ok = val.get('ok', False)
+                if ok:
+                    _ok(f'{entry.name}: all checks passed')
+                else:
+                    _warn(f'{entry.name}: validation failed')
+                    errors += 1
+                for issue in val.get('issues', []):
+                    if isinstance(issue, dict):
+                        sev = issue.get('severity', 'warn')
+                        msg = issue.get('message', '')
+                    else:
+                        sev, msg = 'warn', str(issue)
+                    if sev == 'fail':
+                        _err(f'  {entry.name}: {msg}')
+                    else:
+                        _warn(f'  {entry.name}: {msg}')
+
     # Service health
     print()
     cmd_status(args)
@@ -942,12 +1280,16 @@ def main() -> int:
 
     # install
     p = sub.add_parser('install', help='install and configure components')
+    p.add_argument('client', nargs='?', default=None,
+                   help='specific client to install from catalog (e.g. psk-recorder)')
     p.add_argument('--components', metavar='C1,C2',
                    help='comma-separated subset (default: all enabled in topology)')
     p.add_argument('--client-dir', metavar='DIR',
                    help='path to wsprdaemon-client (overrides topology)')
     p.add_argument('--dry-run', action='store_true',
                    help='show what would be done without making changes')
+    p.add_argument('--yes', '-y', action='store_true',
+                   help='accept defaults, no interactive prompts')
 
     # apply
     p = sub.add_parser('apply', help='reconcile services with current config')
@@ -980,6 +1322,20 @@ def main() -> int:
     p.add_argument('--components', metavar='C1,C2')
     p.add_argument('--json', action='store_true',
                    help='emit machine-readable JSON')
+    list_scope = p.add_mutually_exclusive_group()
+    list_scope.add_argument('--available', action='store_true',
+                            help='show catalog of known clients (what could be installed)')
+    list_scope.add_argument('--all', action='store_true',
+                            help='show catalog + configured units together')
+
+    # log
+    p = sub.add_parser('log', help='view logs or set log level for a client')
+    p.add_argument('client', nargs='?', default=None,
+                   help='client name (e.g. psk-recorder, hf-timestd)')
+    p.add_argument('--files', action='store_true',
+                   help='tail file logs from inventory log_paths instead of journal')
+    p.add_argument('--level', metavar='LEVEL',
+                   help='set log level (DEBUG/INFO/WARNING/ERROR/CRITICAL) in coordination.env + SIGHUP')
 
     # update
     sub.add_parser('update', help='pull latest code and re-apply')
@@ -1028,6 +1384,7 @@ def main() -> int:
         'restart': cmd_restart,
         'reload':  cmd_reload,
         'list':    cmd_list,
+        'log':     cmd_log,
         'status':  cmd_status,
         'update':  cmd_update,
         'diag':    cmd_diag,

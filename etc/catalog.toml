@@ -1,0 +1,52 @@
+# /etc/sigmond/catalog.toml
+# Sigmond static catalog of known HamSCI SDR clients and servers.
+#
+# Small, bounded, and shipped with sigmond.  Answers the question:
+# "what clients could be installed on this host?" — independent of
+# topology (what IS enabled) and lifecycle (what units resolve to what).
+#
+# Add a new [client.<name>] section when a new client joins the suite.
+# Operators MAY place an override copy at /etc/sigmond/catalog.toml;
+# otherwise sigmond reads this file directly from the repo.
+
+[client.radiod]
+kind            = "server"
+description     = "ka9q-radio SDR daemon — receives and multicasts RF channels"
+repo            = "https://github.com/ka9q/ka9q-radio"
+uses            = []                                  # radiod is the thing others use
+contract        = ""                                  # not a contract-conformant client
+install_script  = ""                                  # built from source via deps.conf
+
+[client.wspr-recorder]
+kind            = "client"
+description     = "WSPR/FST4W audio recorder (period-aligned WAVs)"
+repo            = "https://github.com/mijahauan/wspr-recorder"
+uses            = ["ka9q-python"]
+contract        = "0.4"
+install_script  = "/opt/git/wspr-recorder/scripts/install.sh"
+
+[client.psk-recorder]
+kind            = "client"
+description     = "FT4/FT8 spot recorder for PSKReporter"
+repo            = "https://github.com/mijahauan/psk-recorder"
+uses            = ["ka9q-python"]
+contract        = "0.4"
+install_script  = "/opt/git/psk-recorder/scripts/install.sh"
+
+[client.hf-timestd]
+kind            = "client"
+description     = "HF time-standard analyzer (WWV/WWVH/CHU/BPM)"
+repo            = "https://github.com/mijahauan/hf-timestd"
+uses            = ["ka9q-python"]
+contract        = "0.4"
+install_script  = "/opt/git/hf-timestd/scripts/install.sh"
+topology_alias  = "grape"
+
+[client.wsprdaemon-client]
+kind            = "client"
+description     = "WSPR decoder + poster + uploader (wsprd + jt9 --fst4w)"
+repo            = "https://github.com/rrobinett/wsprdaemon-client"
+uses            = ["ka9q-python"]
+contract        = "0.4"
+install_script  = "/opt/git/wsprdaemon-client/scripts/install.sh"
+topology_alias  = "wspr"

@@ -19,59 +19,85 @@ The CLI entry point is **`smd`**.
 See `tui-configurator.md` for the full design — three-panel Textual TUI,
 topology registry, harmonization rules, screen flow, and open questions.
 
-## Core commands (target CLI)
+## Core commands (implemented)
 
 ```
-smd install    Install & configure all components
-smd apply      Reconcile running services with current config (like wd-ctl apply)
-smd start      Start all managed services
-smd stop       Stop all managed services
-smd status     Show service health (all components)
-smd config     Edit configuration (TUI)
-smd log        View service logs
-smd update     Update dependencies to latest pinned commits, rebuild if needed
-smd diag       Run diagnostics and cross-component validation
+smd install [<client>]   Install a client from catalog, or full-suite (legacy)
+smd apply                Reconcile running services with current config
+smd start                Start all managed services
+smd stop                 Stop all managed services
+smd restart              Restart managed services (with reset-failed)
+smd reload               Reload via signal or restart (auto-routing)
+smd list [--available]   List configured units, or catalog of known clients
+smd log <client>         Follow journal, tail file logs, or set log level
+smd status               Service health + client inventory enrichment
+smd config show|migrate  Inspect or migrate coordination config
+smd validate             Cross-client harmonization rules (read-only)
+smd update               Pull latest code and re-apply
+smd diag                 Network + deps + client validation diagnostics
 ```
 
-## Implementation priorities
+## Architecture layers
 
-1. **`smd install`** — first priority. Installs all components from scratch:
-   - Clones/updates dependency repos (from a deps manifest)
-   - Builds repos that require compilation (ka9q-radio, ka9q-web, onion)
-   - Installs Python packages into the appropriate venvs
-   - Copies `smd` itself to `/usr/local/sbin/`
-   - Installs systemd units
-   - Generates env files from config
-   - Enables and starts services
+1. **Catalog** (`etc/catalog.toml`, `lib/sigmond/catalog.py`) — static
+   registry of known clients.  Answers "what could be installed?"
+   Includes topology-alias bridge (grape → hf-timestd, wspr → wsprdaemon-client).
 
-2. **`smd apply`** — reconciles running services with current config without
-   a full reinstall. Diff desired vs actual, restart only what changed.
+2. **Installer** (`lib/sigmond/installer.py`) — catalog-driven install:
+   clone repo to `/opt/git/<name>`, run the client's canonical `install.sh`.
+   Each client's installer is authoritative; sigmond delegates, not duplicates.
 
-3. **`smd start` / `smd stop`** — simple wrappers around `systemctl
-   start/stop` for the full service set.
+3. **Lifecycle** (`lib/sigmond/lifecycle.py`, contract v0.5 §5) — resolves
+   systemd units from each client's `deploy.toml`.  Expands templated units,
+   discovers instances, marks orphans.  Powers start/stop/restart/reload/list.
 
-4. **`smd status`** — aggregated health across all managed services.
+4. **Logging** (`lib/sigmond/log_cmd.py`, contract v0.3 §10/§11) — journal
+   tailing, file-log tailing via `log_paths` from inventory, runtime log-level
+   control via `coordination.env` + SIGHUP.
 
-5. **TUI configurator** — built on top of the above once the headless commands
-   are solid. Uses Textual (Python). See `tui-configurator.md`.
+5. **Status/diag enrichment** — `smd status` and `smd diag` query each
+   installed client's `inventory --json` and `validate --json` to surface
+   version, channels, frequencies, modes, and validation issues.
+
+6. **Contract adapter** (`lib/sigmond/clients/contract.py`) — generic adapter
+   that shells out to `<client> inventory|validate --json` and translates to
+   sigmond's internal `ClientView`.
+
+7. **Harmonization** (`lib/sigmond/harmonize.py`) — cross-client rules:
+   CPU isolation, frequency coverage, radiod resolution, timing chain.
+
+## Still to build
+
+- **TUI configurator** — guided first-run wizard and `smd config edit`.
+  Uses Textual (Python). See `tui-configurator.md`.
+- **Start ordering** (§5.4) — radiod before clients, cross-client deps.
+- **Lifecycle lock** (§5.5) — prevent concurrent lifecycle operations.
+- **`smd install` full catalog walk** — `smd install` (no args) should iterate
+  the catalog + topology rather than only the wsprdaemon-client deps.conf path.
 
 ## Topology registry
 
 ```toml
-# /etc/sigmond/topology.toml
-[radiod]
-host = "localhost"
-managed = true
-config = "/etc/ka9q-radio/..."
-
-[wspr-recorder]
-config = "/etc/wsprdaemon/wsprdaemon.conf"
+# /etc/sigmond/topology.toml — controls what's enabled on this host
+[component.radiod]
+enabled = true
 managed = true
 
-[hf-timestd]
-config = "/etc/hf-timestd/timestd-config.toml"
-managed = true
+[component.hf-timestd]
+enabled = true
+
+[component.psk-recorder]
+enabled = true
+
+[component.wspr-recorder]
+enabled = false
+
+[component.wsprdaemon-client]
+enabled = true
 ```
+
+Old topology names (`grape`, `wspr`) are accepted as aliases with deprecation
+warnings.  The canonical names match `etc/catalog.toml`.
 
 ## Key constraints
 
@@ -92,3 +118,56 @@ managed = true
 `wsprdaemon-client` lives at `/home/wsprdaemon/wsprdaemon-client` and is
 the repo Sigmond will install and manage. Its `deps.conf` is the
 authoritative source for dependency commit pins.
+
+## Generic Workflow Orchestration
+
+### 1. Plan Mode Default
+- Enter plan mode for ANY non-trivial task (3+ steps or architectural decisions)
+- If something goes sideways, STOP and re-plan immediately — don't keep pushing
+- Use plan mode for verification steps, not just building
+- Write detailed specs upfront to reduce ambiguity
+
+### 2. Subagent Strategy
+- Use subagents liberally to keep main context window clean
+- Offload research, exploration, and parallel analysis to subagents
+- For complex problems, throw more compute at it via subagents
+- One task per subagent for focused execution
+
+### 3. Self-Improvement Loop
+- After ANY correction from the user: update `tasks/lessons.md` with the pattern
+- Write rules for yourself that prevent the same mistake
+- Ruthlessly iterate on these lessons until mistake rate drops
+- Review lessons at session start for relevant project
+
+### 4. Verification Before Done
+- Never mark a task complete without proving it works
+- Diff behavior between main and your changes when relevant
+- Ask yourself: "Would a staff engineer approve this?"
+- Run tests, check logs, demonstrate correctness
+
+### 5. Demand Elegance (Balanced)
+- For non-trivial changes: pause and ask "is there a more elegant way?"
+- If a fix feels hacky: "Knowing everything I know now, implement the elegant solution"
+- Skip this for simple, obvious fixes — don't over-engineer
+- Challenge your own work before presenting it
+
+### 6. Autonomous Bug Fixing
+- When given a bug report: just fix it. Don't ask for hand-holding
+- Point at logs, errors, failing tests — then resolve them
+- Zero context switching required from the user
+- Go fix failing CI tests without being told how
+
+## Task Management
+
+1. **Plan First**: Write plan to `tasks/todo.md` with checkable items
+2. **Verify Plan**: Check in before starting implementation
+3. **Track Progress**: Mark items complete as you go
+4. **Explain Changes**: High-level summary at each step
+5. **Document Results**: Add review section to `tasks/todo.md`
+6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
+
+## Core Principles
+
+- **Simplicity First**: Make every change as simple as possible. Impact minimal code.
+- **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
+- **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.

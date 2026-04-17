@@ -3,10 +3,12 @@
 #
 # Each [component.*] section controls whether smd installs and manages
 # that component.  Set enabled = false to skip a component entirely.
+#
+# Component names should match the catalog (etc/catalog.toml).
+# Legacy aliases (grape, wspr) are accepted but deprecated.
 
 [sigmond]
-# Absolute path to the wsprdaemon-client source tree.
-# This is where deps.conf, bin/, systemd/, and lib/ live.
+# Absolute path to the wsprdaemon-client source tree (legacy install path).
 wsprdaemon_client = "/home/wsprdaemon/wsprdaemon-client"
 
 # Where to install smd itself (must be in PATH)
@@ -15,24 +17,30 @@ smd_bin = "/usr/local/sbin/smd"
 [component.radiod]
 enabled = true
 description = "ka9q-radio SDR daemon — receives and multicasts RF channels"
-# managed = true means smd start/stop will control it
 managed = true
 
-[component.wspr]
+[component.hf-timestd]
 enabled = true
-description = "WSPR/FST4W decoder, poster, and uploader"
-# Requires radiod or a Kiwi SDR source
+description = "HF time-standard analyzer (WWV/WWVH/CHU/BPM)"
+# hf-timestd manages its own systemd units via its own deploy mechanism.
+# smd install will verify the service is running but does not install hf-timestd.
+managed = false
+
+[component.psk-recorder]
+enabled = true
+description = "FT4/FT8 spot recorder for PSKReporter"
+
+[component.wspr-recorder]
+enabled = false
+description = "WSPR/FST4W audio recorder (period-aligned WAVs)"
+
+[component.wsprdaemon-client]
+enabled = true
+description = "WSPR decoder + poster + uploader (wsprd + jt9 --fst4w)"
 
 [component.ka9q-web]
 enabled = true
 description = "ka9q-web radiod status web UI"
-
-[component.grape]
-enabled = true
-description = "GRAPE HF time-standard IQ recording (hf-timestd)"
-# hf-timestd manages its own systemd units via its own deploy mechanism.
-# smd install will verify the service is running but does not install hf-timestd.
-managed = false
 
 [component.rac]
 enabled = false
