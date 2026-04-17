@@ -1,0 +1,192 @@
+"""Radiod status screen — lightweight coordinator view via ka9q-python.
+
+Shows what sigmond cares about: channel count, active frequencies,
+frontend health (GPSDO, calibration), and aggregate SNR.  For the
+full deep-dive, launches ka9q-python's own TUI.
+"""
+
+from __future__ import annotations
+
+import subprocess
+
+from textual.containers import Vertical
+from textual.widgets import Button, DataTable, Static
+from textual.worker import Worker, WorkerState
+
+
+class RadiodScreen(Vertical):
+    """Coordinator-level radiod status display."""
+
+    DEFAULT_CSS = """
+    RadiodScreen {
+        padding: 1;
+    }
+    RadiodScreen .section-title {
+        text-style: bold;
+        margin-top: 1;
+        margin-bottom: 0;
+    }
+    RadiodScreen #radiod-status {
+        margin-top: 1;
+        color: $text-muted;
+    }
+    RadiodScreen #radiod-deep-dive {
+        margin-top: 1;
+        width: auto;
+    }
+    """
+
+    def __init__(self, radiod_id: str, status_dns: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._radiod_id = radiod_id
+        self._status_dns = status_dns
+
+    def compose(self):
+        yield Static(f"radiod: {self._radiod_id}", classes="section-title")
+        yield Static(f"status address: {self._status_dns or '(not configured)'}",
+                     id="radiod-addr")
+
+        yield Static("Frontend", classes="section-title")
+        frontend = DataTable(id="radiod-frontend")
+        frontend.add_columns("Parameter", "Value")
+        yield frontend
+
+        yield Static("Active Channels", classes="section-title")
+        channels = DataTable(id="radiod-channels")
+        channels.add_columns("SSRC", "Frequency (MHz)", "Preset", "Sample Rate", "SNR (dB)")
+        yield channels
+
+        yield Static("", id="radiod-status")
+        yield Button("Deep dive (ka9q tui)", id="radiod-deep-dive", variant="primary")
+        yield Button("Refresh", id="radiod-refresh", variant="default")
+
+    def on_mount(self) -> None:
+        self._poll_radiod()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "radiod-deep-dive":
+            self._launch_ka9q_tui()
+        elif event.button.id == "radiod-refresh":
+            self._poll_radiod()
+
+    def _poll_radiod(self) -> None:
+        """Kick off a background worker to query radiod."""
+        if not self._status_dns:
+            self.query_one("#radiod-status", Static).update(
+                "[yellow]No status_dns configured in coordination.toml[/]"
+            )
+            return
+        self.query_one("#radiod-status", Static).update("Querying radiod...")
+        self.run_worker(self._fetch_status, thread=True)
+
+    def _fetch_status(self) -> dict:
+        """Worker thread: query radiod via ka9q-python."""
+        try:
+            from ka9q import RadiodControl, discover_channels
+        except ImportError:
+            return {"error": "ka9q-python not installed"}
+
+        result = {"channels": [], "frontend": {}}
+        try:
+            channels = discover_channels(self._status_dns, timeout=3.0)
+            for ch in channels:
+                result["channels"].append({
+                    "ssrc": ch.ssrc,
+                    "frequency": ch.frequency,
+                    "preset": ch.preset,
+                    "sample_rate": ch.sample_rate,
+                    "snr": getattr(ch, "snr", None),
+                })
+        except Exception as exc:
+            result["error"] = f"discover_channels: {exc}"
+            return result
+
+        try:
+            with RadiodControl(self._status_dns) as control:
+                if result["channels"]:
+                    # Poll first channel for frontend info.
+                    ssrc = result["channels"][0]["ssrc"]
+                    status = control.poll_status(ssrc, timeout=2.0)
+                    if status:
+                        d = status.to_dict()
+                        fe = d.get("frontend", {})
+                        result["frontend"] = {
+                            "gpsdo_lock": fe.get("lock", "?"),
+                            "calibration_ppm": fe.get("calibrate", "?"),
+                            "reference_hz": fe.get("reference", "?"),
+                            "ad_overrange": fe.get("ad_over", "?"),
+                            "lna_gain": fe.get("lna_gain", "?"),
+                            "mixer_gain": fe.get("mixer_gain", "?"),
+                            "if_gain": fe.get("if_gain", "?"),
+                        }
+        except Exception as exc:
+            result["frontend_error"] = str(exc)
+
+        return result
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.state != WorkerState.SUCCESS:
+            return
+        result = event.worker.result
+
+        status_widget = self.query_one("#radiod-status", Static)
+
+        if "error" in result:
+            status_widget.update(f"[red]{result['error']}[/]")
+            return
+
+        # Populate frontend table.
+        fe_table = self.query_one("#radiod-frontend", DataTable)
+        fe_table.clear()
+        fe = result.get("frontend", {})
+        if fe:
+            for key, val in fe.items():
+                label = key.replace("_", " ").title()
+                fe_table.add_row(label, str(val))
+        elif "frontend_error" in result:
+            fe_table.add_row("Error", result["frontend_error"])
+        else:
+            fe_table.add_row("Status", "No frontend data available")
+
+        # Populate channels table.
+        ch_table = self.query_one("#radiod-channels", DataTable)
+        ch_table.clear()
+        channels = result.get("channels", [])
+        for ch in sorted(channels, key=lambda c: c.get("frequency", 0)):
+            freq_mhz = f"{ch['frequency'] / 1e6:.6f}" if ch.get("frequency") else "?"
+            snr = f"{ch['snr']:.1f}" if ch.get("snr") is not None else "—"
+            ch_table.add_row(
+                str(ch.get("ssrc", "?")),
+                freq_mhz,
+                ch.get("preset", "?"),
+                str(ch.get("sample_rate", "?")),
+                snr,
+            )
+
+        n = len(channels)
+        fe_note = ""
+        if "frontend_error" in result:
+            fe_note = " (frontend query failed)"
+        status_widget.update(
+            f"[green]{n} active channel{'s' if n != 1 else ''}{fe_note}[/]"
+        )
+
+    def _launch_ka9q_tui(self) -> None:
+        """Suspend sigmond's TUI and launch ka9q-python's TUI."""
+        if not self._status_dns:
+            self.query_one("#radiod-status", Static).update(
+                "[yellow]Cannot launch — no status_dns configured[/]"
+            )
+            return
+
+        def run_ka9q_tui() -> None:
+            subprocess.run(
+                ["ka9q", "tui", self._status_dns],
+                check=False,
+            )
+
+        self.app.suspend()
+        try:
+            run_ka9q_tui()
+        finally:
+            self.app.resume()

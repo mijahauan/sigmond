@@ -44,11 +44,13 @@ class Topology:
 
 
 _DEFAULT_COMPONENTS = {
-    'radiod':   Component('radiod',   enabled=True,  managed=True,  description='ka9q-radio SDR daemon'),
-    'wspr':     Component('wspr',     enabled=True,  managed=True,  description='WSPR/FST4W decoder and uploader'),
-    'ka9q-web': Component('ka9q-web', enabled=True,  managed=True,  description='ka9q-web radiod status UI'),
-    'grape':    Component('grape',    enabled=True,  managed=False, description='GRAPE hf-timestd recording'),
-    'rac':      Component('rac',      enabled=False, managed=False, description='Remote access channel (frpc)'),
+    'radiod':             Component('radiod',             enabled=True,  managed=True,  description='ka9q-radio SDR daemon'),
+    'hf-timestd':         Component('hf-timestd',         enabled=False, managed=True,  description='HF time-standard analyzer (WWV/WWVH/CHU/BPM)'),
+    'psk-recorder':       Component('psk-recorder',       enabled=False, managed=True,  description='FT4/FT8 spot recorder for PSKReporter'),
+    'wspr-recorder':      Component('wspr-recorder',      enabled=False, managed=True,  description='WSPR/FST4W audio recorder (period-aligned WAVs)'),
+    'wsprdaemon-client':  Component('wsprdaemon-client',  enabled=False, managed=True,  description='WSPR decoder + poster + uploader'),
+    'ka9q-web':           Component('ka9q-web',           enabled=True,  managed=True,  description='ka9q-web radiod status UI'),
+    'rac':                Component('rac',                enabled=False, managed=False, description='Remote access channel (frpc)'),
 }
 
 _DEFAULT_CLIENT_DIR = Path('/home/wsprdaemon/wsprdaemon-client')

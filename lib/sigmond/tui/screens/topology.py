@@ -47,6 +47,17 @@ class TopologyScreen(Vertical):
         yield Static("", id="topo-status")
 
     def on_mount(self) -> None:
+        # Merge catalog entries not yet in topology so new clients are visible.
+        for cat_name, entry in self._catalog.items():
+            if cat_name not in self._topology.components:
+                from ...topology import Component
+                self._topology.components[cat_name] = Component(
+                    name=cat_name,
+                    enabled=False,
+                    managed=True,
+                    description=entry.description,
+                )
+
         table = self.query_one("#topo-table", DataTable)
         for name in sorted(self._topology.components):
             comp = self._topology.components[name]

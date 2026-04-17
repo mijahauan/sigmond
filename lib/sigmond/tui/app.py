@@ -42,6 +42,7 @@ class SigmondApp(App):
 
     BINDINGS = [
         Binding("t", "show_topology", "Topology"),
+        Binding("r", "show_radiod", "Radiod"),
         Binding("v", "show_validate", "Validate"),
         Binding("q", "quit", "Quit"),
     ]
@@ -62,6 +63,7 @@ class SigmondApp(App):
         """Load topology, catalog, and coordination for all screens."""
         from ..topology import load_topology
         from ..catalog import load_catalog
+        from ..coordination import load_coordination
 
         try:
             self.topology = load_topology()
@@ -76,6 +78,8 @@ class SigmondApp(App):
             self.catalog = load_catalog()
         except FileNotFoundError:
             self.catalog = {}
+
+        self.coordination = load_coordination()
 
         # Populate the component tree.
         tree = self.query_one(ComponentTree)
@@ -93,6 +97,37 @@ class SigmondApp(App):
             "Enable or disable components for this host.\n\n"
             "Enabled components will be managed by smd start/stop.\n"
             "Save writes changes to /etc/sigmond/topology.toml.",
+        )
+
+    def action_show_radiod(self, radiod_id: str = "") -> None:
+        from .screens.radiod import RadiodScreen
+
+        # Find the status_dns for this radiod from coordination.
+        status_dns = ""
+        if radiod_id and hasattr(self, 'coordination'):
+            radiod = self.coordination.resolve_radiod(radiod_id)
+            if radiod:
+                status_dns = radiod.status_dns
+
+        # If no specific radiod_id, try the first local one.
+        if not radiod_id and hasattr(self, 'coordination'):
+            for rid, r in self.coordination.radiods.items():
+                radiod_id = rid
+                status_dns = r.status_dns
+                break
+
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(RadiodScreen(radiod_id or "default", status_dns))
+
+        ctx = self.query_one(ContextPanel)
+        ctx.show_help(
+            f"radiod: {radiod_id or 'default'}",
+            "Live status from ka9q-python.\n\n"
+            "Shows active channels, frontend health (GPSDO, "
+            "calibration), and per-channel SNR.\n\n"
+            "Press 'Deep dive' to launch ka9q-python's full "
+            "TUI for detailed radiod control.",
         )
 
     def action_show_validate(self) -> None:

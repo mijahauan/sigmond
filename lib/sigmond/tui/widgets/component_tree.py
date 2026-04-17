@@ -50,6 +50,11 @@ class ComponentTree(Tree):
             self.app.action_show_topology()
         elif data.get("screen") == "validate":
             self.app.action_show_validate()
+        elif data.get("component") == "radiod":
+            self.app.action_show_radiod()
+        elif data.get("component"):
+            # Future: per-client screens. For now, show context help.
+            pass
 
 
 def _check_health(component: str) -> bool:
