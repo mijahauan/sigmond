@@ -6,7 +6,10 @@ templated-unit instance discovery, and lifecycle verb scope.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
+import os
 import shutil
 import subprocess
 import tomllib
@@ -14,6 +17,8 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from .paths import LIFECYCLE_LOCK
 
 
 @dataclass(frozen=True)
@@ -276,3 +281,88 @@ def _unit_kind(unit_name: str) -> str:
         return 'target'
     else:
         return 'unknown'
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle lock (CONTRACT §5.5)
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def lifecycle_lock(reason: str = ""):
+    """Acquire an exclusive flock on the lifecycle lock file.
+
+    Every mutating verb (install, apply, start, stop, restart, reload,
+    update) must hold this lock.  Read-only verbs (list, status) are
+    lock-free.
+
+    Uses LOCK_NB so a second ``smd`` fails immediately rather than
+    queueing behind the first.
+    """
+    lock_path = LIFECYCLE_LOCK
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise SystemExit(
+            f"smd: another lifecycle operation is in progress "
+            f"(lock held on {lock_path})"
+        )
+    try:
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# Start ordering (CONTRACT §5.4)
+# ---------------------------------------------------------------------------
+
+def order_units(
+    units: list[UnitRef],
+    coordination=None,
+) -> list[UnitRef]:
+    """Order units for start: radiod first (if present), then clients in
+    coordination.toml declaration order.
+
+    Args:
+        units: Flat list of resolved UnitRefs (already orphan-filtered).
+        coordination: A ``Coordination`` object (from coordination.py).
+            If provided, client ordering follows the ``clients`` list.
+            If None, non-radiod components sort alphabetically.
+
+    Returns:
+        New list with the same elements, reordered.
+    """
+    # Bucket units by component name.
+    buckets: dict[str, list[UnitRef]] = {}
+    for u in units:
+        buckets.setdefault(u.component, []).append(u)
+
+    # Build the component ordering.
+    ordered_names: list[str] = []
+
+    # radiod always first (if present).
+    if 'radiod' in buckets:
+        ordered_names.append('radiod')
+
+    # Clients in coordination.toml declaration order.
+    if coordination is not None and hasattr(coordination, 'clients'):
+        seen = set(ordered_names)
+        for ci in coordination.clients:
+            name = ci.client_type
+            if name not in seen and name in buckets:
+                ordered_names.append(name)
+                seen.add(name)
+
+    # Anything remaining (not in coordination) goes last, alphabetically.
+    remaining = sorted(n for n in buckets if n not in set(ordered_names))
+    ordered_names.extend(remaining)
+
+    # Flatten buckets in order.
+    result: list[UnitRef] = []
+    for name in ordered_names:
+        result.extend(buckets[name])
+    return result

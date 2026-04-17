@@ -48,7 +48,8 @@ for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
 try:
     from sigmond.commands.validate import cmd_validate
     from sigmond.commands.config   import cmd_config_show, cmd_config_migrate
-    from sigmond.lifecycle         import resolve_units, UnitRef
+    from sigmond.lifecycle         import resolve_units, UnitRef, lifecycle_lock, order_units
+    from sigmond.coordination      import load_coordination
     from sigmond.catalog           import load_catalog, CatalogEntry, get_entry, resolve_name, find_client_binary
     from sigmond.installer         import install_client as _do_install_client
     from sigmond.log_cmd           import (
@@ -607,7 +608,8 @@ def _install_single_client(args) -> int:
 
     if not entry.install_script:
         _err(f"'{entry.name}' has no install_script in the catalog")
-        _info(f"for radiod/ka9q-web, use: smd install  (full-suite legacy path)")
+        if entry.name in ('radiod', 'ka9q-web'):
+            _info(f"radiod/ka9q-web are built via ka9q-update; use: smd install  (full suite)")
         return 1
 
     _heading(f'install {entry.name}')
@@ -637,17 +639,23 @@ def _install_single_client(args) -> int:
 
 
 def _install_full_suite(args) -> int:
-    """Legacy full-suite install (wsprdaemon-client-centric)."""
+    """Catalog-driven full-suite install.
+
+    For each enabled component in the topology:
+    - If the catalog entry has an install_script, install via the catalog
+      (clone repo + run the client's own install.sh).
+    - For C projects without install_scripts (radiod, ka9q-web), delegate
+      to ka9q-update's install-ka9q.sh.
+    """
     if _need_root('install'):
         return 1
 
     print(BANNER)
     topology = _load_topology(
         Path(args.topology) if args.topology else TOPOLOGY_PATH,
-        client_dir_override=args.client_dir,
+        client_dir_override=getattr(args, 'client_dir', None),
     )
-    client_dir = topology['client_dir']
-    smd_bin    = topology['smd_bin']
+    smd_bin = topology['smd_bin']
 
     only = [c.strip() for c in args.components.split(',')] if args.components else None
     components = _enabled_components(topology, only)
@@ -656,10 +664,61 @@ def _install_full_suite(args) -> int:
         print('No components enabled — check topology.toml.')
         return 1
 
-    print(f'Installing components: {", ".join(components)}')
-    print(f'wsprdaemon-client:     {client_dir}')
-    if args.dry_run:
-        print('(dry-run mode — no changes will be made)\n')
+    dry_run = getattr(args, 'dry_run', False)
+    yes = getattr(args, 'yes', False)
+
+    # Load the catalog to classify each component.
+    try:
+        catalog = load_catalog()
+    except FileNotFoundError as exc:
+        _err(str(exc))
+        return 1
+
+    # Classify components into catalog-driven vs. ka9q-update.
+    catalog_queue = []    # CatalogEntry objects with install_script
+    ka9q_update_needed = False
+    unknown = []
+
+    for comp in components:
+        entry = get_entry(comp, catalog)
+        if entry is None:
+            unknown.append(comp)
+            continue
+        if entry.install_script:
+            catalog_queue.append(entry)
+        elif entry.name in ('radiod', 'ka9q-web'):
+            ka9q_update_needed = True
+        else:
+            unknown.append(comp)
+
+    # --- Show install plan ---
+    _heading('install plan')
+    if ka9q_update_needed:
+        c_names = [e.name for e in sorted(catalog.values(), key=lambda e: e.name)
+                   if e.name in ('radiod', 'ka9q-web')
+                   and e.name in [get_entry(c, catalog).name
+                                  for c in components
+                                  if get_entry(c, catalog) and not get_entry(c, catalog).install_script
+                                  and get_entry(c, catalog).name in ('radiod', 'ka9q-web')]]
+        _info(f'ka9q-update:  {", ".join(c_names) or "radiod + ka9q-web"}')
+    for entry in catalog_queue:
+        _info(f'catalog:      {entry.name:22s} → {entry.install_script}')
+    for comp in unknown:
+        _warn(f'unknown:      {comp} (not in catalog, skipping)')
+
+    if not catalog_queue and not ka9q_update_needed:
+        _warn('nothing to install')
+        return 0
+
+    if dry_run:
+        print('\n(dry-run mode — no changes will be made)')
+        return 0
+
+    if not yes:
+        resp = input('\nProceed? [Y/n] ').strip().lower()
+        if resp and resp not in ('y', 'yes'):
+            print('Aborted.')
+            return 0
 
     _ensure_sigmond_dirs()
     errors = 0
@@ -667,67 +726,27 @@ def _install_full_suite(args) -> int:
     # --- 1. Install smd itself ---
     _heading('Sigmond')
     sigmond_dir = Path(__file__).resolve().parent.parent
-    if not args.dry_run:
-        _install_smd_itself(sigmond_dir, smd_bin)
+    _install_smd_itself(sigmond_dir, smd_bin)
 
-    # --- 2. Dependencies ---
-    dcfg = _load_deps_conf(client_dir)
-    if dcfg is None:
-        return 1
-
-    venv_dir = Path('/opt/wsprdaemon/venv')
-    if not args.dry_run and not _ensure_venv(venv_dir):
-        return 1
-
-    needed_deps = _collect_deps_for_components(components)
-    if needed_deps:
-        _heading('Dependencies')
-        for dep in needed_deps:
-            if dep not in dcfg.sections():
-                _warn(f'{dep}: not in deps.conf, skipping')
-                continue
-            dep_type = dcfg.get(dep, 'type', fallback='').strip()
-            if args.dry_run:
-                _info(f'would install [{dep}] ({dep_type})')
-                continue
-            if dep_type == 'git':
-                if not _install_git_dep(dep, dcfg):
-                    errors += 1
-                # Build step if this dep needs one
-                if dep in BUILD_STEPS:
-                    src_dir = Path(dcfg.get(dep, 'install_to', fallback=''))
-                    fn_name = BUILD_STEPS[dep]
-                    fn = globals()[fn_name]
-                    if src_dir.exists() and not fn(src_dir):
-                        errors += 1
-            elif dep_type == 'pypi':
-                if not _install_pypi_dep(dep, dcfg, venv_dir):
-                    errors += 1
-
-    # --- 3. Scripts, wdlib, systemd units ---
-    _heading('wsprdaemon-client')
-    if not args.dry_run:
-        _install_wdlib(client_dir)
-        _install_wrapper_scripts(client_dir)
-        _install_systemd_units(client_dir)
-    else:
-        _info('would install wdlib, scripts, and systemd units')
-
-    # --- 4. Service configuration and start (wd-ctl apply) ---
-    _heading('Services')
-    if 'wspr' in components or 'radiod' in components:
-        if not _run_wd_ctl_apply(client_dir, args.dry_run):
-            _warn('wd-ctl apply reported errors — check output above')
+    # --- 2. C projects via ka9q-update ---
+    if ka9q_update_needed:
+        _heading('ka9q-update (radiod + ka9q-web)')
+        if not _install_via_ka9q_update():
             errors += 1
 
-    # --- 5. grape status check (hf-timestd manages itself) ---
-    if 'grape' in components and not args.dry_run:
-        _heading('GRAPE / hf-timestd')
-        r = _run(['systemctl', 'is-active', 'timestd-core-recorder.service'])
-        if r.returncode == 0:
-            _ok('timestd-core-recorder: running')
-        else:
-            _warn('timestd-core-recorder: not running  (hf-timestd manages its own install)')
+    # --- 3. Catalog-driven clients ---
+    for entry in catalog_queue:
+        _heading(f'install {entry.name}')
+        try:
+            result = _do_install_client(entry, dry_run=False, yes=yes, pull=True)
+            if result:
+                _ok(f'{entry.name} installed')
+            else:
+                _err(f'{entry.name} install failed')
+                errors += 1
+        except RuntimeError as exc:
+            _err(f'{entry.name}: {exc}')
+            errors += 1
 
     # --- Summary ---
     print()
@@ -736,6 +755,38 @@ def _install_full_suite(args) -> int:
         return 1
     print(f'\033[32msmd install complete.\033[0m  Run \033[1msmd status\033[0m to verify.')
     return 0
+
+
+# ka9q-update paths — searched in order.
+_KA9Q_UPDATE_CANDIDATES = [
+    Path('/home/mjh/git/ka9q-update'),
+    Path('/opt/git/ka9q-update'),
+]
+
+
+def _find_ka9q_update() -> Path | None:
+    """Locate the ka9q-update repo."""
+    for p in _KA9Q_UPDATE_CANDIDATES:
+        script = p / 'install-ka9q.sh'
+        if script.exists():
+            return script
+    return None
+
+
+def _install_via_ka9q_update() -> bool:
+    """Delegate radiod + ka9q-web build/install to ka9q-update."""
+    script = _find_ka9q_update()
+    if script is None:
+        _err('ka9q-update not found — install it to /opt/git/ka9q-update')
+        _info('  git clone https://github.com/mijahauan/ka9q-update /opt/git/ka9q-update')
+        return False
+    _info(f'running {script} ...')
+    r = _run([str(script)], capture=False, sudo=True)
+    if r.returncode != 0:
+        _err('ka9q-update install-ka9q.sh failed')
+        return False
+    _ok('ka9q-update: radiod + ka9q-web installed')
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -773,6 +824,11 @@ def cmd_start(args) -> int:
     # Filter to configured instances only (not orphaned)
     units = [u for u in units if not u.orphaned]
 
+    # Order: radiod first, then clients per coordination.toml (CONTRACT §5.4)
+    if _HAS_SIGMOND_LIB:
+        coord = load_coordination()
+        units = order_units(units, coordination=coord)
+
     _heading('start')
     for unit in units:
         r = _run(['systemctl', 'start', unit.unit], sudo=True)
@@ -798,6 +854,11 @@ def cmd_stop(args) -> int:
 
     # Filter to configured instances only
     units = [u for u in units if not u.orphaned]
+
+    # Order then reverse: clients stop first, radiod last (CONTRACT §5.4)
+    if _HAS_SIGMOND_LIB:
+        coord = load_coordination()
+        units = order_units(units, coordination=coord)
 
     _heading('stop')
     # Stop in reverse order
@@ -1368,6 +1429,11 @@ def cmd_restart(args) -> int:
     # Filter to configured instances only
     units = [u for u in units if not u.orphaned]
 
+    # Order: radiod first, then clients per coordination.toml (CONTRACT §5.4)
+    if _HAS_SIGMOND_LIB:
+        coord = load_coordination()
+        units = order_units(units, coordination=coord)
+
     _heading('restart')
     any_failed = False
     for unit in units:
@@ -1397,6 +1463,11 @@ def cmd_reload(args) -> int:
 
     # Filter to configured instances only
     units = [u for u in units if not u.orphaned]
+
+    # Order: radiod first, then clients per coordination.toml (CONTRACT §5.4)
+    if _HAS_SIGMOND_LIB:
+        coord = load_coordination()
+        units = order_units(units, coordination=coord)
 
     _heading('reload')
     any_failed = False
@@ -1874,7 +1945,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
                     ;;
                 config)
-                    COMPREPLY=($(compgen -W "show migrate" -- "$cur"))
+                    COMPREPLY=($(compgen -W "show migrate edit" -- "$cur"))
                     ;;
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
@@ -1917,7 +1988,7 @@ _smd_complete() {
                             COMPREPLY=($(compgen -W "--from --to --write --force --topology" -- "$cur"))
                             ;;
                         *)
-                            COMPREPLY=($(compgen -W "show migrate" -- "$cur"))
+                            COMPREPLY=($(compgen -W "show migrate edit" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -1949,6 +2020,20 @@ def cmd_completion(args) -> int:
     print('To install for your user only:')
     print('  mkdir -p ~/.local/share/bash-completion/completions')
     print('  smd completion bash > ~/.local/share/bash-completion/completions/smd')
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# smd config edit (TUI configurator)
+# ---------------------------------------------------------------------------
+
+def cmd_config_edit(args) -> int:
+    try:
+        from sigmond.tui import launch
+        launch()
+    except ImportError:
+        _err('TUI requires textual: pip install textual')
+        return 1
     return 0
 
 
@@ -2094,6 +2179,8 @@ def main() -> int:
     p.add_argument('--force', action='store_true',
                    help='overwrite target even if it already exists')
 
+    config_sub.add_parser('edit', help='launch the TUI configurator')
+
     args = parser.parse_args()
     if not args.command:
         print(BANNER)
@@ -2143,8 +2230,16 @@ def main() -> int:
             return cmd_config_show(args)
         if sub_cmd == 'migrate':
             return cmd_config_migrate(args)
+        if sub_cmd == 'edit':
+            return cmd_config_edit(args)
         p_config.print_help()
         return 0
+
+    # Mutating verbs acquire the lifecycle lock (CONTRACT §5.5).
+    _MUTATING = {'install', 'apply', 'start', 'stop', 'restart', 'reload', 'update'}
+    if args.command in _MUTATING and _HAS_SIGMOND_LIB:
+        with lifecycle_lock(reason=args.command):
+            return dispatch[args.command](args)
 
     return dispatch[args.command](args)
 

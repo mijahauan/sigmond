@@ -66,14 +66,34 @@ smd diag                 Network + deps + client validation diagnostics
 7. **Harmonization** (`lib/sigmond/harmonize.py`) — cross-client rules:
    CPU isolation, frequency coverage, radiod resolution, timing chain.
 
+8. **Lifecycle lock** (`lib/sigmond/lifecycle.py`, contract v0.5 §5.5) —
+   flock-based mutual exclusion on `/var/lib/sigmond/lifecycle.lock`.
+   Mutating verbs (install, apply, start, stop, restart, reload, update)
+   acquire the lock; read-only verbs (list, status, log, diag) are lock-free.
+
+9. **Start ordering** (`lib/sigmond/lifecycle.py`, contract v0.5 §5.4) —
+   `order_units()` ensures radiod starts first (if enabled), then clients
+   in coordination.toml declaration order. Stop is reversed.
+
+10. **Catalog walk install** — `smd install` (no args) iterates the catalog
+    + topology. Clients with `install_script` go through the catalog path;
+    C projects (radiod, ka9q-web) delegate to ka9q-update's `install-ka9q.sh`.
+
+11. **TUI configurator** (`lib/sigmond/tui/`, Textual) — three-panel layout
+    accessed via `smd config edit`. Left: component tree with health indicators.
+    Center: topology editor, validate screen. Right: contextual help.
+    Textual is a lazy import; core smd stays stdlib-only.
+
 ## Still to build
 
-- **TUI configurator** — guided first-run wizard and `smd config edit`.
-  Uses Textual (Python). See `tui-configurator.md`.
-- **Start ordering** (§5.4) — radiod before clients, cross-client deps.
-- **Lifecycle lock** (§5.5) — prevent concurrent lifecycle operations.
-- **`smd install` full catalog walk** — `smd install` (no args) should iterate
-  the catalog + topology rather than only the wsprdaemon-client deps.conf path.
+- **TUI per-client config screens** — wspr-recorder, hf-timestd, psk-recorder
+  settings editors with live probing.
+- **TUI CPU affinity screen** — visual core map with conflict detection.
+- **TUI deploy screen** — config diff preview and service restart.
+- **Start ordering validation** — warn if clients declare cross-client
+  After=/Requires= systemd dependencies.
+- **ka9q-python compat tracking** — `smd validate` rule to check that
+  ka9q-python's `ka9q_radio_compat` hash matches the installed radiod version.
 
 ## Topology registry
 

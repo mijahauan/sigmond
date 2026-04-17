@@ -1,0 +1,107 @@
+"""Topology editor screen — enable/disable components."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from textual.containers import Vertical
+from textual.widgets import Button, DataTable, Static, Switch
+
+if TYPE_CHECKING:
+    from ...topology import Topology
+
+
+class TopologyScreen(Vertical):
+    """Component toggle table with save button."""
+
+    DEFAULT_CSS = """
+    TopologyScreen {
+        padding: 1;
+    }
+    TopologyScreen #topo-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    TopologyScreen #topo-save {
+        margin-top: 1;
+        width: auto;
+    }
+    TopologyScreen #topo-status {
+        margin-top: 1;
+        color: $success;
+    }
+    """
+
+    def __init__(self, topology: Topology, catalog: dict, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._topology = topology
+        self._catalog = catalog
+
+    def compose(self):
+        yield Static("Topology — enabled components", id="topo-title")
+        table = DataTable(id="topo-table")
+        table.add_columns("Component", "Enabled", "Managed", "Description")
+        yield table
+        yield Button("Save topology.toml", id="topo-save", variant="primary")
+        yield Static("", id="topo-status")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#topo-table", DataTable)
+        for name in sorted(self._topology.components):
+            comp = self._topology.components[name]
+            desc = comp.description or ""
+            if not desc and name in self._catalog:
+                desc = self._catalog[name].description
+            enabled_str = "\u2714 yes" if comp.enabled else "\u2718 no"
+            managed_str = "yes" if comp.managed else "no"
+            table.add_row(name, enabled_str, managed_str, desc, key=name)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Toggle enabled state on row selection."""
+        name = event.row_key.value
+        comp = self._topology.components.get(name)
+        if comp is None:
+            return
+        comp.enabled = not comp.enabled
+        # Update the table cell.
+        table = self.query_one("#topo-table", DataTable)
+        enabled_str = "\u2714 yes" if comp.enabled else "\u2718 no"
+        table.update_cell(name, "Enabled", enabled_str)
+        self.query_one("#topo-status", Static).update("(unsaved changes)")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "topo-save":
+            self._save_topology()
+
+    def _save_topology(self) -> None:
+        """Write the current topology state to topology.toml."""
+        from ...paths import TOPOLOGY_PATH
+        self._write_topology_toml(TOPOLOGY_PATH)
+        self.query_one("#topo-status", Static).update(
+            f"Saved to {TOPOLOGY_PATH}"
+        )
+        # Refresh the component tree in the app.
+        from ..widgets.component_tree import ComponentTree
+        tree = self.app.query_one(ComponentTree)
+        tree.populate(self._topology, self._catalog)
+
+    def _write_topology_toml(self, path: Path) -> None:
+        """Render topology as TOML and write to disk."""
+        lines = [
+            "# /etc/sigmond/topology.toml",
+            "# Managed by smd config edit. Manual edits are fine too.",
+            "",
+        ]
+        for name in sorted(self._topology.components):
+            comp = self._topology.components[name]
+            lines.append(f"[component.{name}]")
+            lines.append(f'enabled = {"true" if comp.enabled else "false"}')
+            if not comp.managed:
+                lines.append("managed = false")
+            if comp.description:
+                lines.append(f'description = "{comp.description}"')
+            lines.append("")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n")
