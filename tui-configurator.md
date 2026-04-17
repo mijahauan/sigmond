@@ -1,31 +1,22 @@
-# TUI Configurator — Proposal for Review
+# TUI Configurator — Design & Status
 
-**Authors:** AC0G (Michael Hauan), with input from Claude  
-**Date:** 2026-04-09  
-**Status:** Draft — awaiting review by Rob (AI6VN)
+**Authors:** AC0G (Michael Hauan), AI6VN (Rob Robinett), with input from Claude
+**Date:** 2026-04-09 (original); 2026-04-17 (revised)
+**Status:** Initial skeleton implemented; per-client screens and CPU affinity
+TUI planned.
 
 ## Motivation
 
 The v4 rewrite decomposes wsprdaemon into independent, service-oriented
-components: radiod (via ka9q-radio), wspr-recorder, hf-timestd, and future
-HamSCI clients.  Each component owns its own configuration file and can run
-standalone.  But when several components share a single receiver chain,
-their configurations must agree on frequencies, radiod addresses, CPU
-affinity, timing sources, and disk budgets.
+components: radiod (via ka9q-radio), wspr-recorder, hf-timestd, psk-recorder,
+wsprdaemon-client, and future HamSCI clients.  Each component owns its own
+configuration file and can run standalone.  But when several components share
+a single receiver chain, their configurations must agree on frequencies,
+radiod addresses, CPU affinity, timing sources, and disk budgets.
 
 A TUI (terminal user interface) can guide users through this, providing
 contextual help, live system probes, and cross-component validation —
 without replacing any component's native config format.
-
-### Name discussion
-
-The suite now encompasses wsprdaemon alongside other current and future
-HamSCI interests (time-standard recording, ionospheric physics, etc.).
-A rename is under consideration — something that references **HamSCI**
-rather than wsprdaemon alone.  Candidate names TBD; the TUI and its
-surrounding tooling should adopt whatever name is chosen.  Throughout this
-document, "the suite" refers to the collection of managed components
-regardless of final branding.
 
 ---
 
@@ -43,64 +34,38 @@ regardless of final branding.
    channel count, clock offset, disk usage — so users see the system
    working as they configure it.
 
-4. **No wdlib dependency contamination.**  The TUI is a separate binary
-   with its own dependencies (e.g., Textual).  The core `wdlib` library
-   remains stdlib-only.
+4. **No wdlib dependency contamination.**  The TUI is a separate package
+   (`lib/sigmond/tui/`) with Textual as a lazy runtime dependency.
+   Core `smd` remains stdlib-only.
 
 ---
 
 ## Architecture
 
-### Topology registry
+### Entry point
 
-A lightweight manifest tells the TUI what is installed and where each
-component's config lives:
-
-```toml
-# ~/.config/wd-suite/topology.toml  (path TBD after rename)
-
-[radiod]
-host = "k3lr-rx888.local"            # "localhost" when co-located
-managed = false                       # TUI won't start/stop it
-status_dns = "k3lr-rx888-status.local"
-cores = [0, 1, 2, 3]                 # cores reserved for radiod (if local)
-
-[wspr-recorder]
-config = "/etc/wsprdaemon/wspr-recorder.toml"
-managed = true
-
-[hf-timestd]
-config = "/etc/hf-timestd/config.toml"
-managed = true
-
-[wsprdaemon]
-config = "/etc/wsprdaemon/wsprdaemon.conf"
-managed = true
-
-# Future clients register the same way:
-# [fst4w-recorder]
-# config = "/etc/fst4w-recorder/config.toml"
-# managed = true
+```
+smd config edit
 ```
 
-The TUI reads each component's native config through a per-format
-reader/writer module.  Components never see the topology file.
+Textual is lazy-imported — if not installed, smd prints a clear error
+and exits.  All other smd commands work without Textual.
 
 ### Three-panel TUI layout
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│  suite configurator                            [H]elp  [Q]   │
+│  Dr. SigMonD — Configurator                    [H]elp  [Q]   │
 ├───────────────┬──────────────────────┬────────────────────────┤
 │ Components    │ Settings             │ Context / Guidance     │
 │               │                      │                        │
-│ ▸ Topology    │ radiod host:         │ If radiod runs on a    │
-│   radiod      │  ○ This machine      │ separate machine, CPU  │
-│   wspr-rec    │  ● Remote host       │ affinity is not managed│
-│   hf-timestd  │                      │ here — the remote      │
-│   CPU Pins    │ Hostname:            │ radiod admin controls  │
-│   Validate    │  [k3lr-rx888.local]  │ its own core isolation.│
-│   Deploy      │                      │                        │
+│ ☰ Topology    │ radiod host:         │ If radiod runs on a    │
+│ ✔ radiod      │  ○ This machine      │ separate machine, CPU  │
+│ ✔ hf-timestd  │  ● Remote host       │ affinity is not managed│
+│ ✔ psk-recorder│                      │ here — the remote      │
+│ ✘ wspr-rec    │ Hostname:            │ radiod admin controls  │
+│ ✔ Validate    │  [k3lr-rx888.local]  │ its own core isolation.│
+│               │                      │                        │
 │               │ Status DNS:          │ The status DNS name is │
 │               │  [k3lr-rx888-status. │ how ka9q-python        │
 │               │   local          ]   │ discovers radiod's     │
@@ -115,119 +80,264 @@ reader/writer module.  Components never see the topology file.
 ```
 
 **Left panel** — component tree, always visible.  Health indicators
-(green/yellow/red) next to each entry.
+(green ✔ / red ✘) next to each enabled component, based on
+`systemctl is-active`.
 
-**Center panel** — settings for the selected component.  Widget types:
-radio buttons, text fields, frequency pickers, core-map selectors.
+**Center panel** — active screen (topology editor, radiod status,
+validate results, etc.).
 
-**Right panel** — contextual intelligence:
-- Plain-language explanation of the current setting
-- Live system state (radiod reachable? clock offset? disk free?)
-- Conflict warnings when settings in one component affect another
+**Right panel** — contextual help and live system state for the
+current selection.
 
-### Screen flow
+**Keybindings:** `t` = topology, `r` = radiod, `v` = validate, `q` = quit.
 
-Users navigate these screens roughly in order, though any screen is
-accessible at any time:
+---
 
-1. **Topology** — where is radiod?  Local, remote, or multiple instances?
-   This single decision gates CPU affinity management and network health
-   checks.
+## Screens
 
-2. **radiod** (if local and managed) — hardware, sample rate, front-end
-   gain, CPU core assignment shown as a visual core map.
+### Implemented
 
-3. **wspr-recorder** — band selection via a visual HF spectrum with WSPR
-   sub-bands highlighted; output directory with disk-space indicator;
-   per-channel gain.
+#### 1. Topology
 
-4. **hf-timestd** — timing authority (rtp / fusion / auto), compression,
-   physics pipeline toggle, archive path with quota visualization.  Shows
-   current clock offset if the service is running.
+Enable/disable components for this host.  Shows all components from the
+catalog (merged with topology.toml) as a table with enabled/managed
+toggles.  Selecting a row toggles enabled.  Save button writes to
+`/etc/sigmond/topology.toml`.
 
-5. **CPU Affinity** — the cross-cutting orchestration screen:
+**Data source:** `topology.load_topology()`, `catalog.load_catalog()`.
+
+#### 2. Radiod Status (live, via ka9q-python)
+
+Coordinator-level view of radiod — shows what sigmond cares about, not
+the full deep-dive:
+
+- **Active channels:** SSRC, frequency (MHz), preset, sample rate, SNR
+- **Frontend health:** GPSDO lock, calibration ppm, reference Hz,
+  AD overrange, LNA/IF gain
+
+Data comes from ka9q-python's `discover_channels()` and
+`RadiodControl.poll_status()`.  Connection uses `status_dns` from
+`coordination.toml`.
+
+**Deep dive:** A button suspends sigmond's TUI and launches
+ka9q-python's full 8-panel TUI (`ka9q tui <status_dns>`) for detailed
+radiod control.  Sigmond resumes when ka9q tui exits.
+
+**Data source:** `ka9q.RadiodControl`, `ka9q.discover_channels()`.
+
+#### 3. Validate
+
+Runs all six cross-client harmonization rules and displays color-coded
+results (green pass, yellow warn, red fail).  Re-run button refreshes
+after configuration changes.
+
+**Data source:** `harmonize.run_all()`, `sysview.build_system_view()`.
+
+### Planned
+
+#### 4. CPU Affinity
+
+Visual core map showing per-component CPU assignments, based on the
+CPU affinity system Rob built (`smd diag cpu-affinity`):
 
 ```
-CPU Core Map (8 cores)
+CPU Core Map (16 logical CPUs, 8 physical cores)
 ┌────┬────┬────┬────┬────┬────┬────┬────┐
-│ C0 │ C1 │ C2 │ C3 │ C4 │ C5 │ C6 │ C7 │
-│████│████│    │    │░░░░│░░░░│░░░░│    │
-│ RD │ RD │    │    │ WR │ HF │ DEC│    │
+│ C0 │ C1 │ C2 │ C3 │ C4 │ C5 │ C6 │ C7 │  physical
+│ +8 │ +9 │+10 │+11 │+12 │+13 │+14 │+15 │  HT siblings
+│████│    │░░░░│░░░░│░░░░│░░░░│░░░░│░░░░│
+│ RD │    │ WR │ HF │ PSK│ WD │    │    │
 └────┴────┴────┴────┴────┴────┴────┴────┘
-████ = radiod (isolated, SCHED_FIFO)
-░░░░ = other suite components
+████ = radiod (per-instance: one physical core + HT sibling)
+░░░░ = other suite components (remaining cores)
      = available
 
-⚠  wspr-recorder decode threads overlap with radiod
-   on core 2.  This may cause sample drops at high
-   sample rates.  Move decode to cores 4-7?
-   [Yes, move]  [No, keep]
+Radiod assignment:
+  radiod@k3lr-rx888.service  →  CPUs 0, 8 (physical core 0)
+
+Other services:  CPUs 2-7, 10-15
+  timestd-core-recorder.service, psk-recorder@default.service,
+  wd-ka9q-record@default.service, ...
+
+⚠  radiod has 47 threads — 3 have non-process affinity
+   (use smd diag cpu-affinity --threads for details)
+
+[Apply]  [Refresh]
 ```
 
-When radiod is remote, this screen simplifies to local components only
-and notes that radiod affinity is managed elsewhere.
+This screen will visualize and control what `smd diag cpu-affinity`
+already does via CLI:
 
-6. **Validate** — runs all cross-component checks (see harmonization
-   rules below) and presents a pass/warn/fail summary.
+- **Read HT topology** from `/sys/devices/system/cpu/cpuN/topology/thread_siblings_list`
+- **Assign radiod instances** to physical cores (core 0 for first instance,
+  core 1 for second, etc. — both HT siblings per core)
+- **Assign remaining cores** to all other managed services
+- **Show per-thread affinity** within each service (radiod's internal
+  threads may override systemd via `sched_setaffinity()`)
+- **Apply** writes `smd-cpu-affinity.conf` drop-ins with both
+  `CPUAffinity=` and `AllowedCPUs=` (cgroup-enforced, defeats radiod's
+  `sched_setaffinity()`), removes foreign drop-ins from hf-timestd and
+  wd-ctl, and disables the hf-timestd affinity watcher
 
-7. **Deploy** — shows a diff of what will change in each config file,
-   then offers: `[Write configs]` → `[Restart changed services]` →
-   `[Verify health]`.
+**Data source:** `_compute_affinity_plan()`, `_get_physical_cores()`,
+`_thread_affinity_groups()` from `bin/smd`.
 
-### Harmonization rules
+#### 5. CPU Frequency
+
+Show and apply per-CPU `scaling_max_freq` limits:
+
+- **Radiod CPUs:** high-performance (default 3200 MHz)
+- **Other CPUs:** power-efficient (default 1400 MHz)
+
+Configurable via `[cpu_freq]` in `topology.toml` or CLI flags.
+
+**Data source:** `cmd_diag_cpu_freq()` from `bin/smd`.
+
+#### 6. Per-Client Config Screens
+
+Per-component settings editors for wspr-recorder, hf-timestd,
+psk-recorder, wsprdaemon-client.  Each reads/writes the client's native
+config format (TOML) with contextual help and live state.
+
+Stretch goal — depends on each client exposing enough structure via
+`inventory --json` for the TUI to present meaningful controls.
+
+#### 7. Deploy
+
+Config diff preview showing what will change in each file, then:
+`[Write configs]` → `[Restart changed services]` → `[Verify health]`.
+
+---
+
+## Live probing
+
+The right-panel context data and radiod screen come from:
+
+- **ka9q-python** `RadiodControl` / `discover_channels()` — radiod
+  status, active channels, frontend health, SNR
+- **Client contract** `<client> inventory --json` — version, channels,
+  frequencies, modes, issues
+- **systemd** — `systemctl is-active` for service state
+- **OS** — `/sys/devices/system/cpu/*/topology/thread_siblings_list` for
+  HT sibling grouping; `/proc/<pid>/status` for per-thread CPU affinity;
+  `/sys/devices/system/cpu/*/cpufreq/` for frequency limits
+- **Filesystem** — `shutil.disk_usage()` for storage headroom
+
+---
+
+## Harmonization rules
 
 The TUI's core value is codified knowledge about how components interact.
-These rules live in Python code, not in config:
+These rules live in Python code (`lib/sigmond/harmonize.py`), not in config:
 
 | Rule | Components | Check |
 |------|-----------|-------|
 | Status DNS consistency | all | Every component's radiod reference resolves to the same instance |
-| Frequency coverage | wspr-rec, hf-timestd | Requested frequencies fall within radiod's ADC bandwidth |
+| Frequency coverage | wspr-rec, hf-timestd, psk-rec | Requested frequencies fall within radiod's ADC bandwidth |
 | CPU isolation | radiod, all others | radiod cores do not overlap with any other component's affinity mask |
 | Timing chain | hf-timestd, wspr-rec | If hf-timestd is enabled, wspr-recorder uses its calibration output |
 | Disk budget | wspr-rec, hf-timestd | Combined write rates fit within storage capacity over the retention window |
 | Channel count | all ka9q-python clients | Total dynamic channels do not exceed radiod's configured limit |
 
-### Live probing
+---
 
-The right-panel context data comes from:
+## CPU affinity architecture (smd-owned)
 
-- **ka9q-python** `RadiodControl` — radiod status, active channels, load
-- **hf-timestd** — `/run/wsprdaemon/{instance}/hftime.json` for clock offset
-- **systemd** — `systemctl is-active` for service state
-- **OS** — `os.sched_getaffinity()`, `/proc/cpuinfo` for actual CPU topology and pinning
-- **Filesystem** — `shutil.disk_usage()` for storage headroom
+Sigmond owns all CPU affinity policy for the station.  This supersedes
+per-client affinity management (hf-timestd's `setup-cpu-affinity.sh`,
+wd-ctl's drop-ins).
 
-### Implementation notes
+### Design
 
-- **Framework:** [Textual](https://textual.textualize.io/) — Python,
-  mouse+keyboard, runs in any terminal, CSS-like styling.  Runtime
-  dependency of the TUI tool only.
-- **Config I/O:** Per-component reader/writer modules that understand
-  each native format (TOML, INI).  No meta-format.
-- **Entry point:** A standalone script (e.g., `bin/wd-configure`) in the
-  suite repo, installed into `/opt/wsprdaemon/venv/bin/`.
+- **Radiod gets dedicated physical cores.** Each radiod instance is
+  assigned one physical core (both HT siblings).  First instance →
+  core 0, second → core 1, etc.
+
+- **Everything else shares remaining cores.** All other managed services
+  (hf-timestd, psk-recorder, wspr-recorder, wsprdaemon-client, ka9q-web)
+  get the pool of non-radiod cores.
+
+- **Enforcement is cgroup-based.** Drop-ins set both `CPUAffinity=`
+  (initial placement) and `AllowedCPUs=` (cgroup-enforced ceiling).
+  `AllowedCPUs=` defeats radiod's internal `sched_setaffinity()` calls
+  that would otherwise override systemd's `CPUAffinity=`.
+
+- **Foreign policies are removed.** `smd diag cpu-affinity --apply`
+  removes drop-ins written by hf-timestd (`cpu-affinity.conf`) and
+  wd-ctl (`99-wdctl-cpu-affinity.conf`), and disables the
+  `timestd-radiod-affinity.path` watcher that would recreate them.
+
+### Configuration
+
+```toml
+# /etc/sigmond/topology.toml
+
+[cpu_affinity]
+radiod_cpus = ""      # auto-computed from HT topology if empty
+other_cpus  = ""      # auto-computed as complement of radiod_cpus
+
+[cpu_freq]
+radiod_max_mhz = 3200   # high-performance for radiod cores
+other_max_mhz  = 1400   # power-efficient for everything else
+```
+
+### CLI
+
+```
+smd diag cpu-affinity              # show current state
+smd diag cpu-affinity --threads    # show per-thread detail
+smd diag cpu-affinity --apply      # take ownership + write drop-ins
+smd diag cpu-freq                  # show frequency policy
+smd diag cpu-freq --apply          # write scaling_max_freq
+```
 
 ---
 
-## What this demonstrates
+## Implementation files
 
-The TUI doubles as a showcase.  A new user configuring the system for the
-first time sees radiod channels appearing in real time via ka9q-python,
-clock offsets updating from hf-timestd, and recording health from
-wspr-recorder.  The system is visibly *working* as they configure it —
-far more convincing than documentation alone.
+```
+lib/sigmond/tui/
+├── __init__.py                    # launch() entry point (lazy import)
+├── app.py                         # SigmondApp — 3-panel layout, keybindings
+├── screens/
+│   ├── __init__.py
+│   ├── topology.py                # ✔ enable/disable components + save
+│   ├── radiod.py                  # ✔ live status via ka9q-python + deep dive
+│   ├── validate.py                # ✔ harmonization rule runner
+│   ├── cpu_affinity.py            # planned — visual core map + apply
+│   └── cpu_freq.py                # planned — frequency limit viewer + apply
+└── widgets/
+    ├── __init__.py
+    ├── component_tree.py          # ✔ left panel tree with health indicators
+    └── context_panel.py           # ✔ right panel contextual help
+```
+
+### Dependencies
+
+- **Core smd:** Python 3.11, stdlib only.
+- **TUI:** Textual (lazy import, only for `smd config edit`).
+- **Radiod screen:** ka9q-python (optional; graceful degradation if absent).
+- **Dev venv:** `.venv/` with textual + pytest for development.
+
+### Reused modules
+
+| Module | TUI usage |
+|--------|-----------|
+| `sysview.build_system_view()` | Canonical data assembly for validate |
+| `topology.load_topology()` | Component state for topology screen |
+| `coordination.load_coordination()` | Radiod addresses for radiod screen |
+| `catalog.load_catalog()` | Available clients for topology merge |
+| `harmonize.run_all()` | Validation rules for validate screen |
+| `ka9q.RadiodControl` | Live radiod queries for radiod screen |
+| `ka9q.discover_channels()` | Active channel enumeration |
 
 ---
 
 ## Open questions
 
-- [ ] Suite rename: candidates referencing HamSCI (e.g., `hamsci-suite`,
-      `hamsci-sdr`, `hamsci-tools`)?  Name affects paths, package name,
-      systemd unit prefixes, and this TUI's branding.
-- [ ] Should the topology registry be auto-discovered from installed
-      systemd units, or manually authored?
 - [ ] Should the TUI support headless / scripted mode (e.g.,
-      `wd-configure --validate --json`) for CI or remote management?
-- [ ] Where does the TUI live — in this repo, or in a new top-level
-      suite repo that depends on all components?
+      `smd config edit --validate --json`) for CI or remote management?
+- [ ] Should the CPU affinity screen extract `_compute_affinity_plan()`
+      and friends from `bin/smd` into `lib/sigmond/cpu.py` for reuse?
+- [ ] Per-client config screens: how much can we derive from
+      `inventory --json` vs. needing per-client TUI knowledge?
