@@ -14,6 +14,35 @@ from .widgets.component_tree import ComponentTree
 from .widgets.context_panel import ContextPanel
 
 
+def _discover_radiod_from_config() -> tuple[str, str]:
+    """Discover radiod instance name and status address from /etc/radio/.
+
+    Parses radiod@*.conf files for the 'status = ...' line.
+    Returns (instance_name, status_dns) or ('', '').
+    """
+    from pathlib import Path
+    import re
+
+    conf_dir = Path('/etc/radio')
+    if not conf_dir.exists():
+        return ('', '')
+
+    for conf in sorted(conf_dir.glob('radiod@*.conf')):
+        # Extract instance name from filename: radiod@foo.conf -> foo
+        instance = conf.stem.split('@', 1)[1] if '@' in conf.stem else ''
+        try:
+            for line in conf.read_text().splitlines():
+                line = line.strip()
+                if line.startswith('status') and '=' in line:
+                    # Parse: status = bee1-status.local  # comment
+                    val = line.split('=', 1)[1].split('#')[0].strip()
+                    if val:
+                        return (instance, val)
+        except OSError:
+            continue
+    return ('', '')
+
+
 class SigmondApp(App):
     """Dr. SigMonD TUI configurator."""
 
@@ -115,6 +144,14 @@ class SigmondApp(App):
                 radiod_id = rid
                 status_dns = r.status_dns
                 break
+
+        # Fallback: discover from running radiod config files.
+        if not status_dns:
+            found_id, found_dns = _discover_radiod_from_config()
+            if found_dns:
+                status_dns = found_dns
+                if not radiod_id:
+                    radiod_id = found_id
 
         center = self.query_one("#center")
         center.remove_children()

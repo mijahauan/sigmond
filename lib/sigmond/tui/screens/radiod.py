@@ -88,10 +88,10 @@ class RadiodScreen(Vertical):
 
         result = {"channels": [], "frontend": {}}
         try:
-            channels = discover_channels(self._status_dns, timeout=3.0)
-            for ch in channels:
+            channel_dict = discover_channels(self._status_dns, listen_duration=2.0)
+            for ssrc, ch in channel_dict.items():
                 result["channels"].append({
-                    "ssrc": ch.ssrc,
+                    "ssrc": ssrc,
                     "frequency": ch.frequency,
                     "preset": ch.preset,
                     "sample_rate": ch.sample_rate,
