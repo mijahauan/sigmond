@@ -57,6 +57,21 @@ try:
         get_inventory_log_paths, set_log_level, send_sighup,
         client_env_key,
     )
+    from sigmond.cpu import (
+        cpu_list_str      as _cpu_list_str,
+        parse_cpu_mask    as _parse_cpu_mask,
+        get_physical_cores as _get_physical_cores,
+        get_radiod_instances as _get_radiod_instances,
+        get_radiod_cpus   as _get_radiod_cpus,
+        compute_affinity_plan as _compute_affinity_plan,
+        read_proc_cpus    as _read_proc_cpus,
+        thread_affinity_groups as _thread_affinity_groups,
+        render_drop_in    as _render_drop_in,
+        SMD_AFFINITY_DROP_IN as _SMD_AFFINITY_DROP_IN,
+        FOREIGN_AFFINITY_DROP_INS as _FOREIGN_AFFINITY_DROP_INS,
+        HFTIMESTD_AFFINITY_UNITS as _HFTIMESTD_AFFINITY_UNITS,
+        AFFINITY_UNITS as _AFFINITY_UNITS,
+    )
     _HAS_SIGMOND_LIB = True
 except ImportError:
     _HAS_SIGMOND_LIB = False
@@ -874,216 +889,16 @@ def cmd_stop(args) -> int:
 # ---------------------------------------------------------------------------
 # CPU affinity management
 # ---------------------------------------------------------------------------
-
-# Drop-in filename written by smd (separate from foreign tools' names).
-_SMD_AFFINITY_DROP_IN = 'smd-cpu-affinity.conf'
-
-# Drop-in filenames installed by other tools that smd supersedes.
-_FOREIGN_AFFINITY_DROP_INS = [
-    'cpu-affinity.conf',          # hf-timestd setup-cpu-affinity.sh
-    '99-wdctl-cpu-affinity.conf', # wd-ctl apply
-]
-
-# hf-timestd units that watch radiod for reinstalls and re-apply its drop-in.
-_HFTIMESTD_AFFINITY_UNITS = [
-    'timestd-radiod-affinity.path',
-    'timestd-radiod-affinity.service',
-]
-
-# Service template → cpu group.  Covers all smd-managed services.
-# radiod instances are handled separately (per-instance, one physical core each).
-_AFFINITY_UNITS = {
-    # wsprdaemon group
-    'wd-decode@.service':                'other',
-    'wd-ka9q-record@.service':           'other',
-    'wd-kiwi-record@.service':           'other',
-    'wd-post@.service':                  'other',
-    'wd-upload-wsprnet@.service':        'other',
-    'wd-upload-wsprdaemon@.service':     'other',
-    'wd-ka9q-web@.service':              'other',
-    'wd-spool-clean.service':            'other',
-    # hf-timestd / grape group
-    'timestd-core-recorder.service':     'other',
-    'timestd-fusion.service':            'other',
-    'timestd-l2-calibration.service':    'other',
-    'timestd-metrology@.service':        'other',
-    'timestd-physics.service':           'other',
-    'timestd-vtec.service':              'other',
-    'timestd-iono-reanalysis.service':   'other',
-    'timestd-radiod-monitor.service':    'other',
-    'timestd-chrony-monitor.service':    'other',
-    'timestd-pipeline-watchdog.service': 'other',
-    'timestd-prune.service':             'other',
-    'timestd-raw-cleanup.service':       'other',
-    'grape-daily.service':               'other',
-}
-
-
-def _cpu_list_str(cpus: set) -> str:
-    """Return sorted space-separated CPU list, e.g. '2 3 12 13 14 15'."""
-    return ' '.join(str(c) for c in sorted(cpus))
-
-
-def _parse_cpu_mask(s: str) -> set:
-    """Parse a Cpus_allowed_list or systemd CPUAffinity string into a set of ints.
-
-    Handles space/comma-separated tokens and hyphenated ranges, e.g.
-    '0-3 8 12-15'  →  {0, 1, 2, 3, 8, 12, 13, 14, 15}
-    """
-    parts: set = set()
-    for token in s.replace(',', ' ').split():
-        if '-' in token:
-            a, b = token.split('-', 1)
-            try:
-                parts.update(range(int(a), int(b) + 1))
-            except ValueError:
-                pass
-        else:
-            try:
-                parts.add(int(token))
-            except ValueError:
-                pass
-    return parts
-
-
-def _get_physical_cores() -> list:
-    """Return an ordered list of CPU sets, one set per physical core.
-
-    Reads /sys/devices/system/cpu/cpu*/topology/thread_siblings_list so that
-    HT sibling pairs are grouped.  Ordered by lowest logical CPU in each group.
-    Falls back to treating each logical CPU as its own core (no HT, or VM).
-    """
-    seen: set = set()
-    core_map: dict = {}
-    n = os.cpu_count() or 1
-    for cpu in range(n):
-        p = Path(f'/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list')
-        try:
-            siblings = _parse_cpu_mask(p.read_text().strip())
-        except OSError:
-            siblings = {cpu}
-        key = frozenset(siblings)
-        if key not in seen:
-            seen.add(key)
-            core_map[min(siblings)] = siblings
-    return [core_map[k] for k in sorted(core_map)]
-
-
-def _get_radiod_instances() -> list:
-    """Return sorted list of radiod@*.service unit names known to systemd."""
-    import json as _json
-    r = _run(['systemctl', 'list-units', '--no-legend', '--no-pager',
-              '--all', '--output=json', 'radiod@*.service'])
-    try:
-        return sorted(u.get('unit', '') for u in _json.loads(r.stdout)
-                      if u.get('unit', ''))
-    except Exception:
-        return []
-
-
-def _compute_affinity_plan(topology: dict) -> tuple:
-    """Return (radiod_plan, other_cpus).
-
-    radiod_plan : dict  {unit_name: cpu_set}
-    other_cpus  : set of all CPUs not claimed by any radiod instance.
-    """
-    cores     = _get_physical_cores()
-    instances = _get_radiod_instances()
-
-    radiod_plan: dict = {}
-    for i, unit in enumerate(instances):
-        if i < len(cores):
-            radiod_plan[unit] = cores[i]
-        else:
-            _warn(f'{unit}: more radiod instances than cores — sharing core {len(cores)-1}')
-            radiod_plan[unit] = cores[-1]
-
-    radiod_all: set = set()
-    for cpus in radiod_plan.values():
-        radiod_all.update(cpus)
-
-    ca         = topology.get('cpu_affinity', {})
-    other_spec = ca.get('other_cpus', '').strip()
-    if other_spec:
-        other_cpus = _parse_cpu_mask(other_spec)
-    else:
-        other_cpus = set(range(os.cpu_count() or 16)) - radiod_all
-
-    return radiod_plan, other_cpus
-
-
-def _get_radiod_cpus() -> set:
-    """Return the set of CPU numbers assigned to radiod via systemd CPUAffinity."""
-    import json as _json
-
-    r = _run(['systemctl', 'list-units', '--no-legend', '--no-pager',
-              '--all', '--output=json', 'radiod@*.service'])
-    try:
-        units = _json.loads(r.stdout)
-    except Exception:
-        units = []
-
-    cpus: set = set()
-    for u in units:
-        name = u.get('unit', '')
-        if not name:
-            continue
-        r2 = _run(['systemctl', 'show', '-p', 'CPUAffinity', '--value', name])
-        mask = r2.stdout.strip()
-        if mask:
-            cpus.update(_parse_cpu_mask(mask))
-
-    return cpus
-
-
-def _read_proc_cpus(pid_or_tid: str) -> str | None:
-    """Return Cpus_allowed_list string for a PID or TID, or None on error."""
-    try:
-        text = Path(f'/proc/{pid_or_tid}/status').read_text()
-        line = next((l for l in text.splitlines()
-                     if l.startswith('Cpus_allowed_list:')), None)
-        return line.split(':', 1)[1].strip() if line else None
-    except OSError:
-        return None
-
-
-def _thread_affinity_groups(pid: str) -> dict:
-    """Return {cpu_mask: [(tid, thread_name), ...]} for every thread in pid."""
-    groups: dict = {}
-    task_dir = Path(f'/proc/{pid}/task')
-    if not task_dir.exists():
-        return groups
-    for td in task_dir.iterdir():
-        tid = td.name
-        try:
-            text = (td / 'status').read_text()
-        except OSError:
-            continue
-        name_line = next((l for l in text.splitlines() if l.startswith('Name:')), '')
-        tname = name_line.split(':', 1)[1].strip() if name_line else tid
-        mask_line = next((l for l in text.splitlines()
-                          if l.startswith('Cpus_allowed_list:')), '')
-        mask = mask_line.split(':', 1)[1].strip() if mask_line else '?'
-        groups.setdefault(mask, []).append((tid, tname))
-    return groups
+# Pure functions and constants are in lib/sigmond/cpu.py (imported above).
+# CLI-only helpers that need _run() / _ok() / _err() stay here.
 
 
 def _write_affinity_drop_in(unit: str, cpus: set, label: str) -> bool:
     """Write /etc/systemd/system/<unit>.d/smd-cpu-affinity.conf."""
     import tempfile
-    cpu_str  = _cpu_list_str(cpus)
     drop_dir = Path(f'/etc/systemd/system/{unit}.d')
     drop_in  = drop_dir / _SMD_AFFINITY_DROP_IN
-    content  = textwrap.dedent(f'''\
-        # CPU affinity managed by smd — do not edit manually.
-        # Role: {label}
-        # Regenerate: sudo smd diag cpu-affinity --apply
-        [Service]
-        CPUAffinity=
-        CPUAffinity={cpu_str}
-        AllowedCPUs=
-        AllowedCPUs={cpu_str}
-    ''')
+    content  = _render_drop_in(cpus, label)
     r = _run(['mkdir', '-p', str(drop_dir)], sudo=True)
     if r.returncode != 0:
         _err(f'{unit}: cannot create {drop_dir}')
@@ -1233,7 +1048,9 @@ def cmd_diag_cpu_affinity(args) -> int:
             _err('--apply requires root  (sudo smd diag cpu-affinity --apply)')
             return 1
 
-        radiod_plan, other_cpus = _compute_affinity_plan(topology)
+        plan = _compute_affinity_plan(topology.get('cpu_affinity'))
+        radiod_plan = plan.radiod
+        other_cpus = plan.other_cpus
 
         _heading('cpu-affinity apply')
         if radiod_plan:
