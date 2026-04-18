@@ -22,7 +22,9 @@ from sigmond.cpu import (
     SystemCapabilities,
     UnitAffinity,
     _is_kernel_thread,
+    affinity_report_to_dict,
     build_affinity_report,
+    expand_template_instances,
     gather_capabilities,
     parse_cmdline_cpu_param,
     parse_cpu_mask,
@@ -124,6 +126,16 @@ class UnitAffinityTests(unittest.TestCase):
         )
         self.assertFalse(ua.mask_mismatch)
 
+    def test_observed_mask_raw_field(self):
+        # observed_mask_raw preserves /proc's exact string so thread
+        # mask comparisons (which use the same format) match exactly.
+        ua = UnitAffinity(
+            unit='radiod@foo.service', role='radiod',
+            observed_mask={0, 1}, observed_mask_raw='0-1',
+        )
+        self.assertEqual(ua.observed_mask_raw, '0-1')
+        self.assertEqual(ua.observed_mask, {0, 1})
+
 
 class AffinityReportTests(unittest.TestCase):
     """Integration tests — build a real report from the current host.
@@ -183,6 +195,61 @@ class CacheIslandTests(unittest.TestCase):
         # used as a dict key in get_cache_islands's dedup.
         isle = CacheIsland(level=3, cache_type='Unified', cpus=frozenset({0, 1, 2, 3}))
         self.assertEqual(hash(isle), hash(isle))
+
+
+class ExpandTemplateInstancesTests(unittest.TestCase):
+    def test_non_template_returns_self(self):
+        # A concrete unit name comes back unchanged as a single-entry list.
+        self.assertEqual(expand_template_instances('some-non-template.service'),
+                         ['some-non-template.service'])
+
+    def test_template_is_list(self):
+        # On the live host this may be empty or populated — just assert
+        # the shape.  Content is validated through integration tests.
+        result = expand_template_instances('wd-decode@.service')
+        self.assertIsInstance(result, list)
+        for name in result:
+            self.assertTrue(name.startswith('wd-decode@'))
+
+
+class AffinityReportToDictTests(unittest.TestCase):
+    def test_is_json_serializable(self):
+        import json
+
+        report = build_affinity_report()
+        payload = affinity_report_to_dict(report)
+        # Must survive json.dumps without custom encoders.
+        dumped = json.dumps(payload)
+        self.assertIsInstance(dumped, str)
+        roundtrip = json.loads(dumped)
+        # Spot-check a few keys.
+        self.assertIn('capabilities', roundtrip)
+        self.assertIn('plan', roundtrip)
+        self.assertIn('units', roundtrip)
+        self.assertIn('warnings', roundtrip)
+        self.assertIn('radiod_cpus', roundtrip)
+
+    def test_set_fields_become_sorted_lists(self):
+        report = build_affinity_report()
+        d = affinity_report_to_dict(report)
+        # radiod_cpus (set) → sorted list
+        self.assertIsInstance(d['radiod_cpus'], list)
+        self.assertEqual(d['radiod_cpus'], sorted(d['radiod_cpus']))
+        # capabilities.isolated_cpus (set) → sorted list
+        self.assertIsInstance(d['capabilities']['isolated_cpus'], list)
+        # each physical core sorted
+        for core in d['capabilities']['physical_cores']:
+            self.assertEqual(core, sorted(core))
+
+    def test_thread_groups_summarized(self):
+        # affinity_report_to_dict deliberately summarizes threads by
+        # count rather than dumping every thread — the text renderer
+        # handles that.
+        report = build_affinity_report()
+        d = affinity_report_to_dict(report)
+        for unit in d['units']:
+            self.assertIsInstance(unit['thread_group_count'], int)
+            self.assertNotIn('thread_groups', unit)
 
 
 if __name__ == '__main__':

@@ -904,91 +904,77 @@ def _apply_cpu_affinity_runtime(unit: str, cpus: set) -> bool:
 
 
 def cmd_diag_cpu_affinity(args) -> int:
-    """Show CPU affinity of every running smd-managed service process."""
+    """Show CPU affinity of every running smd-managed service process.
+
+    Renders from sigmond.cpu.build_affinity_report() — same report that
+    powers the TUI CPU affinity screen and smd status's summary block.
+    With --json, emits the full report for programmatic consumers.
+    """
     import json as _json
+    from sigmond.cpu import build_affinity_report, affinity_report_to_dict
 
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
     show_all_threads = getattr(args, 'threads', False)
+    want_json = getattr(args, 'json', False)
+
+    report = build_affinity_report(topology.get('cpu_affinity'))
+
+    if want_json:
+        _json.dump(affinity_report_to_dict(report), sys.stdout, indent=2)
+        sys.stdout.write('\n')
+        return 0
 
     _heading('diag: CPU affinity')
 
-    # Build the full set of unit patterns to check: radiod instances + _AFFINITY_UNITS
-    radiod_instances = _get_radiod_instances()
-    unit_patterns = radiod_instances + [
-        u.replace('@.service', '@*.service') if '@.' in u else u
-        for u in _AFFINITY_UNITS
-    ]
-
-    any_found = False
-    for pattern in unit_patterns:
-        r = _run(['systemctl', 'list-units', '--no-legend', '--no-pager',
-                  '--all', '--output=json', pattern])
-        if r.returncode != 0 or not r.stdout.strip():
+    any_running = False
+    for ua in report.units:
+        if not ua.main_pid:
+            _info(f'{ua.unit}: not running')
             continue
-        try:
-            units = _json.loads(r.stdout)
-        except Exception:
-            units = []
 
-        for u in units:
-            name   = u.get('unit', u.get('name', ''))
-            active = u.get('active', u.get('activestate', ''))
-            if not name:
-                continue
+        any_running = True
+        # Preserve /proc's raw Cpus_allowed_list format so thread-group
+        # keys (also raw /proc format) compare correctly against the
+        # process mask in the diff-only thread display below.
+        systemd_mask_str = _cpu_list_str(ua.systemd_mask) if ua.systemd_mask else ''
+        proc_cpus_str = ua.observed_mask_raw or '?'
+        sd_note = f'  [systemd CPUAffinity: {systemd_mask_str}]' if systemd_mask_str else ''
 
-            r2 = _run(['systemctl', 'show', '-p', 'MainPID', '--value', name])
-            pid_str = r2.stdout.strip()
-            if not pid_str or pid_str == '0':
-                _info(f'{name}: not running ({active})')
-                continue
+        if ua.mask_mismatch:
+            _warn(f'{ua.unit}  (pid {ua.main_pid})  actual CPUs: {proc_cpus_str}{sd_note}')
+            _info(f'       {ua.role} overrides systemd affinity via sched_setaffinity()')
+        else:
+            _ok(f'{ua.unit}  (pid {ua.main_pid})  CPUs: {proc_cpus_str}{sd_note}')
 
-            pid = pid_str
-            any_found = True
+        thread_groups = ua.thread_groups
+        if not thread_groups:
+            continue
 
-            r_sd = _run(['systemctl', 'show', '-p', 'CPUAffinity', '--value', name])
-            systemd_mask = r_sd.stdout.strip()
-            proc_cpus    = _read_proc_cpus(pid) or '?'
+        if show_all_threads:
+            display_masks = sorted(thread_groups)
+        else:
+            display_masks = sorted(m for m in thread_groups if m != proc_cpus_str)
 
-            sd_set   = _parse_cpu_mask(systemd_mask)
-            proc_set = _parse_cpu_mask(proc_cpus)
-            mismatch = bool(sd_set) and sd_set != proc_set
-
-            sd_note = f'  [systemd CPUAffinity: {systemd_mask}]' if systemd_mask else ''
-            if mismatch:
-                _warn(f'{name}  (pid {pid})  actual CPUs: {proc_cpus}{sd_note}')
-                _info(f'       radiod overrides systemd affinity via sched_setaffinity()')
+        if display_masks:
+            total_threads = sum(len(v) for v in thread_groups.values())
+            if not show_all_threads:
+                diff_count = sum(len(thread_groups[m]) for m in display_masks)
+                _info(f'       {total_threads} threads — showing {diff_count} with non-process affinity:')
             else:
-                _ok(f'{name}  (pid {pid})  CPUs: {proc_cpus}{sd_note}')
+                _info(f'       {total_threads} threads:')
+            for mask in display_masks:
+                threads = thread_groups[mask]
+                unique_names = sorted(set(n for _, n in threads))
+                name_str = ', '.join(unique_names)
+                if len(name_str) > 60:
+                    name_str = name_str[:57] + '...'
+                diff_flag = '  ← differs' if mask != proc_cpus_str else ''
+                print(f'         CPUs {mask:<10s}  ×{len(threads):>3}  {name_str}{diff_flag}')
+        elif not show_all_threads:
+            total = sum(len(v) for v in thread_groups.values())
+            _info(f'       {total} threads — all share process affinity ({proc_cpus_str})')
 
-            thread_groups = _thread_affinity_groups(pid)
-            if not thread_groups:
-                continue
-
-            if show_all_threads:
-                display_masks = sorted(thread_groups)
-            else:
-                display_masks = sorted(m for m in thread_groups if m != proc_cpus)
-
-            if display_masks:
-                total_threads = sum(len(v) for v in thread_groups.values())
-                if not show_all_threads:
-                    diff_count = sum(len(thread_groups[m]) for m in display_masks)
-                    _info(f'       {total_threads} threads — showing {diff_count} with non-process affinity:')
-                else:
-                    _info(f'       {total_threads} threads:')
-                for mask in display_masks:
-                    threads = thread_groups[mask]
-                    unique_names = sorted(set(n for _, n in threads))
-                    name_str = ', '.join(unique_names)
-                    if len(name_str) > 60:
-                        name_str = name_str[:57] + '...'
-                    diff_flag = '  ← differs' if mask != proc_cpus else ''
-                    print(f'         CPUs {mask:<10s}  ×{len(threads):>3}  {name_str}{diff_flag}')
-            elif not show_all_threads and thread_groups:
-                total = sum(len(v) for v in thread_groups.values())
-                _info(f'       {total} threads — all share process affinity ({proc_cpus})')
-
-    if not any_found:
+    if not any_running:
         _info('No active managed service processes found.')
 
     if getattr(args, 'apply', False):
@@ -1771,7 +1757,7 @@ _smd_complete() {
                 diag)
                     case "${words[2]}" in
                         cpu-affinity)
-                            COMPREPLY=($(compgen -W "--components --threads --apply --topology" -- "$cur"))
+                            COMPREPLY=($(compgen -W "--components --threads --apply --json --topology" -- "$cur"))
                             ;;
                         cpu-freq)
                             COMPREPLY=($(compgen -W "--apply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
@@ -2019,6 +2005,8 @@ def main() -> int:
                    help='show every thread grouped by CPU mask (default: only differing threads)')
     p.add_argument('--apply', action='store_true',
                    help='remove foreign affinity drop-ins and write smd-managed ones (requires root)')
+    p.add_argument('--json', action='store_true',
+                   help='emit the full affinity report as JSON (incompatible with --apply)')
 
     p = diag_sub.add_parser('cpu-freq',
                              help='show (and optionally apply) per-CPU frequency limits')

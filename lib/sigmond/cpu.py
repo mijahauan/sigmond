@@ -434,6 +434,11 @@ class UnitAffinity:
     main_pid: Optional[str] = None
     systemd_mask: set = field(default_factory=set)
     observed_mask: set = field(default_factory=set)
+    # Raw Cpus_allowed_list string from /proc (e.g. '0-1' or '2-7,10-15').
+    # Preserved separately because thread_groups keys use this exact format,
+    # so display/comparison code can match thread masks against the process
+    # mask without normalizing through parse_cpu_mask + cpu_list_str.
+    observed_mask_raw: str = ""
     thread_groups: dict = field(default_factory=dict)
     drop_in_present: bool = False
     foreign_drop_ins: list = field(default_factory=list)
@@ -466,6 +471,27 @@ def _systemctl_cpu_affinity(unit: str) -> set:
     return parse_cpu_mask(r.stdout.strip())
 
 
+def expand_template_instances(template: str) -> list:
+    """Expand a systemd template unit name to the concrete instances
+    known to systemd.  Non-template names are returned as a single-entry
+    list containing the name unchanged.
+
+    Uses ``systemctl list-units --all --output=json`` so inactive but
+    loaded instances are included.  Returns an empty list when a template
+    has no instances.
+    """
+    if '@.' not in template:
+        return [template]
+    pattern = template.replace('@.service', '@*.service')
+    r = _run_capture(['systemctl', 'list-units', '--no-legend', '--no-pager',
+                      '--all', '--output=json', pattern])
+    try:
+        units = json.loads(r.stdout)
+    except Exception:
+        return []
+    return sorted(u.get('unit', '') for u in units if u.get('unit', ''))
+
+
 def observe_unit(unit: str, role: str) -> UnitAffinity:
     """Collect observed affinity facts for a single unit."""
     ua = UnitAffinity(unit=unit, role=role)
@@ -473,6 +499,7 @@ def observe_unit(unit: str, role: str) -> UnitAffinity:
     ua.systemd_mask = _systemctl_cpu_affinity(unit)
     if ua.main_pid:
         proc = read_proc_cpus(ua.main_pid)
+        ua.observed_mask_raw = proc or ""
         ua.observed_mask = parse_cpu_mask(proc) if proc else set()
         ua.thread_groups = thread_affinity_groups(ua.main_pid)
     ua.drop_in_present = _smd_drop_in_path(unit).exists()
@@ -605,10 +632,9 @@ def build_affinity_report(
         units.append(ua)
         if ua.main_pid:
             radiod_main_pids.add(ua.main_pid)
-    for unit in AFFINITY_UNITS:
-        # Template units (e.g. wd-decode@.service) show the template's
-        # defaults here; per-instance observation happens elsewhere.
-        units.append(observe_unit(unit, role='other'))
+    for template in AFFINITY_UNITS:
+        for unit in expand_template_instances(template):
+            units.append(observe_unit(unit, role='other'))
 
     radiod_cpus_set: set = set()
     for cpus in plan.radiod.values():
@@ -669,3 +695,69 @@ def build_affinity_report(
         contention=contention,
         warnings=warnings,
     )
+
+
+# ---------------------------------------------------------------------------
+# Serialization — JSON-safe dict for smd diag cpu-affinity --json and
+# future consumers.  Sets become sorted lists; frozensets in CacheIsland
+# are flattened.  Thread groups are summarized by count rather than dumped
+# in full — the text renderer is the right tool for per-thread detail.
+# ---------------------------------------------------------------------------
+
+def _island_to_dict(isle: CacheIsland) -> dict:
+    return {
+        'level': isle.level,
+        'cache_type': isle.cache_type,
+        'cpus': sorted(isle.cpus),
+    }
+
+
+def affinity_report_to_dict(report: AffinityReport) -> dict:
+    """Render AffinityReport as a JSON-safe dict."""
+    caps = report.capabilities
+    return {
+        'capabilities': {
+            'logical_cpus':      caps.logical_cpus,
+            'physical_cores':    [sorted(c) for c in caps.physical_cores],
+            'l2_islands':        [_island_to_dict(i) for i in caps.l2_islands],
+            'l3_islands':        [_island_to_dict(i) for i in caps.l3_islands],
+            'isolated_cpus':     sorted(caps.isolated_cpus),
+            'cmdline_isolcpus':  sorted(caps.cmdline_isolcpus),
+            'cmdline_nohz_full': sorted(caps.cmdline_nohz_full),
+            'cmdline_rcu_nocbs': sorted(caps.cmdline_rcu_nocbs),
+            'governors':         {str(cpu): gov
+                                  for cpu, gov in sorted(caps.governors.items())},
+        },
+        'plan': {
+            'radiod':         {unit: sorted(cpus)
+                               for unit, cpus in report.plan.radiod.items()},
+            'other_cpus':     sorted(report.plan.other_cpus),
+            'physical_cores': [sorted(c) for c in report.plan.physical_cores],
+        },
+        'radiod_cpus': sorted(report.radiod_cpus),
+        'units': [
+            {
+                'unit':               u.unit,
+                'role':               u.role,
+                'main_pid':           u.main_pid,
+                'systemd_mask':       sorted(u.systemd_mask),
+                'observed_mask':      sorted(u.observed_mask),
+                'mask_mismatch':      u.mask_mismatch,
+                'drop_in_present':    u.drop_in_present,
+                'foreign_drop_ins':   list(u.foreign_drop_ins),
+                'thread_group_count': len(u.thread_groups),
+            }
+            for u in report.units
+        ],
+        'contention': [
+            {
+                'pid':        c.pid,
+                'comm':       c.comm,
+                'allowed':    sorted(c.allowed),
+                'overlap':    sorted(c.overlap),
+                'is_default': c.is_default,
+            }
+            for c in report.contention
+        ],
+        'warnings': list(report.warnings),
+    }
