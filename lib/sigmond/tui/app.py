@@ -275,26 +275,32 @@ class SigmondApp(App):
         )
 
     def action_show_install(self) -> None:
-        self._mount_placeholder(
-            title="Install",
-            description=(
-                "Browse the catalog of known clients and install a "
-                "selected one."),
-            cli_hint="sudo smd install [<client>]   |   smd list --available",
-            help_title="Install",
-            help_body=(
-                "Catalog browser + installer.  Delegates to each "
-                "client's own install.sh.  Coming soon."),
+        from .screens.install import InstallScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(InstallScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Install",
+            "Catalog of every known HamSCI client and server, with "
+            "per-entry install status.\n\n"
+            "Arrow to a row → 'Install selected' to install one, or "
+            "'Install all missing' to run a catalog walk via "
+            "`sudo smd install`.\n\n"
+            "Each entry is installed via its own canonical install.sh; "
+            "sigmond delegates, not duplicates.",
         )
 
     def action_show_update(self) -> None:
-        self._mount_placeholder(
-            title="Update",
-            description=(
-                "Pull the latest code and re-apply the current "
-                "configuration."),
-            cli_hint="sudo smd update",
-            help_title="Update",
-            help_body=(
-                "Pull + apply in one step.  Coming soon."),
+        from .screens.update import UpdateScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(UpdateScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Update",
+            "Pulls the latest wsprdaemon-client and re-runs the "
+            "catalog install pass.\n\n"
+            "Equivalent to `sudo smd update`.  Running services may "
+            "restart as part of the re-apply.",
         )

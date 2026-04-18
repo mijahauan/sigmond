@@ -31,23 +31,26 @@ class TreeNavigationTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertIsNotNone(app.query_one("#center"))
 
-    async def test_placeholders_mount_via_tree_selection(self):
-        """Placeholder actions (cpu_freq, logs, lifecycle, install, update)
-        have no key binding; invoke them directly through the app so the
-        tree's on_tree_node_selected wiring is still exercised by the
-        navigation test above."""
+    async def test_no_stale_placeholders_remain(self):
+        """Every non-binding action should mount a real screen — no
+        PlaceholderScreen should survive into the mounted widget tree
+        after the last mutation screen (Update) landed."""
         from sigmond.tui.app import SigmondApp
         from sigmond.tui.screens.placeholder import PlaceholderScreen
 
         app = SigmondApp()
         async with app.run_test(size=(120, 60)) as pilot:
-            for action in ("show_install", "show_update"):
+            for action in ("show_overview", "show_topology",
+                           "show_cpu_affinity", "show_cpu_freq",
+                           "show_radiod", "show_logs", "show_validate",
+                           "show_lifecycle", "show_install", "show_update"):
                 getattr(app, f"action_{action}")()
                 await pilot.pause()
                 center = app.query_one("#center")
-                self.assertTrue(
-                    any(isinstance(c, PlaceholderScreen) for c in center.children),
-                    f"{action} did not mount a PlaceholderScreen",
+                self.assertFalse(
+                    any(isinstance(c, PlaceholderScreen)
+                        for c in center.children),
+                    f"{action} mounted a stale PlaceholderScreen",
                 )
 
 
