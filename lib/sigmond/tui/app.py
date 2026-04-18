@@ -225,17 +225,19 @@ class SigmondApp(App):
         )
 
     def action_show_cpu_freq(self) -> None:
-        self._mount_placeholder(
-            title="CPU frequency",
-            description=(
-                "Per-CPU scaling_max_freq view with the policy from "
-                "[cpu_freq] in topology.toml — high for radiod cores, "
-                "power-efficient elsewhere."),
-            cli_hint="smd diag cpu-freq  (then --apply with sudo to set)",
-            help_title="CPU frequency",
-            help_body=(
-                "Shows current scaling_max_freq per CPU against the "
-                "topology [cpu_freq] policy.  Coming soon."),
+        from .screens.cpu_freq import CPUFreqScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(CPUFreqScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "CPU frequency",
+            "Per-CPU scaling_max_freq view against the [cpu_freq] "
+            "policy in topology.toml.\n\n"
+            "Radiod cores get high clock to keep the USB3/FFT path "
+            "fed; the rest stay power-efficient.\n\n"
+            "Read-only.  To apply:\n"
+            "  sudo smd diag cpu-freq --apply",
         )
 
     def action_show_logs(self) -> None:
