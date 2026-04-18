@@ -238,6 +238,83 @@ def _consumers_of(view: SystemView, radiod_id: str) -> list:
     return out
 
 
+def rule_cpu_isolation_runtime(view: SystemView) -> RuleResult:
+    """Runtime counterpart to rule_cpu_isolation.
+
+    The declared rule checks coordination.toml's internal consistency.
+    This rule checks that the *running* system honors the design objective:
+    radiod's USB3/FFT path on its reserved cores, uncontested.
+
+    Looks at: pinned processes overlapping radiod cores,
+    sched_setaffinity overrides of systemd's CPUAffinity, foreign
+    drop-ins still on disk, radiod units running without smd's drop-in,
+    and non-'performance' governor on radiod cores.
+
+    Skips cleanly when there's no local radiod in the view, when no
+    radiod unit is actually running, or when the live host check can't
+    complete (e.g. systemctl unavailable) — this keeps the rule
+    standalone-safe in the same spirit as the declared rules.
+    """
+    local_radiods = [r for r in view.coordination.radiods.values() if r.is_local]
+    if not local_radiods:
+        return RuleResult("cpu_isolation_runtime", "pass",
+                          "skipped (no local radiod)", [])
+
+    try:
+        from .cpu import build_affinity_report
+        report = build_affinity_report()
+    except Exception as exc:
+        return RuleResult("cpu_isolation_runtime", "pass",
+                          f"runtime check unavailable: {exc}", [])
+
+    if not report.radiod_cpus:
+        return RuleResult("cpu_isolation_runtime", "pass",
+                          "skipped (no radiod units running)", [])
+
+    issues: list = []
+    affected: set = set()
+
+    pinned = [c for c in report.contention if not c.is_default]
+    if pinned:
+        issues.append(
+            f"{len(pinned)} pinned process(es) overlap radiod cores")
+        affected.update(c.comm for c in pinned)
+
+    overrides = [u.unit for u in report.units
+                 if u.role == 'radiod' and u.mask_mismatch]
+    if overrides:
+        issues.append(
+            f"sched_setaffinity override on: {', '.join(overrides)}")
+
+    foreign = [u.unit for u in report.units if u.foreign_drop_ins]
+    if foreign:
+        issues.append(
+            f"foreign drop-ins still present on: {', '.join(foreign)}")
+
+    unenforced = [u.unit for u in report.units
+                  if u.role == 'radiod' and u.main_pid and not u.drop_in_present]
+    if unenforced:
+        issues.append(
+            f"radiod running without smd drop-in: {', '.join(unenforced)}")
+
+    bad_gov = [(cpu, report.capabilities.governors[cpu])
+               for cpu in sorted(report.radiod_cpus)
+               if report.capabilities.governors.get(cpu)
+               and report.capabilities.governors[cpu] != 'performance']
+    if bad_gov:
+        sample = ', '.join(f"cpu{c}={g}" for c, g in bad_gov[:4])
+        more = f' (+{len(bad_gov) - 4} more)' if len(bad_gov) > 4 else ''
+        issues.append(
+            f"governor not 'performance' on radiod cores: {sample}{more}")
+
+    if issues:
+        return RuleResult("cpu_isolation_runtime", "warn",
+                          "; ".join(issues), sorted(affected))
+    return RuleResult(
+        "cpu_isolation_runtime", "pass",
+        f"radiod cores {sorted(report.radiod_cpus)} uncontested", [])
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_frequency_coverage,
@@ -247,9 +324,16 @@ ALL_RULES = [
     rule_channel_count,
 ]
 
+# Rules that read live /sys, /proc, and systemctl state.  Kept out of
+# ALL_RULES so unit tests with hand-built views don't pick up host state.
+ALL_RUNTIME_RULES = [
+    rule_cpu_isolation_runtime,
+]
 
-def run_all(view: SystemView) -> list:
-    return [rule(view) for rule in ALL_RULES]
+
+def run_all(view: SystemView, include_runtime: bool = False) -> list:
+    rules = ALL_RULES + (ALL_RUNTIME_RULES if include_runtime else [])
+    return [rule(view) for rule in rules]
 
 
 def worst_severity(results: list) -> str:

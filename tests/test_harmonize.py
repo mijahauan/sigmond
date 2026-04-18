@@ -15,8 +15,10 @@ from sigmond.coordination import (
     ClientInstance, Coordination, Cpu, DiskBudget, Host, Radiod,
 )
 from sigmond.harmonize import (
-    ALL_RULES, _parse_cores, rule_cpu_isolation, rule_frequency_coverage,
-    rule_radiod_resolution, rule_timing_chain, run_all, worst_severity,
+    ALL_RULES, ALL_RUNTIME_RULES, _parse_cores,
+    rule_cpu_isolation, rule_cpu_isolation_runtime,
+    rule_frequency_coverage, rule_radiod_resolution, rule_timing_chain,
+    run_all, worst_severity,
 )
 from sigmond.sysview import SystemView
 from sigmond.topology import Topology
@@ -184,6 +186,63 @@ class TestStandaloneSafe(unittest.TestCase):
         results = run_all(view)
         self.assertEqual(worst_severity(results), "pass",
                          msg=f"unexpected severity; results={results}")
+
+
+class TestRuleCpuIsolationRuntime(unittest.TestCase):
+    """rule_cpu_isolation_runtime is listed in ALL_RUNTIME_RULES, not
+    ALL_RULES, so hand-built unit tests don't pick up live host state.
+    These tests cover the skip paths and the dispatch wiring."""
+
+    def test_no_radiods_skipped(self):
+        view = _make_view(Coordination())
+        result = rule_cpu_isolation_runtime(view)
+        self.assertEqual(result.severity, "pass")
+        self.assertIn("no local radiod", result.message)
+
+    def test_remote_only_skipped(self):
+        coord = Coordination(radiods={
+            "remote": Radiod(id="remote", host="other.local"),
+        })
+        view = _make_view(coord)
+        result = rule_cpu_isolation_runtime(view)
+        self.assertEqual(result.severity, "pass")
+        self.assertIn("no local radiod", result.message)
+
+    def test_build_affinity_report_failure_tolerated(self):
+        from unittest.mock import patch
+
+        coord = Coordination(radiods={
+            "k3lr-rx888": Radiod(id="k3lr-rx888", host="localhost"),
+        })
+        view = _make_view(coord)
+
+        with patch("sigmond.cpu.build_affinity_report",
+                   side_effect=RuntimeError("no systemctl on this host")):
+            result = rule_cpu_isolation_runtime(view)
+        self.assertEqual(result.severity, "pass")
+        self.assertIn("runtime check unavailable", result.message)
+
+    def test_run_all_default_excludes_runtime(self):
+        coord = Coordination()
+        view = _make_view(coord)
+        names = {r.rule for r in run_all(view)}
+        self.assertNotIn("cpu_isolation_runtime", names)
+
+    def test_run_all_include_runtime_adds_runtime_rules(self):
+        coord = Coordination()
+        view = _make_view(coord)
+        names = {r.rule for r in run_all(view, include_runtime=True)}
+        self.assertIn("cpu_isolation_runtime", names)
+        for r in ALL_RULES:
+            # Every declared rule is still present.
+            expected_name = r(view).rule
+            self.assertIn(expected_name, names)
+
+    def test_runtime_rule_catalog_stable(self):
+        # Catches accidental addition/removal of runtime rules — update
+        # this test along with ALL_RUNTIME_RULES if you change the set.
+        self.assertEqual([r.__name__ for r in ALL_RUNTIME_RULES],
+                         ["rule_cpu_isolation_runtime"])
 
 
 if __name__ == "__main__":

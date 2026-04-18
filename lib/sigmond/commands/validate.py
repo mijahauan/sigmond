@@ -19,7 +19,7 @@ _SEVERITY_EMOJI = {
 
 def cmd_validate(args) -> int:
     view = build_system_view()
-    results = harmonize.run_all(view)
+    results = harmonize.run_all(view, include_runtime=True)
 
     if getattr(args, 'json', False):
         payload = {

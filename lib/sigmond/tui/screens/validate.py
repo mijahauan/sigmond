@@ -43,7 +43,7 @@ class ValidateScreen(Vertical):
             from ...sysview import build_system_view
             from ...harmonize import run_all
             view = build_system_view()
-            results = run_all(view)
+            results = run_all(view, include_runtime=True)
         except Exception as exc:
             table.add_row("error", "[red]fail[/]", str(exc))
             return

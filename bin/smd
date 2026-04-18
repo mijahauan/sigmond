@@ -1395,6 +1395,46 @@ def cmd_status(args) -> int:
                 else:
                     _warn(msg)
 
+    # CPU affinity summary — one block, surfaced only when there's a
+    # local radiod (otherwise there's nothing to protect).
+    if _HAS_SIGMOND_LIB:
+        try:
+            from sigmond.cpu import build_affinity_report
+            _aff_report = build_affinity_report()
+        except Exception:
+            _aff_report = None
+        if _aff_report is not None and _aff_report.radiod_cpus:
+            print('\n  CPU affinity:')
+            _info(f'radiod cores: {sorted(_aff_report.radiod_cpus)} '
+                  f'(other pool: {len(_aff_report.plan.other_cpus)} CPUs)')
+            foreign_count = sum(len(u.foreign_drop_ins) for u in _aff_report.units)
+            unenforced = [u.unit for u in _aff_report.units
+                          if u.role == 'radiod' and u.main_pid
+                          and not u.drop_in_present]
+            pinned = [c for c in _aff_report.contention if not c.is_default]
+            bad_gov = [cpu for cpu in _aff_report.radiod_cpus
+                       if _aff_report.capabilities.governors.get(cpu) not in
+                       (None, 'performance')]
+            warnings = []
+            if unenforced:
+                warnings.append(
+                    f'{len(unenforced)} radiod unit(s) unenforced — run '
+                    f'sudo smd diag cpu-affinity --apply')
+            if foreign_count:
+                warnings.append(f'{foreign_count} foreign drop-in(s) present')
+            if pinned:
+                warnings.append(
+                    f'{len(pinned)} pinned process(es) overlap radiod cores')
+            if bad_gov:
+                warnings.append(
+                    f'governor not \'performance\' on cpus {sorted(bad_gov)}')
+            if warnings:
+                for w in warnings:
+                    _warn(w)
+                any_bad = True
+            else:
+                _ok('plan applied, no contention, no foreign drop-ins')
+
     print()
     return 1 if any_bad else 0
 
