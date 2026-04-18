@@ -7,6 +7,7 @@ full deep-dive, launches ka9q-python's own TUI.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 
 from textual.containers import Vertical
@@ -192,16 +193,28 @@ class RadiodScreen(Vertical):
         ka9q-python's TUI opens focused on that channel.  Without a
         selection, launch the radiod-wide view.
         """
+        status_widget = self.query_one("#radiod-status", Static)
+
         if not self._status_dns:
-            self.query_one("#radiod-status", Static).update(
-                "[yellow]Cannot launch — no status_dns configured[/]"
+            status_widget.update("[yellow]Cannot launch — no status_dns configured[/]")
+            return
+
+        ka9q_bin = shutil.which("ka9q")
+        if not ka9q_bin:
+            status_widget.update(
+                "[red]ka9q binary not found on PATH — install ka9q-python in this venv[/]"
             )
             return
 
-        cmd = ["ka9q", "tui", self._status_dns]
+        cmd = [ka9q_bin, "tui", self._status_dns]
         ssrc = self._selected_ssrc()
         if ssrc:
             cmd.extend(["--ssrc", ssrc])
 
         with self.app.suspend():
-            subprocess.run(cmd, check=False)
+            result = subprocess.run(cmd)
+
+        if result.returncode != 0:
+            status_widget.update(
+                f"[red]ka9q tui exited {result.returncode} — cmd: {' '.join(cmd)}[/]"
+            )
