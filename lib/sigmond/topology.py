@@ -22,11 +22,25 @@ class Component:
     description: str = ""
 
 
+# CPU affinity and frequency defaults.  See CLAUDE.md + the cpu-affinity
+# design memory — empty strings mean 'auto-compute from hardware'.
+_DEFAULT_CPU_AFFINITY = {
+    'radiod_cpus': '',    # e.g. "0-1"
+    'other_cpus':  '',    # e.g. "2-15"
+}
+_DEFAULT_CPU_FREQ = {
+    'radiod_max_mhz': 3200,
+    'other_max_mhz':  1400,
+}
+
+
 @dataclass
 class Topology:
     client_dir: Path
     smd_bin: Path
     components: dict = field(default_factory=dict)
+    cpu_affinity: dict = field(default_factory=lambda: dict(_DEFAULT_CPU_AFFINITY))
+    cpu_freq: dict = field(default_factory=lambda: dict(_DEFAULT_CPU_FREQ))
 
     def enabled_components(self, only: Optional[list] = None) -> list:
         names = [n for n, c in self.components.items() if c.enabled]
@@ -92,7 +106,33 @@ def load_topology(path: Path = TOPOLOGY_PATH,
             description=cfg.get('description', ''),
         )
 
-    return Topology(client_dir=client_dir, smd_bin=smd_bin, components=components)
+    cpu_affinity = dict(_DEFAULT_CPU_AFFINITY)
+    ca = raw.get('cpu_affinity', {})
+    if 'radiod_cpus' in ca:
+        cpu_affinity['radiod_cpus'] = str(ca['radiod_cpus'])
+    if 'other_cpus' in ca:
+        cpu_affinity['other_cpus'] = str(ca['other_cpus'])
+
+    cpu_freq = dict(_DEFAULT_CPU_FREQ)
+    cf = raw.get('cpu_freq', {})
+    if 'radiod_max_mhz' in cf:
+        try:
+            cpu_freq['radiod_max_mhz'] = int(cf['radiod_max_mhz'])
+        except (TypeError, ValueError):
+            warn(f"topology cpu_freq.radiod_max_mhz not an int: {cf['radiod_max_mhz']!r}")
+    if 'other_max_mhz' in cf:
+        try:
+            cpu_freq['other_max_mhz'] = int(cf['other_max_mhz'])
+        except (TypeError, ValueError):
+            warn(f"topology cpu_freq.other_max_mhz not an int: {cf['other_max_mhz']!r}")
+
+    return Topology(
+        client_dir=client_dir,
+        smd_bin=smd_bin,
+        components=components,
+        cpu_affinity=cpu_affinity,
+        cpu_freq=cpu_freq,
+    )
 
 
 def enabled_components(topology: Topology, only: Optional[list] = None) -> list:

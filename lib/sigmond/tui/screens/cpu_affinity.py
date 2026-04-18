@@ -10,14 +10,10 @@ are in order, and whether any other process is pinned to its cores.
 
 from __future__ import annotations
 
-import tomllib
-from pathlib import Path
 from typing import Optional
 
 from textual.containers import Vertical
 from textual.widgets import Button, DataTable, Static
-
-from ...paths import TOPOLOGY_PATH
 
 
 def _format_cpu_list(cpus) -> str:
@@ -38,11 +34,11 @@ def _format_cpu_list(cpus) -> str:
 
 
 def _load_cpu_affinity_config() -> Optional[dict]:
-    """Return [cpu_affinity] from topology.toml, or None when absent."""
+    """Return [cpu_affinity] from topology.toml via the library loader."""
     try:
-        with open(TOPOLOGY_PATH, 'rb') as f:
-            return tomllib.load(f).get('cpu_affinity')
-    except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
+        from ...topology import load_topology
+        return dict(load_topology().cpu_affinity)
+    except Exception:
         return None
 
 

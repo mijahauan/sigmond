@@ -179,80 +179,24 @@ def _get_client_validate(client_name: str, timeout: float = 5.0):
 # ---------------------------------------------------------------------------
 
 def _load_topology(path: Path, client_dir_override: str = None) -> dict:
-    """
-    Load topology.toml.  Returns a dict with:
-      topology['client_dir']     — Path to wsprdaemon-client
-      topology['components']     — dict of component_name → {enabled, description, managed}
-    Falls back to sensible defaults if topology.toml is absent.
-    """
-    import tomllib
+    """Thin adapter — delegates to sigmond.topology.load_topology() and
+    flattens the dataclass into the dict shape that CLI callers expect."""
+    from sigmond.topology import load_topology as _lib_load_topology
 
-    defaults = {
-        'client_dir': Path('/home/wsprdaemon/wsprdaemon-client'),
-        'smd_bin':    Path('/usr/local/sbin/smd'),
+    t = _lib_load_topology(path=path, client_dir_override=client_dir_override)
+    return {
+        'client_dir': t.client_dir,
+        'smd_bin':    t.smd_bin,
         'components': {
-            'radiod':    {'enabled': True,  'managed': True,  'description': 'ka9q-radio SDR daemon'},
-            'wspr':      {'enabled': True,  'managed': True,  'description': 'WSPR/FST4W decoder and uploader'},
-            'ka9q-web':  {'enabled': True,  'managed': True,  'description': 'ka9q-web radiod status UI'},
-            'grape':     {'enabled': True,  'managed': False, 'description': 'GRAPE hf-timestd recording'},
-            'rac':       {'enabled': False, 'managed': False, 'description': 'Remote access channel (frpc)'},
+            name: {
+                'enabled':     c.enabled,
+                'managed':     c.managed,
+                'description': c.description,
+            } for name, c in t.components.items()
         },
-        'cpu_freq': {
-            'radiod_max_mhz': 3200,   # CPUs running radiod — high-performance
-            'other_max_mhz':  1400,   # All remaining CPUs  — power-efficient
-        },
-        # Empty strings → computed from hardware at runtime
-        'cpu_affinity': {
-            'radiod_cpus': '',   # e.g. "12-15"
-            'other_cpus':  '',   # e.g. "2-11"
-        },
+        'cpu_freq':     dict(t.cpu_freq),
+        'cpu_affinity': dict(t.cpu_affinity),
     }
-
-    if client_dir_override:
-        defaults['client_dir'] = Path(client_dir_override)
-
-    if not path.exists():
-        _warn(f'No topology file at {path} — using defaults')
-        return defaults
-
-    with open(path, 'rb') as f:
-        raw = tomllib.load(f)
-
-    result = dict(defaults)
-
-    sig = raw.get('sigmond', {})
-    if 'wsprdaemon_client' in sig:
-        result['client_dir'] = Path(sig['wsprdaemon_client'])
-    if client_dir_override:
-        result['client_dir'] = Path(client_dir_override)
-    if 'smd_bin' in sig:
-        result['smd_bin'] = Path(sig['smd_bin'])
-
-    comps = raw.get('component', {})
-    for name, cfg in comps.items():
-        result['components'][name] = {
-            'enabled':     cfg.get('enabled', False),
-            'managed':     cfg.get('managed', True),
-            'description': cfg.get('description', ''),
-        }
-
-    cf = raw.get('cpu_freq', {})
-    if cf:
-        result['cpu_freq'] = dict(defaults['cpu_freq'])
-        if 'radiod_max_mhz' in cf:
-            result['cpu_freq']['radiod_max_mhz'] = int(cf['radiod_max_mhz'])
-        if 'other_max_mhz' in cf:
-            result['cpu_freq']['other_max_mhz'] = int(cf['other_max_mhz'])
-
-    ca = raw.get('cpu_affinity', {})
-    if ca:
-        result['cpu_affinity'] = dict(defaults['cpu_affinity'])
-        if 'radiod_cpus' in ca:
-            result['cpu_affinity']['radiod_cpus'] = str(ca['radiod_cpus'])
-        if 'other_cpus' in ca:
-            result['cpu_affinity']['other_cpus'] = str(ca['other_cpus'])
-
-    return result
 
 
 def _enabled_components(topology: dict, only: list = None) -> list:
