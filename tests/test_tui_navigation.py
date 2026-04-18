@@ -41,8 +41,7 @@ class TreeNavigationTests(unittest.IsolatedAsyncioTestCase):
 
         app = SigmondApp()
         async with app.run_test(size=(120, 60)) as pilot:
-            for action in ("show_logs", "show_lifecycle",
-                           "show_install", "show_update"):
+            for action in ("show_lifecycle", "show_install", "show_update"):
                 getattr(app, f"action_{action}")()
                 await pilot.pause()
                 center = app.query_one("#center")

@@ -241,16 +241,20 @@ class SigmondApp(App):
         )
 
     def action_show_logs(self) -> None:
-        self._mount_placeholder(
-            title="Logs",
-            description=(
-                "Pick a component → tail its journal or file logs "
-                "inline."),
-            cli_hint="smd log <component>  [--files | --level LEVEL]",
-            help_title="Logs",
-            help_body=(
-                "Per-component journal and file-log tailing.\n\n"
-                "Coming soon."),
+        from .screens.logs import LogsScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(LogsScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Logs",
+            "Pick a component, then 'Follow journal' for "
+            "`journalctl -u <unit> --follow` or 'Tail files' for "
+            "the inventory log_paths.\n\n"
+            "Press 'Stop' before switching components.  The log "
+            "pane caps at 2000 lines.\n\n"
+            "To change log level, use the CLI for now:\n"
+            "  smd log <component> --level DEBUG",
         )
 
     def action_show_lifecycle(self) -> None:
