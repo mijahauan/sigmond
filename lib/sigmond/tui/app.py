@@ -70,9 +70,10 @@ class SigmondApp(App):
     """
 
     BINDINGS = [
+        Binding("o", "show_overview", "Overview"),
         Binding("t", "show_topology", "Topology"),
-        Binding("r", "show_radiod", "Radiod"),
         Binding("c", "show_cpu_affinity", "CPU affinity"),
+        Binding("r", "show_radiod", "Radiod"),
         Binding("v", "show_validate", "Validate"),
         Binding("q", "quit", "Quit"),
     ]
@@ -87,6 +88,8 @@ class SigmondApp(App):
 
     def on_mount(self) -> None:
         self._load_system_view()
+        # Default landing is the Topology screen until the Overview screen
+        # lands (next commit).  Keeps parity with the pre-restructure TUI.
         self.action_show_topology()
 
     def _load_system_view(self) -> None:
@@ -197,4 +200,96 @@ class SigmondApp(App):
             "instance, everything else shares the rest.\n\n"
             "Read-only. To apply the plan, run:\n"
             "  sudo smd diag cpu-affinity --apply",
+        )
+
+    def _mount_placeholder(self, title: str, description: str,
+                           cli_hint: str, help_title: str,
+                           help_body: str) -> None:
+        from .screens.placeholder import PlaceholderScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(PlaceholderScreen(
+            title=title, description=description, cli_hint=cli_hint))
+        self.query_one(ContextPanel).show_help(help_title, help_body)
+
+    def action_show_overview(self) -> None:
+        self._mount_placeholder(
+            title="Overview",
+            description=(
+                "Service health matrix, client inventory rollup, and "
+                "CPU-affinity one-liner — a single landing screen that "
+                "mirrors `smd status`."),
+            cli_hint="smd status",
+            help_title="Overview",
+            help_body=(
+                "High-level health and inventory for every managed "
+                "component plus the CPU-affinity summary line.\n\n"
+                "Coming soon — currently shows a placeholder."),
+        )
+
+    def action_show_cpu_freq(self) -> None:
+        self._mount_placeholder(
+            title="CPU frequency",
+            description=(
+                "Per-CPU scaling_max_freq view with the policy from "
+                "[cpu_freq] in topology.toml — high for radiod cores, "
+                "power-efficient elsewhere."),
+            cli_hint="smd diag cpu-freq  (then --apply with sudo to set)",
+            help_title="CPU frequency",
+            help_body=(
+                "Shows current scaling_max_freq per CPU against the "
+                "topology [cpu_freq] policy.  Coming soon."),
+        )
+
+    def action_show_logs(self) -> None:
+        self._mount_placeholder(
+            title="Logs",
+            description=(
+                "Pick a component → tail its journal or file logs "
+                "inline."),
+            cli_hint="smd log <component>  [--files | --level LEVEL]",
+            help_title="Logs",
+            help_body=(
+                "Per-component journal and file-log tailing.\n\n"
+                "Coming soon."),
+        )
+
+    def action_show_lifecycle(self) -> None:
+        self._mount_placeholder(
+            title="Lifecycle",
+            description=(
+                "Start / stop / restart / reload managed services, "
+                "with confirmation and live progress output."),
+            cli_hint="sudo smd {start|stop|restart|reload}",
+            help_title="Lifecycle",
+            help_body=(
+                "Manage the lifecycle of sigmond-managed services.\n\n"
+                "Mutations acquire the lifecycle lock "
+                "(/var/lib/sigmond/lifecycle.lock) and stream output "
+                "into a log pane.  Coming soon."),
+        )
+
+    def action_show_install(self) -> None:
+        self._mount_placeholder(
+            title="Install",
+            description=(
+                "Browse the catalog of known clients and install a "
+                "selected one."),
+            cli_hint="sudo smd install [<client>]   |   smd list --available",
+            help_title="Install",
+            help_body=(
+                "Catalog browser + installer.  Delegates to each "
+                "client's own install.sh.  Coming soon."),
+        )
+
+    def action_show_update(self) -> None:
+        self._mount_placeholder(
+            title="Update",
+            description=(
+                "Pull the latest code and re-apply the current "
+                "configuration."),
+            cli_hint="sudo smd update",
+            help_title="Update",
+            help_body=(
+                "Pull + apply in one step.  Coming soon."),
         )

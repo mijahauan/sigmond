@@ -1,8 +1,14 @@
-"""Left-panel component tree with health indicators."""
+"""Left-panel navigation tree — grouped by intent (Configure/Observe/Operate).
+
+The tree is the TUI's primary navigation surface.  Groups mirror the
+operator's mental model: "I want to see what's running" (Observe),
+"I want to change something" (Configure), "I want to do something"
+(Operate).  Components do not appear as top-level entries — they show
+up inside screens (Overview rollup, Radiod live, Lifecycle, Logs).
+"""
 
 from __future__ import annotations
 
-import subprocess
 from typing import TYPE_CHECKING
 
 from textual.widgets import Tree
@@ -12,61 +18,59 @@ if TYPE_CHECKING:
 
 
 class ComponentTree(Tree):
-    """Navigable tree of screens and components."""
+    """Grouped navigation tree for the sigmond TUI."""
 
     def __init__(self, **kwargs) -> None:
         super().__init__("SigMonD", **kwargs)
 
-    def populate(self, topology: Topology, catalog: dict) -> None:
-        """Build the tree from topology and catalog data."""
+    def populate(self, topology: "Topology", catalog: dict) -> None:
+        """Build the tree.  topology and catalog are accepted for
+        parity with the prior signature and for future per-screen
+        health rollups; current tree is static w.r.t. host state."""
+        del topology, catalog  # unused for now; reserved for per-node health
+
         self.clear()
         self.root.expand()
 
-        # Screen nodes.
-        self.root.add_leaf("\u2630 Topology", data={"screen": "topology"})
+        self.root.add_leaf("\u25a3 Overview", data={"screen": "overview"})
 
-        # Component nodes.
-        for name, comp in sorted(topology.components.items()):
-            if not comp.enabled:
-                continue
-            health = _check_health(name)
-            icon = "\u2714" if health else "\u2718"
-            style = "green" if health else "red"
-            label = f"[{style}]{icon}[/] {name}"
-            desc = comp.description or (
-                catalog[name].description if name in catalog else ""
-            )
-            if desc:
-                label += f"  [dim]{desc}[/]"
-            self.root.add_leaf(label, data={"component": name})
+        configure = self.root.add("Configure", expand=True)
+        configure.add_leaf("\u2630 Topology",     data={"screen": "topology"})
+        configure.add_leaf("\u2699 CPU affinity", data={"screen": "cpu_affinity"})
+        configure.add_leaf("\u21f5 CPU frequency", data={"screen": "cpu_freq"})
 
-        self.root.add_leaf("\u2699 CPU affinity", data={"screen": "cpu_affinity"})
-        self.root.add_leaf("\u2714 Validate", data={"screen": "validate"})
+        observe = self.root.add("Observe", expand=True)
+        observe.add_leaf("\u25c9 Radiod live", data={"screen": "radiod"})
+        observe.add_leaf("\u2261 Logs",        data={"screen": "logs"})
+        observe.add_leaf("\u2714 Validate",    data={"screen": "validate"})
+
+        operate = self.root.add("Operate", expand=True)
+        operate.add_leaf("\u21bb Lifecycle", data={"screen": "lifecycle"})
+        operate.add_leaf("+ Install",        data={"screen": "install"})
+        operate.add_leaf("\u2191 Update",    data={"screen": "update"})
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         data = event.node.data
         if not data:
             return
-        if data.get("screen") == "topology":
+        screen = data.get("screen")
+        if screen == "overview":
+            self.app.action_show_overview()
+        elif screen == "topology":
             self.app.action_show_topology()
-        elif data.get("screen") == "validate":
-            self.app.action_show_validate()
-        elif data.get("screen") == "cpu_affinity":
+        elif screen == "cpu_affinity":
             self.app.action_show_cpu_affinity()
-        elif data.get("component") == "radiod":
+        elif screen == "cpu_freq":
+            self.app.action_show_cpu_freq()
+        elif screen == "radiod":
             self.app.action_show_radiod()
-        elif data.get("component"):
-            # Future: per-client screens. For now, show context help.
-            pass
-
-
-def _check_health(component: str) -> bool:
-    """Quick check if any unit for this component is active."""
-    try:
-        r = subprocess.run(
-            ["systemctl", "is-active", f"{component}*"],
-            capture_output=True, text=True, timeout=2,
-        )
-        return r.returncode == 0
-    except (subprocess.SubprocessError, OSError):
-        return False
+        elif screen == "logs":
+            self.app.action_show_logs()
+        elif screen == "validate":
+            self.app.action_show_validate()
+        elif screen == "lifecycle":
+            self.app.action_show_lifecycle()
+        elif screen == "install":
+            self.app.action_show_install()
+        elif screen == "update":
+            self.app.action_show_update()

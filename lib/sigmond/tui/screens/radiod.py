@@ -51,8 +51,9 @@ class RadiodScreen(Vertical):
         frontend.add_columns("Parameter", "Value")
         yield frontend
 
-        yield Static("Active Channels", classes="section-title")
-        channels = DataTable(id="radiod-channels")
+        yield Static("Active Channels  [dim](select a row to deep-dive a specific SSRC)[/]",
+                     classes="section-title")
+        channels = DataTable(id="radiod-channels", cursor_type="row", zebra_stripes=True)
         channels.add_columns("SSRC", "Frequency (MHz)", "Preset", "Sample Rate", "SNR (dB)")
         yield channels
 
@@ -171,19 +172,39 @@ class RadiodScreen(Vertical):
             f"[green]{n} active channel{'s' if n != 1 else ''}{fe_note}[/]"
         )
 
+    def _selected_ssrc(self) -> str | None:
+        """Return the SSRC of the currently selected channels-table row, or None."""
+        table = self.query_one("#radiod-channels", DataTable)
+        if table.row_count == 0 or table.cursor_row is None:
+            return None
+        try:
+            key = table.coordinate_to_cell_key((table.cursor_row, 0)).row_key
+            row = table.get_row(key)
+        except Exception:
+            return None
+        # First column is SSRC; rendered as string.
+        return str(row[0]) if row else None
+
     def _launch_ka9q_tui(self) -> None:
-        """Suspend sigmond's TUI and launch ka9q-python's TUI."""
+        """Suspend sigmond's TUI and launch ka9q-python's TUI.
+
+        When a channel row is selected, pass its SSRC via ``--ssrc`` so
+        ka9q-python's TUI opens focused on that channel.  Without a
+        selection, launch the radiod-wide view.
+        """
         if not self._status_dns:
             self.query_one("#radiod-status", Static).update(
                 "[yellow]Cannot launch — no status_dns configured[/]"
             )
             return
 
+        cmd = ["ka9q", "tui", self._status_dns]
+        ssrc = self._selected_ssrc()
+        if ssrc:
+            cmd.extend(["--ssrc", ssrc])
+
         def run_ka9q_tui() -> None:
-            subprocess.run(
-                ["ka9q", "tui", self._status_dns],
-                check=False,
-            )
+            subprocess.run(cmd, check=False)
 
         self.app.suspend()
         try:

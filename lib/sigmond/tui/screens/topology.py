@@ -101,7 +101,7 @@ class TopologyScreen(Vertical):
         """Render topology as TOML and write to disk."""
         lines = [
             "# /etc/sigmond/topology.toml",
-            "# Managed by smd config edit. Manual edits are fine too.",
+            "# Managed by smd tui. Manual edits are fine too.",
             "",
         ]
         for name in sorted(self._topology.components):

@@ -688,7 +688,7 @@ def _install_full_suite(args) -> int:
     sigmond_dir = Path(__file__).resolve().parent.parent
     _install_smd_itself(sigmond_dir, smd_bin)
     if not _ensure_sigmond_venv():
-        _warn('TUI venv setup failed — smd config edit will not work')
+        _warn('TUI venv setup failed — smd tui will not work')
         errors += 1
 
     # --- 2. C projects via ka9q-update ---
@@ -1701,7 +1701,7 @@ _smd_complete() {
         cword=$COMP_CWORD
     }
 
-    local top_cmds="install apply start stop status restart reload list log update diag validate config completion"
+    local top_cmds="install apply start stop status restart reload list log update diag validate config tui completion"
     local components="radiod wspr ka9q-web grape rac"
 
     if [[ "$prev" == "--components" ]]; then
@@ -1815,7 +1815,7 @@ def cmd_completion(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# smd config edit (TUI configurator)
+# smd tui (TUI configurator) + deprecated `smd config edit` alias
 # ---------------------------------------------------------------------------
 
 # ka9q-python is strongly recommended for the TUI radiod screen; installed
@@ -1868,16 +1868,25 @@ def _ensure_sigmond_venv() -> bool:
     return True
 
 
-def cmd_config_edit(args) -> int:
-    # Launch directly if the current Python can import the TUI (dev venv,
-    # already in /opt/sigmond/venv, or system python with deps). Otherwise
-    # re-exec into the production venv, creating it if needed.
+def cmd_tui(args) -> int:
+    """Launch the sigmond TUI.
+
+    Launches directly if the current Python can import the TUI (dev venv,
+    already in /opt/sigmond/venv, or system python with deps); otherwise
+    re-execs into the production venv, creating it if needed.
+    """
     try:
         from sigmond.tui import launch
     except ImportError:
         return _reexec_into_tui_venv()
     launch()
     return 0
+
+
+def cmd_config_edit(args) -> int:
+    """Deprecated alias for `smd tui`.  Remove after next release."""
+    _warn("'smd config edit' is deprecated; use 'smd tui' instead")
+    return cmd_tui(args)
 
 
 def _reexec_into_tui_venv() -> int:
@@ -1895,7 +1904,7 @@ def _reexec_into_tui_venv() -> int:
                 return 1
         else:
             _err(f'TUI venv not found at {SIGMOND_VENV}')
-            _info('Create it with:  sudo smd config edit')
+            _info('Create it with:  sudo smd tui')
             _info('(first run creates the venv; subsequent runs do not need sudo)')
             return 1
 
@@ -2048,7 +2057,10 @@ def main() -> int:
     p.add_argument('--force', action='store_true',
                    help='overwrite target even if it already exists')
 
-    config_sub.add_parser('edit', help='launch the TUI configurator')
+    config_sub.add_parser('edit', help='[deprecated] use `smd tui` instead')
+
+    # tui — primary entry point (replaces `smd config edit`).
+    sub.add_parser('tui', help='launch the sigmond TUI')
 
     args = parser.parse_args()
     if not args.command:
@@ -2067,6 +2079,7 @@ def main() -> int:
         'log':     cmd_log,
         'status':  cmd_status,
         'update':  cmd_update,
+        'tui':     cmd_tui,
     }
 
     if args.command == 'completion':

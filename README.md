@@ -283,8 +283,8 @@ which defines a standard interface: `inventory --json`, `validate --json`,
 ## Development
 
 Sigmond's core `smd` command is deliberately stdlib-only so it can run from
-`/usr/local/sbin/smd` without any venv. The TUI (`smd config edit`) and the
-test suite do require external packages; those live in a venv driven by
+`/usr/local/sbin/smd` without any venv. The TUI (`smd tui`) and the test
+suite do require external packages; those live in a venv driven by
 [pyproject.toml](pyproject.toml).
 
 ### Dev venv
@@ -314,11 +314,11 @@ uv run pytest tests/
 ### Running the TUI from the repo
 
 ```bash
-uv run python bin/smd config edit
-# or: .venv/bin/python bin/smd config edit
+uv run python bin/smd tui
+# or: .venv/bin/python bin/smd tui
 ```
 
-`smd config edit` imports `sigmond.tui` using the current interpreter first;
+`smd tui` imports `sigmond.tui` using the current interpreter first;
 if that fails, it re-execs into the production venv at `/opt/sigmond/venv/`
 (auto-created on a root install). So the dev `.venv` and the installed
 `/opt/sigmond/venv` both work the same way — one declaration, two locations.

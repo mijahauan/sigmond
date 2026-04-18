@@ -80,7 +80,7 @@ smd diag                 Network + deps + client validation diagnostics
     C projects (radiod, ka9q-web) delegate to ka9q-update's `install-ka9q.sh`.
 
 11. **TUI configurator** (`lib/sigmond/tui/`, Textual) — three-panel layout
-    accessed via `smd config edit`. Left: component tree with health indicators.
+    accessed via `smd tui` (or the deprecated `smd config edit` alias). Left: component tree with health indicators.
     Center: topology editor, validate screen. Right: contextual help.
     Textual is a lazy import; core smd stays stdlib-only.
 
