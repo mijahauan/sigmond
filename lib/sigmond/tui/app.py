@@ -258,18 +258,20 @@ class SigmondApp(App):
         )
 
     def action_show_lifecycle(self) -> None:
-        self._mount_placeholder(
-            title="Lifecycle",
-            description=(
-                "Start / stop / restart / reload managed services, "
-                "with confirmation and live progress output."),
-            cli_hint="sudo smd {start|stop|restart|reload}",
-            help_title="Lifecycle",
-            help_body=(
-                "Manage the lifecycle of sigmond-managed services.\n\n"
-                "Mutations acquire the lifecycle lock "
-                "(/var/lib/sigmond/lifecycle.lock) and stream output "
-                "into a log pane.  Coming soon."),
+        from .screens.lifecycle import LifecycleScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(LifecycleScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Lifecycle",
+            "Start, stop, restart, or reload managed services.\n\n"
+            "Every action pops a confirmation dialog with the exact "
+            "command that will run.  On accept, the TUI suspends and "
+            "`sudo smd <verb>` runs in the real terminal — you'll see "
+            "the password prompt and live output there.  Returns to "
+            "the TUI with the exit code.\n\n"
+            "The CLI holds the lifecycle lock; the TUI does not.",
         )
 
     def action_show_install(self) -> None:
