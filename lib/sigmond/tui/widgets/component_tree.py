@@ -40,6 +40,7 @@ class ComponentTree(Tree):
                 label += f"  [dim]{desc}[/]"
             self.root.add_leaf(label, data={"component": name})
 
+        self.root.add_leaf("\u2699 CPU affinity", data={"screen": "cpu_affinity"})
         self.root.add_leaf("\u2714 Validate", data={"screen": "validate"})
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
@@ -50,6 +51,8 @@ class ComponentTree(Tree):
             self.app.action_show_topology()
         elif data.get("screen") == "validate":
             self.app.action_show_validate()
+        elif data.get("screen") == "cpu_affinity":
+            self.app.action_show_cpu_affinity()
         elif data.get("component") == "radiod":
             self.app.action_show_radiod()
         elif data.get("component"):

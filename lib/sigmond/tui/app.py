@@ -72,6 +72,7 @@ class SigmondApp(App):
     BINDINGS = [
         Binding("t", "show_topology", "Topology"),
         Binding("r", "show_radiod", "Radiod"),
+        Binding("c", "show_cpu_affinity", "CPU affinity"),
         Binding("v", "show_validate", "Validate"),
         Binding("q", "quit", "Quit"),
     ]
@@ -179,4 +180,21 @@ class SigmondApp(App):
             "Runs cross-client harmonization rules.\n\n"
             "Rules check: radiod resolution, frequency coverage, "
             "CPU isolation, timing chain, disk budget, and channel count.",
+        )
+
+    def action_show_cpu_affinity(self) -> None:
+        from .screens.cpu_affinity import CPUAffinityScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(CPUAffinityScreen())
+
+        ctx = self.query_one(ContextPanel)
+        ctx.show_help(
+            "CPU affinity",
+            "Hardware topology, affinity plan, and observed state.\n\n"
+            "Goal: keep radiod's USB3/FFT path uncontested by other "
+            "processes — one physical core (HT pair) per radiod "
+            "instance, everything else shares the rest.\n\n"
+            "Read-only. To apply the plan, run:\n"
+            "  sudo smd diag cpu-affinity --apply",
         )
