@@ -289,26 +289,33 @@ test suite do require external packages; those live in a venv driven by
 
 ### Dev venv
 
+uv is the standard; `.python-version` pins the interpreter and `uv.lock`
+pins resolved deps.
+
 ```bash
-./scripts/dev-setup.sh
+uv sync --extra tui --extra dev        # creates .venv/ with textual, rich, pytest
 ```
 
-This creates `.venv/` in the repo, installs sigmond as editable with the
-`[tui,dev]` extras (textual, rich, pytest), and installs `ka9q-python`
-editable from the first sibling checkout it finds
-(`../ka9q-python`, `/home/mjh/git/ka9q-python`, or `/opt/git/ka9q-python`).
-Re-run any time to rebuild from scratch.
+For the coordinated dev flow that also installs `ka9q-python` editable from a
+sibling checkout, use the hamsci-workspace meta-repo (see that README) or
+the legacy pip-based helper:
+
+```bash
+./scripts/dev-setup.sh                 # pip fallback; auto-locates ../ka9q-python
+```
 
 ### Running tests
 
 ```bash
-.venv/bin/pytest tests/
+uv run pytest tests/
+# or: .venv/bin/pytest tests/
 ```
 
 ### Running the TUI from the repo
 
 ```bash
-.venv/bin/python bin/smd config edit
+uv run python bin/smd config edit
+# or: .venv/bin/python bin/smd config edit
 ```
 
 `smd config edit` imports `sigmond.tui` using the current interpreter first;
