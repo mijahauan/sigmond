@@ -203,11 +203,5 @@ class RadiodScreen(Vertical):
         if ssrc:
             cmd.extend(["--ssrc", ssrc])
 
-        def run_ka9q_tui() -> None:
+        with self.app.suspend():
             subprocess.run(cmd, check=False)
-
-        self.app.suspend()
-        try:
-            run_ka9q_tui()
-        finally:
-            self.app.resume()
