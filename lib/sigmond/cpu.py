@@ -279,3 +279,393 @@ def render_drop_in(cpus: set, label: str) -> str:
         AllowedCPUs=
         AllowedCPUs={cpu_str}
     """)
+
+
+# ---------------------------------------------------------------------------
+# System capability gathering — read-only inspection of the host
+# ---------------------------------------------------------------------------
+#
+# Motivation: sigmond's CPU affinity subsystem exists to keep radiod's
+# USB3/FFT path uncontested on co-located hosts.  Per Phil Karn (ka9q-radio
+# author), radiod needs only one physical core (HT sibling pair) per
+# instance — not a full L3 island.  These capability functions surface the
+# hardware layout so operators can reason about contention, and so the
+# AffinityReport can flag governor/drop-in/runtime mismatches against the
+# minimal-reservation plan.
+
+PREFERRED_RADIOD_GOVERNORS = ('performance',)
+
+
+@dataclass(frozen=True)
+class CacheIsland:
+    """A group of CPUs that share a given cache level."""
+    level: int
+    cache_type: str             # 'Unified' / 'Data' / 'Instruction'
+    cpus: frozenset
+
+
+@dataclass
+class SystemCapabilities:
+    """Read-only snapshot of host CPU topology and scheduling policy."""
+    logical_cpus: int = 0
+    physical_cores: list = field(default_factory=list)   # list[set]
+    l2_islands: list = field(default_factory=list)       # list[CacheIsland]
+    l3_islands: list = field(default_factory=list)       # list[CacheIsland]
+    isolated_cpus: set = field(default_factory=set)
+    cmdline_isolcpus: set = field(default_factory=set)
+    cmdline_nohz_full: set = field(default_factory=set)
+    cmdline_rcu_nocbs: set = field(default_factory=set)
+    governors: dict = field(default_factory=dict)        # {cpu: governor}
+
+
+def _read_text_or_none(path) -> Optional[str]:
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return None
+
+
+def get_isolated_cpus() -> set:
+    """CPUs kernel has isolated from the scheduler's default pool."""
+    text = _read_text_or_none('/sys/devices/system/cpu/isolated')
+    return parse_cpu_mask(text) if text else set()
+
+
+def parse_cmdline_cpu_param(cmdline: str, key: str) -> set:
+    """Return CPU set for a kernel cmdline key like ``isolcpus=0-3``.
+
+    Tolerates leading flag tokens such as ``isolcpus=domain,managed_irq,0-3``
+    — tokens that don't parse as CPU ranges are ignored (they're flags).
+    """
+    result: set = set()
+    for token in cmdline.split():
+        if not token.startswith(key + '='):
+            continue
+        value = token.split('=', 1)[1]
+        for chunk in value.split(','):
+            parsed = parse_cpu_mask(chunk.strip())
+            if parsed:
+                result.update(parsed)
+    return result
+
+
+def get_cmdline_params() -> dict:
+    """Return cpu-policy kernel cmdline params as {name: set[int]}."""
+    cmdline = _read_text_or_none('/proc/cmdline') or ''
+    return {
+        'isolcpus':  parse_cmdline_cpu_param(cmdline, 'isolcpus'),
+        'nohz_full': parse_cmdline_cpu_param(cmdline, 'nohz_full'),
+        'rcu_nocbs': parse_cmdline_cpu_param(cmdline, 'rcu_nocbs'),
+    }
+
+
+def get_cache_islands(level: int) -> list:
+    """Unique cache islands at the given level (typically 2 or 3).
+
+    Deduplicates across CPUs that share the same cache, returns sorted by
+    lowest CPU in each island.
+    """
+    seen: dict = {}
+    n = os.cpu_count() or 1
+    for cpu in range(n):
+        idx = 0
+        while True:
+            base = Path(f'/sys/devices/system/cpu/cpu{cpu}/cache/index{idx}')
+            if not base.exists():
+                break
+            idx += 1
+            lvl_raw = _read_text_or_none(base / 'level')
+            try:
+                lvl = int(lvl_raw)
+            except (TypeError, ValueError):
+                continue
+            if lvl != level:
+                continue
+            ctype = _read_text_or_none(base / 'type') or ''
+            cpu_list_raw = _read_text_or_none(base / 'shared_cpu_list')
+            if not cpu_list_raw:
+                continue
+            cpus = frozenset(parse_cpu_mask(cpu_list_raw))
+            if not cpus:
+                continue
+            key = (level, ctype, cpus)
+            if key not in seen:
+                seen[key] = CacheIsland(level=level, cache_type=ctype, cpus=cpus)
+    return sorted(seen.values(), key=lambda isle: min(isle.cpus))
+
+
+def get_governors() -> dict:
+    """Return {cpu: governor} for every CPU exposing cpufreq."""
+    out: dict = {}
+    n = os.cpu_count() or 1
+    for cpu in range(n):
+        gov = _read_text_or_none(
+            f'/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor')
+        if gov:
+            out[cpu] = gov
+    return out
+
+
+def gather_capabilities() -> SystemCapabilities:
+    """Snapshot host CPU topology and scheduling policy."""
+    cmdline = get_cmdline_params()
+    return SystemCapabilities(
+        logical_cpus=os.cpu_count() or 0,
+        physical_cores=get_physical_cores(),
+        l2_islands=get_cache_islands(2),
+        l3_islands=get_cache_islands(3),
+        isolated_cpus=get_isolated_cpus(),
+        cmdline_isolcpus=cmdline['isolcpus'],
+        cmdline_nohz_full=cmdline['nohz_full'],
+        cmdline_rcu_nocbs=cmdline['rcu_nocbs'],
+        governors=get_governors(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Observed affinity state — runtime facts per managed unit
+# ---------------------------------------------------------------------------
+
+@dataclass
+class UnitAffinity:
+    """Observed affinity state for one systemd unit."""
+    unit: str
+    role: str                               # 'radiod' | 'other'
+    main_pid: Optional[str] = None
+    systemd_mask: set = field(default_factory=set)
+    observed_mask: set = field(default_factory=set)
+    thread_groups: dict = field(default_factory=dict)
+    drop_in_present: bool = False
+    foreign_drop_ins: list = field(default_factory=list)
+
+    @property
+    def mask_mismatch(self) -> bool:
+        """True if systemd said one thing and the process is actually on another."""
+        return (bool(self.systemd_mask)
+                and bool(self.observed_mask)
+                and self.systemd_mask != self.observed_mask)
+
+
+def _smd_drop_in_path(unit: str) -> Path:
+    return Path(f'/etc/systemd/system/{unit}.d/{SMD_AFFINITY_DROP_IN}')
+
+
+def _foreign_drop_in_paths(unit: str) -> list:
+    d = Path(f'/etc/systemd/system/{unit}.d')
+    return [d / name for name in FOREIGN_AFFINITY_DROP_INS]
+
+
+def _systemctl_main_pid(unit: str) -> Optional[str]:
+    r = _run_capture(['systemctl', 'show', '-p', 'MainPID', '--value', unit])
+    pid = r.stdout.strip()
+    return pid if pid and pid != '0' else None
+
+
+def _systemctl_cpu_affinity(unit: str) -> set:
+    r = _run_capture(['systemctl', 'show', '-p', 'CPUAffinity', '--value', unit])
+    return parse_cpu_mask(r.stdout.strip())
+
+
+def observe_unit(unit: str, role: str) -> UnitAffinity:
+    """Collect observed affinity facts for a single unit."""
+    ua = UnitAffinity(unit=unit, role=role)
+    ua.main_pid = _systemctl_main_pid(unit)
+    ua.systemd_mask = _systemctl_cpu_affinity(unit)
+    if ua.main_pid:
+        proc = read_proc_cpus(ua.main_pid)
+        ua.observed_mask = parse_cpu_mask(proc) if proc else set()
+        ua.thread_groups = thread_affinity_groups(ua.main_pid)
+    ua.drop_in_present = _smd_drop_in_path(unit).exists()
+    ua.foreign_drop_ins = [str(p) for p in _foreign_drop_in_paths(unit) if p.exists()]
+    return ua
+
+
+# ---------------------------------------------------------------------------
+# Runtime contention — non-radiod processes allowed on radiod cores
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ContendingProcess:
+    """A process whose Cpus_allowed_list intersects the radiod reservation."""
+    pid: str
+    comm: str
+    allowed: set
+    overlap: set
+    is_default: bool                # allowed spans every CPU on the host
+
+
+def _read_proc_status_fields(pid: str) -> dict:
+    out: dict = {}
+    try:
+        for line in Path(f'/proc/{pid}/status').read_text().splitlines():
+            if ':' not in line:
+                continue
+            k, v = line.split(':', 1)
+            out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return out
+
+
+def _is_kernel_thread(status: dict) -> bool:
+    # Kernel threads are children of kthreadd (pid 2) or pid 2 itself.
+    return status.get('PPid') in ('2', '0') or status.get('Pid') == '2'
+
+
+def find_contending_processes(
+    radiod_cpus: set,
+    exclude_pids: Optional[set] = None,
+) -> list:
+    """Return ContendingProcess entries for non-kernel processes whose
+    CPU affinity mask intersects ``radiod_cpus``.
+
+    Runtime contention is a scheduling-permission signal, not a live
+    placement observation — a process may be *allowed* on a radiod core
+    without being scheduled there right now.  Processes with default
+    (full-range) affinity are reported with ``is_default=True`` so callers
+    can choose to summarize them rather than list each one.
+
+    Cost: a single ``/proc`` walk (~hundreds of PIDs).  Call per report, not
+    in a loop.
+    """
+    exclude = exclude_pids or set()
+    results: list = []
+    if not radiod_cpus:
+        return results
+    all_cpus = set(range(os.cpu_count() or 1))
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = entry.name
+        if pid in exclude:
+            continue
+        status = _read_proc_status_fields(pid)
+        if not status or _is_kernel_thread(status):
+            continue
+        mask_raw = status.get('Cpus_allowed_list', '')
+        if not mask_raw:
+            continue
+        allowed = parse_cpu_mask(mask_raw)
+        overlap = allowed & radiod_cpus
+        if not overlap:
+            continue
+        comm = status.get('Name', '') or pid
+        results.append(ContendingProcess(
+            pid=pid,
+            comm=comm,
+            allowed=allowed,
+            overlap=overlap,
+            is_default=(allowed >= all_cpus),
+        ))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Full report — capabilities + plan + observed + warnings
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AffinityReport:
+    """Everything an operator or a TUI screen needs in one object."""
+    capabilities: SystemCapabilities
+    plan: AffinityPlan
+    units: list = field(default_factory=list)          # list[UnitAffinity]
+    contention: list = field(default_factory=list)     # list[ContendingProcess]
+    warnings: list = field(default_factory=list)       # list[str]
+
+    @property
+    def radiod_cpus(self) -> set:
+        """Union of every CPU the plan dedicates to radiod."""
+        out: set = set()
+        for cpus in self.plan.radiod.values():
+            out.update(cpus)
+        return out
+
+    @property
+    def pinned_contention(self) -> list:
+        """Contending processes that are explicitly pinned (not default mask)."""
+        return [c for c in self.contention if not c.is_default]
+
+
+def build_affinity_report(
+    topology_cpu_affinity: Optional[dict] = None,
+) -> AffinityReport:
+    """Build a complete affinity report from live host state.
+
+    Read-only: reads /sys, /proc, and shells out to ``systemctl show``.
+    No mutations.
+    """
+    caps = gather_capabilities()
+    plan = compute_affinity_plan(topology_cpu_affinity)
+
+    units: list = []
+    radiod_main_pids: set = set()
+    for unit in plan.radiod.keys():
+        ua = observe_unit(unit, role='radiod')
+        units.append(ua)
+        if ua.main_pid:
+            radiod_main_pids.add(ua.main_pid)
+    for unit in AFFINITY_UNITS:
+        # Template units (e.g. wd-decode@.service) show the template's
+        # defaults here; per-instance observation happens elsewhere.
+        units.append(observe_unit(unit, role='other'))
+
+    radiod_cpus_set: set = set()
+    for cpus in plan.radiod.values():
+        radiod_cpus_set.update(cpus)
+
+    contention = find_contending_processes(
+        radiod_cpus_set,
+        exclude_pids=radiod_main_pids,
+    )
+
+    warnings: list = []
+
+    for cpu in sorted(radiod_cpus_set):
+        gov = caps.governors.get(cpu)
+        if gov and gov not in PREFERRED_RADIOD_GOVERNORS:
+            warnings.append(
+                f"governor {gov!r} on radiod cpu{cpu} — expected 'performance' "
+                "for uncontested USB3/FFT throughput"
+            )
+
+    isol = caps.cmdline_isolcpus or caps.isolated_cpus
+    if isol and radiod_cpus_set and not radiod_cpus_set.issubset(isol):
+        outside = sorted(radiod_cpus_set - isol)
+        warnings.append(
+            f"radiod plan uses cpus outside isolated pool: {outside} "
+            f"(isolated={sorted(isol)})"
+        )
+
+    for ua in units:
+        for path in ua.foreign_drop_ins:
+            warnings.append(
+                f"foreign drop-in on {ua.unit}: {path} "
+                "— smd will remove on --apply"
+            )
+        if ua.role == 'radiod' and ua.main_pid and not ua.drop_in_present:
+            warnings.append(
+                f"{ua.unit} running without smd drop-in — affinity not enforced"
+            )
+        if ua.mask_mismatch:
+            warnings.append(
+                f"{ua.unit}: observed cpus {sorted(ua.observed_mask)} "
+                f"differ from systemd CPUAffinity {sorted(ua.systemd_mask)} "
+                "(sched_setaffinity override — AllowedCPUs cgroup ceiling defeats this)"
+            )
+
+    pinned = [c for c in contention if not c.is_default]
+    if pinned:
+        sample = ', '.join(f'{c.comm}({c.pid})' for c in pinned[:5])
+        more = f' (+{len(pinned) - 5} more)' if len(pinned) > 5 else ''
+        warnings.append(
+            f"{len(pinned)} pinned process(es) overlap radiod cores: {sample}{more}"
+        )
+
+    return AffinityReport(
+        capabilities=caps,
+        plan=plan,
+        units=units,
+        contention=contention,
+        warnings=warnings,
+    )
