@@ -53,6 +53,24 @@ class TreeNavigationTests(unittest.IsolatedAsyncioTestCase):
 
 
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
+class OverviewScreenMountTests(unittest.IsolatedAsyncioTestCase):
+    async def test_overview_is_default_landing_and_renders(self):
+        from sigmond.tui.app import SigmondApp
+        from sigmond.tui.screens.overview import OverviewScreen
+
+        app = SigmondApp()
+        async with app.run_test(size=(120, 50)) as pilot:
+            # Let the worker complete and the screen re-render.
+            for _ in range(3):
+                await pilot.pause()
+            center = app.query_one("#center")
+            self.assertTrue(
+                any(isinstance(c, OverviewScreen) for c in center.children),
+                "OverviewScreen should be the default landing",
+            )
+
+
+@unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
 class ComponentTreeStructureTests(unittest.TestCase):
     def test_tree_has_grouped_categories(self):
         """The tree exposes Configure / Observe / Operate groups plus

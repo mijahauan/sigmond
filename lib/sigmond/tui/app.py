@@ -88,9 +88,7 @@ class SigmondApp(App):
 
     def on_mount(self) -> None:
         self._load_system_view()
-        # Default landing is the Topology screen until the Overview screen
-        # lands (next commit).  Keeps parity with the pre-restructure TUI.
-        self.action_show_topology()
+        self.action_show_overview()
 
     def _load_system_view(self) -> None:
         """Load topology, catalog, and coordination for all screens."""
@@ -213,18 +211,17 @@ class SigmondApp(App):
         self.query_one(ContextPanel).show_help(help_title, help_body)
 
     def action_show_overview(self) -> None:
-        self._mount_placeholder(
-            title="Overview",
-            description=(
-                "Service health matrix, client inventory rollup, and "
-                "CPU-affinity one-liner — a single landing screen that "
-                "mirrors `smd status`."),
-            cli_hint="smd status",
-            help_title="Overview",
-            help_body=(
-                "High-level health and inventory for every managed "
-                "component plus the CPU-affinity summary line.\n\n"
-                "Coming soon — currently shows a placeholder."),
+        from .screens.overview import OverviewScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(OverviewScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Overview",
+            "Service health, client inventory, and the CPU-affinity "
+            "summary — everything `smd status` shows, in one place.\n\n"
+            "Read-only.  Use the Configure, Observe, and Operate "
+            "sections in the tree for specifics.",
         )
 
     def action_show_cpu_freq(self) -> None:
