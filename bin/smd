@@ -52,6 +52,7 @@ try:
     from sigmond.coordination      import load_coordination
     from sigmond.catalog           import load_catalog, CatalogEntry, get_entry, resolve_name, find_client_binary
     from sigmond.installer         import install_client as _do_install_client
+    from sigmond.paths             import SIGMOND_VENV
     from sigmond.log_cmd           import (
         follow_journal, follow_files, flatten_log_paths,
         get_inventory_log_paths, set_log_level, send_sighup,
@@ -738,10 +739,13 @@ def _install_full_suite(args) -> int:
     _ensure_sigmond_dirs()
     errors = 0
 
-    # --- 1. Install smd itself ---
+    # --- 1. Install smd itself + TUI venv ---
     _heading('Sigmond')
     sigmond_dir = Path(__file__).resolve().parent.parent
     _install_smd_itself(sigmond_dir, smd_bin)
+    if not _ensure_sigmond_venv():
+        _warn('TUI venv setup failed — smd config edit will not work')
+        errors += 1
 
     # --- 2. C projects via ka9q-update ---
     if ka9q_update_needed:
@@ -1844,14 +1848,90 @@ def cmd_completion(args) -> int:
 # smd config edit (TUI configurator)
 # ---------------------------------------------------------------------------
 
+# ka9q-python is strongly recommended for the TUI radiod screen; installed
+# editable from the first sibling checkout found. TUI deps (textual, rich)
+# come from sigmond's own [tui] extra defined in pyproject.toml.
+_KA9Q_PYTHON_PATHS = [
+    Path('/home/mjh/git/ka9q-python'),
+    Path('/opt/git/ka9q-python'),
+]
+
+
+def _ensure_sigmond_venv() -> bool:
+    """Create SIGMOND_VENV and install sigmond[tui] (+ ka9q-python if present).
+
+    Returns True if the venv is ready, False on failure.
+    """
+    venv_python = SIGMOND_VENV / 'bin' / 'python'
+    pip = SIGMOND_VENV / 'bin' / 'pip'
+    sigmond_dir = Path(__file__).resolve().parent.parent
+
+    if not venv_python.exists():
+        _info(f'Creating TUI venv at {SIGMOND_VENV} ...')
+        SIGMOND_VENV.parent.mkdir(parents=True, exist_ok=True)
+        r = _run([sys.executable, '-m', 'venv', str(SIGMOND_VENV)])
+        if r.returncode != 0:
+            _err(f'venv creation failed: {r.stderr.strip()}')
+            return False
+
+    # Install sigmond itself with [tui] extras (idempotent — pip show first).
+    r = _run([str(pip), 'show', 'sigmond'])
+    if r.returncode != 0:
+        _info('Installing sigmond[tui] into venv ...')
+        r = _run([str(pip), 'install', '-e', f'{sigmond_dir}[tui]'])
+        if r.returncode != 0:
+            _err(f'sigmond[tui] install failed: {r.stderr.strip()[-200:]}')
+            return False
+
+    # Optional: ka9q-python editable from a sibling checkout.
+    r = _run([str(pip), 'show', 'ka9q-python'])
+    if r.returncode != 0:
+        for path in _KA9Q_PYTHON_PATHS:
+            if (path / 'pyproject.toml').exists():
+                _info(f'Installing ka9q-python (editable) from {path} ...')
+                r = _run([str(pip), 'install', '-e', str(path)])
+                if r.returncode != 0:
+                    _warn(f'ka9q-python install failed: {r.stderr.strip()[-200:]}')
+                break
+
+    _ok(f'TUI venv ready at {SIGMOND_VENV}')
+    return True
+
+
 def cmd_config_edit(args) -> int:
+    # Launch directly if the current Python can import the TUI (dev venv,
+    # already in /opt/sigmond/venv, or system python with deps). Otherwise
+    # re-exec into the production venv, creating it if needed.
     try:
         from sigmond.tui import launch
-        launch()
     except ImportError:
-        _err('TUI requires textual: pip install textual')
-        return 1
+        return _reexec_into_tui_venv()
+    launch()
     return 0
+
+
+def _reexec_into_tui_venv() -> int:
+    venv_python = SIGMOND_VENV / 'bin' / 'python'
+
+    if Path(sys.executable).resolve() == venv_python.resolve():
+        # Already in the prod venv and still can't import — dep is actually missing.
+        _err(f'TUI venv at {SIGMOND_VENV} is missing sigmond[tui]')
+        _info('Rebuild with:  sudo smd install')
+        return 1
+
+    if not venv_python.exists():
+        if os.geteuid() == 0:
+            if not _ensure_sigmond_venv():
+                return 1
+        else:
+            _err(f'TUI venv not found at {SIGMOND_VENV}')
+            _info('Create it with:  sudo smd config edit')
+            _info('(first run creates the venv; subsequent runs do not need sudo)')
+            return 1
+
+    script = str(Path(__file__).resolve())
+    os.execv(str(venv_python), [str(venv_python), script, *sys.argv[1:]])
+    return 1  # unreachable
 
 
 # ---------------------------------------------------------------------------

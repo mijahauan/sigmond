@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sigmond"
+version = "0.5.0"
+description = "HamSCI SDR suite installer, configurator, and lifecycle manager"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+  { name = "Michael Hauan AC0G", email = "ac0g@hauan.org" },
+  { name = "Rob Robinett AI6VN" },
+]
+requires-python = ">=3.11"
+# Core smd is stdlib-only by design; see CLAUDE.md.
+dependencies = []
+
+[project.optional-dependencies]
+# Keep in sync with _TUI_DEPS in bin/smd.
+tui = [
+  "textual>=8.0.0",
+  "rich>=13.0.0",
+]
+dev = [
+  "pytest>=7.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["lib"]
+include = ["sigmond*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
