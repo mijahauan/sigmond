@@ -1977,6 +1977,18 @@ def cmd_config_restore(args) -> int:
     return 0
 
 
+def _real_home() -> Path:
+    """Return the invoking user's home dir even when running under sudo."""
+    import pwd as _pwd
+    sudo_user = os.environ.get('SUDO_USER')
+    if sudo_user:
+        try:
+            return Path(_pwd.getpwnam(sudo_user).pw_dir)
+        except KeyError:
+            pass
+    return Path.home()
+
+
 def cmd_config_backup(args) -> int:
     """Create a tar.gz snapshot of all sigmond + client configuration."""
     import tarfile
@@ -1985,7 +1997,7 @@ def cmd_config_backup(args) -> int:
     output = Path(args.output) if getattr(args, 'output', None) else None
     if output is None:
         ts = time.strftime('%Y%m%d-%H%M%S')
-        output = Path.home() / f'sigmond-config-{socket.gethostname()}-{ts}.tar.gz'
+        output = _real_home() / f'sigmond-config-{socket.gethostname()}-{ts}.tar.gz'
 
     _heading('config backup')
 
