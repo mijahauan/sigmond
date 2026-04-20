@@ -1912,6 +1912,63 @@ def cmd_config_edit(args) -> int:
     return cmd_tui(args)
 
 
+# Paths archived by `smd config backup`.  Missing paths are silently skipped.
+_BACKUP_PATHS = [
+    Path('/etc/sigmond'),
+    Path('/etc/radio'),
+    Path('/etc/wsprdaemon'),
+    Path('/etc/hf-timestd'),
+    Path('/etc/psk-recorder'),
+    Path('/etc/systemd/system/wsprdaemon.service'),
+    Path('/etc/systemd/system/wsprdaemon.target'),
+    Path('/etc/systemd/system/wsprdaemon.target.wants'),
+    Path('/etc/sudoers.d/wsprdaemon'),
+    Path('/etc/cron.d/ka9q-cleanups'),
+    Path('/etc/cron.d/timestd-freshness-monitor'),
+    Path('/etc/logrotate.d/hf-timestd'),
+    Path('/etc/logrotate.d/wspr.rotate'),
+]
+
+
+def cmd_config_backup(args) -> int:
+    """Create a tar.gz snapshot of all sigmond + client configuration."""
+    import tarfile
+    import socket
+
+    output = Path(args.output) if getattr(args, 'output', None) else None
+    if output is None:
+        ts = time.strftime('%Y%m%d-%H%M%S')
+        output = Path.home() / f'sigmond-config-{socket.gethostname()}-{ts}.tar.gz'
+
+    _heading('config backup')
+
+    present = [p for p in _BACKUP_PATHS if p.exists()]
+    absent  = [p for p in _BACKUP_PATHS if not p.exists()]
+    for p in absent:
+        _warn(f'not found (skipping): {p}')
+
+    _info(f'Archiving {len(present)} path(s) → {output}')
+    try:
+        with tarfile.open(output, 'w:gz') as tar:
+            for path in present:
+                tar.add(path, recursive=True)
+    except PermissionError as exc:
+        _err(f'Permission denied: {exc}')
+        _info('Re-run with sudo:  sudo smd config backup')
+        return 1
+    except Exception as exc:
+        _err(str(exc))
+        return 1
+
+    kb = output.stat().st_size // 1024
+    _ok(f'Backup written: {output}  ({kb} KB)')
+    _info(f'Copy off this machine:')
+    _info(f'  scp {output} user@workstation:.')
+    _info(f'Restore after OS reinstall:')
+    _info(f'  ./install.sh && sudo tar xzf {output.name} -C / && sudo smd apply')
+    return 0
+
+
 def _reexec_into_tui_venv() -> int:
     venv_python = SIGMOND_VENV / 'bin' / 'python'
 
@@ -2080,6 +2137,10 @@ def main() -> int:
     p.add_argument('--force', action='store_true',
                    help='overwrite target even if it already exists')
 
+    p = config_sub.add_parser('backup', help='snapshot all config to a tar.gz')
+    p.add_argument('--output', metavar='FILE',
+                   help='output path (default: ~/sigmond-config-<host>-<date>.tar.gz)')
+
     config_sub.add_parser('edit', help='[deprecated] use `smd tui` instead')
 
     # tui — primary entry point (replaces `smd config edit`).
@@ -2135,6 +2196,8 @@ def main() -> int:
             return cmd_config_show(args)
         if sub_cmd == 'migrate':
             return cmd_config_migrate(args)
+        if sub_cmd == 'backup':
+            return cmd_config_backup(args)
         if sub_cmd == 'edit':
             return cmd_config_edit(args)
         p_config.print_help()
