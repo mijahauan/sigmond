@@ -76,6 +76,7 @@ class SigmondApp(App):
         Binding("r", "show_radiod", "Radiod"),
         Binding("v", "show_validate", "Validate"),
         Binding("b", "show_backup", "Backup"),
+        Binding("R", "show_restore", "Restore"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -310,6 +311,24 @@ class SigmondApp(App):
             "  ./install.sh\n"
             "  sudo tar xzf sigmond-config-*.tar.gz -C /\n"
             "  sudo smd apply",
+        )
+
+    def action_show_restore(self) -> None:
+        from .screens.restore import RestoreScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(RestoreScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Restore",
+            "Browse for a  sigmond-config-*.tar.gz  backup file and "
+            "extract it over the live system.\n\n"
+            "The tree starts in your home directory and shows only "
+            "sigmond backup archives.\n\n"
+            "Navigate with arrow keys, expand folders with Enter, "
+            "select a file with Enter or double-click.\n\n"
+            "After restore, run  sudo smd apply  to reconcile any "
+            "service state changes.",
         )
 
     def action_show_update(self) -> None:

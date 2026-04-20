@@ -1930,6 +1930,53 @@ _BACKUP_PATHS = [
 ]
 
 
+def cmd_config_restore(args) -> int:
+    """Extract a sigmond config backup tarball over the live system."""
+    import tarfile
+
+    src = Path(getattr(args, 'input', None) or '')
+    if not src or not src.exists():
+        _err('--input FILE is required and must exist')
+        _info('Usage:  sudo smd config restore --input ~/sigmond-config-*.tar.gz')
+        return 1
+    if not tarfile.is_tarfile(src):
+        _err(f'{src} is not a valid tar archive')
+        return 1
+
+    _heading('config restore')
+    _info(f'Source: {src}')
+
+    # List contents for the user to review.
+    try:
+        with tarfile.open(src, 'r:gz') as tar:
+            members = tar.getnames()
+    except Exception as exc:
+        _err(f'Cannot read archive: {exc}')
+        return 1
+
+    _info(f'Archive contains {len(members)} entries, e.g.:')
+    for m in members[:8]:
+        _info(f'  {m}')
+    if len(members) > 8:
+        _info(f'  … and {len(members) - 8} more')
+
+    _info('Extracting to / …')
+    try:
+        with tarfile.open(src, 'r:gz') as tar:
+            tar.extractall('/')
+    except PermissionError as exc:
+        _err(f'Permission denied: {exc}')
+        _info('Re-run with sudo:  sudo smd config restore --input ...')
+        return 1
+    except Exception as exc:
+        _err(str(exc))
+        return 1
+
+    _ok('Restore complete')
+    _info('Reconcile running services:  sudo smd apply')
+    return 0
+
+
 def cmd_config_backup(args) -> int:
     """Create a tar.gz snapshot of all sigmond + client configuration."""
     import tarfile
@@ -2141,6 +2188,10 @@ def main() -> int:
     p.add_argument('--output', metavar='FILE',
                    help='output path (default: ~/sigmond-config-<host>-<date>.tar.gz)')
 
+    p = config_sub.add_parser('restore', help='extract a config backup over the live system')
+    p.add_argument('--input', metavar='FILE', required=True,
+                   help='backup tar.gz to restore (e.g. ~/sigmond-config-*.tar.gz)')
+
     config_sub.add_parser('edit', help='[deprecated] use `smd tui` instead')
 
     # tui — primary entry point (replaces `smd config edit`).
@@ -2198,6 +2249,8 @@ def main() -> int:
             return cmd_config_migrate(args)
         if sub_cmd == 'backup':
             return cmd_config_backup(args)
+        if sub_cmd == 'restore':
+            return cmd_config_restore(args)
         if sub_cmd == 'edit':
             return cmd_config_edit(args)
         p_config.print_help()
