@@ -617,12 +617,16 @@ def _install_full_suite(args) -> int:
     )
     smd_bin = topology['smd_bin']
 
-    only = [c.strip() for c in args.components.split(',')] if args.components else None
-    components = _enabled_components(topology, only)
-
-    if not components:
-        print('No components enabled — check topology.toml.')
-        return 1
+    if args.components:
+        # Explicit --components list bypasses the topology enabled filter so
+        # the TUI (and CLI users) can install disabled-but-not-yet-installed
+        # components without first editing topology.toml.
+        components = [c.strip() for c in args.components.split(',')]
+    else:
+        components = _enabled_components(topology, None)
+        if not components:
+            print('No components enabled — check topology.toml or use: smd install <name>')
+            return 1
 
     dry_run = getattr(args, 'dry_run', False)
     yes = getattr(args, 'yes', False)
@@ -1830,36 +1834,54 @@ _KA9Q_PYTHON_PATHS = [
 def _ensure_sigmond_venv() -> bool:
     """Create SIGMOND_VENV and install sigmond[tui] (+ ka9q-python if present).
 
+    Uses uv when available for faster installs; falls back to bare pip/venv.
     Returns True if the venv is ready, False on failure.
     """
     venv_python = SIGMOND_VENV / 'bin' / 'python'
     pip = SIGMOND_VENV / 'bin' / 'pip'
     sigmond_dir = Path(__file__).resolve().parent.parent
+    uv = shutil.which('uv')
 
     if not venv_python.exists():
         _info(f'Creating TUI venv at {SIGMOND_VENV} ...')
         SIGMOND_VENV.parent.mkdir(parents=True, exist_ok=True)
-        r = _run([sys.executable, '-m', 'venv', str(SIGMOND_VENV)])
+        if uv:
+            r = _run([uv, 'venv', '--python', sys.executable, str(SIGMOND_VENV)])
+        else:
+            r = _run([sys.executable, '-m', 'venv', str(SIGMOND_VENV)])
         if r.returncode != 0:
             _err(f'venv creation failed: {r.stderr.strip()}')
             return False
 
-    # Install sigmond itself with [tui] extras (idempotent — pip show first).
-    r = _run([str(pip), 'show', 'sigmond'])
+    def _pip_show(pkg):
+        if uv:
+            return _run([uv, 'pip', 'show', '--python', str(venv_python), pkg])
+        if pip.exists():
+            return _run([str(pip), 'show', pkg])
+        # No pip and no uv — assume not installed so we attempt install.
+        return subprocess.CompletedProcess([], returncode=1)
+
+    def _pip_install(*args):
+        if uv:
+            return _run([uv, 'pip', 'install', '--python', str(venv_python), *args])
+        return _run([str(pip), 'install', *args])
+
+    # Install sigmond itself with [tui] extras (idempotent — check first).
+    r = _pip_show('textual')
     if r.returncode != 0:
         _info('Installing sigmond[tui] into venv ...')
-        r = _run([str(pip), 'install', '-e', f'{sigmond_dir}[tui]'])
+        r = _pip_install('-e', f'{sigmond_dir}[tui]')
         if r.returncode != 0:
             _err(f'sigmond[tui] install failed: {r.stderr.strip()[-200:]}')
             return False
 
     # Optional: ka9q-python editable from a sibling checkout.
-    r = _run([str(pip), 'show', 'ka9q-python'])
+    r = _pip_show('ka9q-python')
     if r.returncode != 0:
         for path in _KA9Q_PYTHON_PATHS:
             if (path / 'pyproject.toml').exists():
                 _info(f'Installing ka9q-python (editable) from {path} ...')
-                r = _run([str(pip), 'install', '-e', str(path)])
+                r = _pip_install('-e', str(path))
                 if r.returncode != 0:
                     _warn(f'ka9q-python install failed: {r.stderr.strip()[-200:]}')
                 break
@@ -1876,6 +1898,7 @@ def cmd_tui(args) -> int:
     re-execs into the production venv, creating it if needed.
     """
     try:
+        import textual  # noqa: F401 — probe before launch() defers the import
         from sigmond.tui import launch
     except ImportError:
         return _reexec_into_tui_venv()
@@ -1892,8 +1915,8 @@ def cmd_config_edit(args) -> int:
 def _reexec_into_tui_venv() -> int:
     venv_python = SIGMOND_VENV / 'bin' / 'python'
 
-    if Path(sys.executable).resolve() == venv_python.resolve():
-        # Already in the prod venv and still can't import — dep is actually missing.
+    if Path(sys.prefix) == SIGMOND_VENV:
+        # Already running inside the prod venv and textual still can't import.
         _err(f'TUI venv at {SIGMOND_VENV} is missing sigmond[tui]')
         _info('Rebuild with:  sudo smd install')
         return 1
@@ -2117,11 +2140,14 @@ def main() -> int:
         p_config.print_help()
         return 0
 
-    # Mutating verbs acquire the lifecycle lock (CONTRACT §5.5).
+    # Mutating verbs require root and acquire the lifecycle lock (CONTRACT §5.5).
     _MUTATING = {'install', 'apply', 'start', 'stop', 'restart', 'reload', 'update'}
-    if args.command in _MUTATING and _HAS_SIGMOND_LIB:
-        with lifecycle_lock(reason=args.command):
-            return dispatch[args.command](args)
+    if args.command in _MUTATING:
+        if _need_root(args.command):
+            return 1
+        if _HAS_SIGMOND_LIB:
+            with lifecycle_lock(reason=args.command):
+                return dispatch[args.command](args)
 
     return dispatch[args.command](args)
 

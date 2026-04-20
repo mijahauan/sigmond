@@ -182,14 +182,14 @@ class InstallScreen(Vertical):
             return
 
         names = ', '.join(e.name for e in missing)
-        cmd = [_smd_binary(), 'install']
+        components_arg = ','.join(e.name for e in missing)
+        cmd = [_smd_binary(), 'install', '--components', components_arg, '--yes']
         confirm_and_run(
             self.app,
             title=f"Install {len(missing)} missing entries?",
             body=(f"Installing: {names}\n\n"
-                  f"Runs a full catalog walk via `sudo smd install` "
-                  f"(no --components filter).  Existing installs are "
-                  f"left alone."),
+                  f"Each client's own install.sh handles the details. "
+                  f"Existing installs are left alone."),
             cmd=cmd, sudo=True,
             on_complete=self._after_install,
         )
