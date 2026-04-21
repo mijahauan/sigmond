@@ -749,7 +749,49 @@ def _install_via_ka9q_update() -> bool:
         _err('ka9q-update install-ka9q.sh failed')
         return False
     _ok('ka9q-update: radiod + ka9q-web installed')
+    _ensure_radiod_running()
     return True
+
+
+def _ensure_radiod_running() -> None:
+    """Start any known radiod@ instances that aren't currently active.
+
+    Discovers instances from drop-in directories and running units so we
+    catch instances that use the indirect template (no per-instance .service
+    file in /etc/systemd/system/).
+    """
+    import glob as _glob
+    seen: set[str] = set()
+
+    # Instances with drop-in config dirs
+    for d in _glob.glob('/etc/systemd/system/radiod@*.service.d'):
+        name = Path(d).name  # radiod@foo.service.d
+        unit = name[:-len('.d')]   # radiod@foo.service
+        seen.add(unit)
+
+    # Instances systemd already knows about (running or stopped)
+    r = _run(
+        ['systemctl', 'list-units', 'radiod@*', '--all',
+         '--no-legend', '--plain', '--no-pager'],
+        capture=True, sudo=False,
+    )
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if parts:
+            seen.add(parts[0])
+
+    for unit in sorted(seen):
+        instance = unit[len('radiod@'):-len('.service')]
+        r = _run(['systemctl', 'is-active', unit], capture=True, sudo=False)
+        if r.stdout.strip() == 'active':
+            _ok(f'radiod@{instance} already running')
+            continue
+        _info(f'starting radiod@{instance} ...')
+        r = _run(['systemctl', 'enable', '--now', unit], capture=False, sudo=True)
+        if r.returncode == 0:
+            _ok(f'radiod@{instance} started')
+        else:
+            _warn(f'radiod@{instance} failed to start')
 
 
 # ---------------------------------------------------------------------------
@@ -1822,6 +1864,7 @@ def cmd_completion(args) -> int:
 # editable from the first sibling checkout found. TUI deps (textual, rich)
 # come from sigmond's own [tui] extra defined in pyproject.toml.
 _KA9Q_PYTHON_PATHS = [
+    Path('/home/wsprdaemon/ka9q-python'),
     Path('/home/mjh/git/ka9q-python'),
     Path('/opt/git/ka9q-python'),
 ]
@@ -1844,14 +1887,13 @@ def _ensure_sigmond_venv() -> bool:
             _err(f'venv creation failed: {r.stderr.strip()}')
             return False
 
-    # Install sigmond itself with [tui] extras (idempotent — pip show first).
-    r = _run([str(pip), 'show', 'sigmond'])
+    # Always install sigmond[tui] — ensures tui extras (textual) are present even
+    # if sigmond was previously installed without them.  pip install -e is idempotent.
+    _info('Installing sigmond[tui] into venv ...')
+    r = _run([str(pip), 'install', '-q', '-e', f'{sigmond_dir}[tui]'])
     if r.returncode != 0:
-        _info('Installing sigmond[tui] into venv ...')
-        r = _run([str(pip), 'install', '-e', f'{sigmond_dir}[tui]'])
-        if r.returncode != 0:
-            _err(f'sigmond[tui] install failed: {r.stderr.strip()[-200:]}')
-            return False
+        _err(f'sigmond[tui] install failed: {r.stderr.strip()[-200:]}')
+        return False
 
     # Optional: ka9q-python editable from a sibling checkout.
     r = _run([str(pip), 'show', 'ka9q-python'])
@@ -1877,9 +1919,9 @@ def cmd_tui(args) -> int:
     """
     try:
         from sigmond.tui import launch
+        launch()
     except ImportError:
         return _reexec_into_tui_venv()
-    launch()
     return 0
 
 
