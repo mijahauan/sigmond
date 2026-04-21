@@ -256,6 +256,7 @@ def _install_git_dep(section: str, dcfg: configparser.ConfigParser) -> bool:
     url        = dcfg.get(section, 'url', fallback='').strip()
     pinned     = dcfg.get(section, 'commit', fallback='').strip()
     install_to = dcfg.get(section, 'install_to', fallback='').strip()
+    use_latest = pinned.lower() == 'latest'
 
     if not url or not install_to:
         _err(f'[{section}] missing url or install_to in deps.conf')
@@ -269,19 +270,22 @@ def _install_git_dep(section: str, dcfg: configparser.ConfigParser) -> bool:
         if r.returncode != 0:
             _err(f'git clone {section} failed: {r.stderr.strip()}')
             return False
-        if pinned:
+        if not use_latest and pinned:
             _run(['git', '-C', str(target), 'checkout', pinned])
+    elif use_latest:
+        _info(f'Pulling {section} to latest ...')
+        _run(['git', '-C', str(target), 'pull'])
 
-    # Verify commit
-    if pinned:
-        r = _run(['git', '-c', f'safe.directory={target}',
-                  '-C', str(target), 'rev-parse', 'HEAD'])
-        current = r.stdout.strip()
-        if current and not current.startswith(pinned[:12]):
-            _warn(f'{section}: at {current[:12]}, deps.conf pins {pinned[:12]}')
-            _info(f'To update: git -C {target} fetch && git -C {target} checkout {pinned}')
-        else:
-            _ok(f'{section}: {current[:12]}')
+    r = _run(['git', '-c', f'safe.directory={target}',
+              '-C', str(target), 'rev-parse', 'HEAD'])
+    current = r.stdout.strip()
+    if use_latest:
+        _ok(f'{section}: {current[:12]} (latest)')
+    elif pinned and current and not current.startswith(pinned[:12]):
+        _warn(f'{section}: at {current[:12]}, deps.conf pins {pinned[:12]}')
+        _info(f'To update: git -C {target} fetch && git -C {target} checkout {pinned}')
+    else:
+        _ok(f'{section}: {current[:12]}')
 
     return True
 
@@ -290,10 +294,24 @@ def _install_pypi_dep(section: str, dcfg: configparser.ConfigParser,
                       venv_dir: Path) -> bool:
     url    = dcfg.get(section, 'url', fallback='').strip()
     commit = dcfg.get(section, 'commit', fallback='').strip()
+    use_latest = commit.lower() == 'latest'
 
     pip = str(venv_dir / 'bin' / 'pip')
     is_git = url.startswith('git+')
     pkg_name = url.rstrip('/').split('/')[-1].replace('.git', '') if is_git else url
+
+    if use_latest:
+        _info(f'Upgrading {section} ({pkg_name}) to latest ...')
+        r = _run([pip, 'install', '--upgrade', url])
+        if r.returncode != 0:
+            _err(f'{section} upgrade failed: {r.stderr.strip()[-400:]}')
+            return False
+        ver_r = _run([pip, 'show', pkg_name])
+        installed_ver = next(
+            (l.split(':', 1)[1].strip() for l in ver_r.stdout.splitlines()
+             if l.startswith('Version:')), 'unknown')
+        _ok(f'{section}: {installed_ver} (latest)')
+        return True
 
     r = _run([pip, 'show', pkg_name])
     if r.returncode == 0:
