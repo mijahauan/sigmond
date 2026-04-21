@@ -40,9 +40,11 @@ class CatalogEntry:
     def is_installed(self) -> bool:
         """Best-effort check that this entry is installed on the local host.
 
-        - If install_script is set, checks that the script exists.
-        - Otherwise falls back to `shutil.which(name)`.
+        Primary: repo cloned to /opt/git/<name> (installer always uses this path).
+        Fallback: install_script exists, or binary found in PATH.
         """
+        if (Path('/opt/git') / self.name).exists():
+            return True
         if self.install_script:
             return Path(self.install_script).exists()
         return shutil.which(self.name) is not None

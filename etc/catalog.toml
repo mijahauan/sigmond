@@ -23,7 +23,7 @@ description     = "WSPR/FST4W audio recorder (period-aligned WAVs)"
 repo            = "https://github.com/mijahauan/wspr-recorder"
 uses            = ["ka9q-python"]
 contract        = "0.4"
-install_script  = "/opt/git/wspr-recorder/scripts/install.sh"
+install_script  = "/opt/git/wspr-recorder/install.sh"
 
 [client.psk-recorder]
 kind            = "client"
@@ -48,5 +48,5 @@ description     = "WSPR decoder + poster + uploader (wsprd + jt9 --fst4w)"
 repo            = "https://github.com/rrobinett/wsprdaemon-client"
 uses            = ["ka9q-python"]
 contract        = "0.4"
-install_script  = "/opt/git/wsprdaemon-client/scripts/install.sh"
+install_script  = "/opt/git/wsprdaemon-client/install.sh"
 topology_alias  = "wspr"

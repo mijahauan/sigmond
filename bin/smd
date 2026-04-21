@@ -617,12 +617,16 @@ def _install_full_suite(args) -> int:
     )
     smd_bin = topology['smd_bin']
 
-    only = [c.strip() for c in args.components.split(',')] if args.components else None
-    components = _enabled_components(topology, only)
-
-    if not components:
-        print('No components enabled — check topology.toml.')
-        return 1
+    if args.components:
+        # Explicit --components list bypasses the topology enabled filter so
+        # the TUI (and CLI users) can install disabled-but-not-yet-installed
+        # components without first editing topology.toml.
+        components = [c.strip() for c in args.components.split(',')]
+    else:
+        components = _enabled_components(topology, None)
+        if not components:
+            print('No components enabled — check topology.toml or use: smd install <name>')
+            return 1
 
     dry_run = getattr(args, 'dry_run', False)
     yes = getattr(args, 'yes', False)
@@ -1873,35 +1877,54 @@ _KA9Q_PYTHON_PATHS = [
 def _ensure_sigmond_venv() -> bool:
     """Create SIGMOND_VENV and install sigmond[tui] (+ ka9q-python if present).
 
+    Uses uv when available for faster installs; falls back to bare pip/venv.
     Returns True if the venv is ready, False on failure.
     """
     venv_python = SIGMOND_VENV / 'bin' / 'python'
     pip = SIGMOND_VENV / 'bin' / 'pip'
     sigmond_dir = Path(__file__).resolve().parent.parent
+    uv = shutil.which('uv')
 
     if not venv_python.exists():
         _info(f'Creating TUI venv at {SIGMOND_VENV} ...')
         SIGMOND_VENV.parent.mkdir(parents=True, exist_ok=True)
-        r = _run([sys.executable, '-m', 'venv', str(SIGMOND_VENV)])
+        if uv:
+            r = _run([uv, 'venv', '--python', sys.executable, str(SIGMOND_VENV)])
+        else:
+            r = _run([sys.executable, '-m', 'venv', str(SIGMOND_VENV)])
         if r.returncode != 0:
             _err(f'venv creation failed: {r.stderr.strip()}')
             return False
 
-    # Always install sigmond[tui] — ensures tui extras (textual) are present even
-    # if sigmond was previously installed without them.  pip install -e is idempotent.
-    _info('Installing sigmond[tui] into venv ...')
-    r = _run([str(pip), 'install', '-q', '-e', f'{sigmond_dir}[tui]'])
+    def _pip_show(pkg):
+        if uv:
+            return _run([uv, 'pip', 'show', '--python', str(venv_python), pkg])
+        if pip.exists():
+            return _run([str(pip), 'show', pkg])
+        # No pip and no uv — assume not installed so we attempt install.
+        return subprocess.CompletedProcess([], returncode=1)
+
+    def _pip_install(*args):
+        if uv:
+            return _run([uv, 'pip', 'install', '--python', str(venv_python), *args])
+        return _run([str(pip), 'install', *args])
+
+    # Install sigmond itself with [tui] extras (idempotent — check first).
+    r = _pip_show('textual')
     if r.returncode != 0:
-        _err(f'sigmond[tui] install failed: {r.stderr.strip()[-200:]}')
-        return False
+        _info('Installing sigmond[tui] into venv ...')
+        r = _pip_install('-e', f'{sigmond_dir}[tui]')
+        if r.returncode != 0:
+            _err(f'sigmond[tui] install failed: {r.stderr.strip()[-200:]}')
+            return False
 
     # Optional: ka9q-python editable from a sibling checkout.
-    r = _run([str(pip), 'show', 'ka9q-python'])
+    r = _pip_show('ka9q-python')
     if r.returncode != 0:
         for path in _KA9Q_PYTHON_PATHS:
             if (path / 'pyproject.toml').exists():
                 _info(f'Installing ka9q-python (editable) from {path} ...')
-                r = _run([str(pip), 'install', '-e', str(path)])
+                r = _pip_install('-e', str(path))
                 if r.returncode != 0:
                     _warn(f'ka9q-python install failed: {r.stderr.strip()[-200:]}')
                 break
@@ -1918,6 +1941,7 @@ def cmd_tui(args) -> int:
     re-execs into the production venv, creating it if needed.
     """
     try:
+        import textual  # noqa: F401 — probe before launch() defers the import
         from sigmond.tui import launch
         launch()
     except ImportError:
@@ -1931,11 +1955,127 @@ def cmd_config_edit(args) -> int:
     return cmd_tui(args)
 
 
+# Paths archived by `smd config backup`.  Missing paths are silently skipped.
+_BACKUP_PATHS = [
+    Path('/etc/sigmond'),
+    Path('/etc/radio'),
+    Path('/etc/wsprdaemon'),
+    Path('/etc/hf-timestd'),
+    Path('/etc/psk-recorder'),
+    Path('/etc/systemd/system/wsprdaemon.service'),
+    Path('/etc/systemd/system/wsprdaemon.target'),
+    Path('/etc/systemd/system/wsprdaemon.target.wants'),
+    Path('/etc/sudoers.d/wsprdaemon'),
+    Path('/etc/cron.d/ka9q-cleanups'),
+    Path('/etc/cron.d/timestd-freshness-monitor'),
+    Path('/etc/logrotate.d/hf-timestd'),
+    Path('/etc/logrotate.d/wspr.rotate'),
+]
+
+
+def cmd_config_restore(args) -> int:
+    """Extract a sigmond config backup tarball over the live system."""
+    import tarfile
+
+    src = Path(getattr(args, 'input', None) or '')
+    if not src or not src.exists():
+        _err('--input FILE is required and must exist')
+        _info('Usage:  sudo smd config restore --input ~/sigmond-config-*.tar.gz')
+        return 1
+    if not tarfile.is_tarfile(src):
+        _err(f'{src} is not a valid tar archive')
+        return 1
+
+    _heading('config restore')
+    _info(f'Source: {src}')
+
+    # List contents for the user to review.
+    try:
+        with tarfile.open(src, 'r:gz') as tar:
+            members = tar.getnames()
+    except Exception as exc:
+        _err(f'Cannot read archive: {exc}')
+        return 1
+
+    _info(f'Archive contains {len(members)} entries, e.g.:')
+    for m in members[:8]:
+        _info(f'  {m}')
+    if len(members) > 8:
+        _info(f'  … and {len(members) - 8} more')
+
+    _info('Extracting to / …')
+    try:
+        with tarfile.open(src, 'r:gz') as tar:
+            tar.extractall('/')
+    except PermissionError as exc:
+        _err(f'Permission denied: {exc}')
+        _info('Re-run with sudo:  sudo smd config restore --input ...')
+        return 1
+    except Exception as exc:
+        _err(str(exc))
+        return 1
+
+    _ok('Restore complete')
+    _info('Reconcile running services:  sudo smd apply')
+    return 0
+
+
+def _real_home() -> Path:
+    """Return the invoking user's home dir even when running under sudo."""
+    import pwd as _pwd
+    sudo_user = os.environ.get('SUDO_USER')
+    if sudo_user:
+        try:
+            return Path(_pwd.getpwnam(sudo_user).pw_dir)
+        except KeyError:
+            pass
+    return Path.home()
+
+
+def cmd_config_backup(args) -> int:
+    """Create a tar.gz snapshot of all sigmond + client configuration."""
+    import tarfile
+    import socket
+
+    output = Path(args.output) if getattr(args, 'output', None) else None
+    if output is None:
+        ts = time.strftime('%Y%m%d-%H%M%S')
+        output = _real_home() / f'sigmond-config-{socket.gethostname()}-{ts}.tar.gz'
+
+    _heading('config backup')
+
+    present = [p for p in _BACKUP_PATHS if p.exists()]
+    absent  = [p for p in _BACKUP_PATHS if not p.exists()]
+    for p in absent:
+        _warn(f'not found (skipping): {p}')
+
+    _info(f'Archiving {len(present)} path(s) → {output}')
+    try:
+        with tarfile.open(output, 'w:gz') as tar:
+            for path in present:
+                tar.add(path, recursive=True)
+    except PermissionError as exc:
+        _err(f'Permission denied: {exc}')
+        _info('Re-run with sudo:  sudo smd config backup')
+        return 1
+    except Exception as exc:
+        _err(str(exc))
+        return 1
+
+    kb = output.stat().st_size // 1024
+    _ok(f'Backup written: {output}  ({kb} KB)')
+    _info(f'Copy off this machine:')
+    _info(f'  scp {output} user@workstation:.')
+    _info(f'Restore after OS reinstall:')
+    _info(f'  ./install.sh && sudo tar xzf {output.name} -C / && sudo smd apply')
+    return 0
+
+
 def _reexec_into_tui_venv() -> int:
     venv_python = SIGMOND_VENV / 'bin' / 'python'
 
-    if Path(sys.executable).resolve() == venv_python.resolve():
-        # Already in the prod venv and still can't import — dep is actually missing.
+    if Path(sys.prefix) == SIGMOND_VENV:
+        # Already running inside the prod venv and textual still can't import.
         _err(f'TUI venv at {SIGMOND_VENV} is missing sigmond[tui]')
         _info('Rebuild with:  sudo smd install')
         return 1
@@ -2099,6 +2239,14 @@ def main() -> int:
     p.add_argument('--force', action='store_true',
                    help='overwrite target even if it already exists')
 
+    p = config_sub.add_parser('backup', help='snapshot all config to a tar.gz')
+    p.add_argument('--output', metavar='FILE',
+                   help='output path (default: ~/sigmond-config-<host>-<date>.tar.gz)')
+
+    p = config_sub.add_parser('restore', help='extract a config backup over the live system')
+    p.add_argument('--input', metavar='FILE', required=True,
+                   help='backup tar.gz to restore (e.g. ~/sigmond-config-*.tar.gz)')
+
     config_sub.add_parser('edit', help='[deprecated] use `smd tui` instead')
 
     # tui — primary entry point (replaces `smd config edit`).
@@ -2154,16 +2302,23 @@ def main() -> int:
             return cmd_config_show(args)
         if sub_cmd == 'migrate':
             return cmd_config_migrate(args)
+        if sub_cmd == 'backup':
+            return cmd_config_backup(args)
+        if sub_cmd == 'restore':
+            return cmd_config_restore(args)
         if sub_cmd == 'edit':
             return cmd_config_edit(args)
         p_config.print_help()
         return 0
 
-    # Mutating verbs acquire the lifecycle lock (CONTRACT §5.5).
+    # Mutating verbs require root and acquire the lifecycle lock (CONTRACT §5.5).
     _MUTATING = {'install', 'apply', 'start', 'stop', 'restart', 'reload', 'update'}
-    if args.command in _MUTATING and _HAS_SIGMOND_LIB:
-        with lifecycle_lock(reason=args.command):
-            return dispatch[args.command](args)
+    if args.command in _MUTATING:
+        if _need_root(args.command):
+            return 1
+        if _HAS_SIGMOND_LIB:
+            with lifecycle_lock(reason=args.command):
+                return dispatch[args.command](args)
 
     return dispatch[args.command](args)
 
