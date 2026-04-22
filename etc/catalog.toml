@@ -50,3 +50,11 @@ uses            = ["ka9q-python"]
 contract        = "0.4"
 install_script  = "/opt/git/wsprdaemon-client/install.sh"
 topology_alias  = "wspr"
+
+[client.igmp-querier]
+kind            = "infra"
+description     = "IGMPv2 querier daemon — keeps multicast snoop tables alive on LANs without a router-side querier"
+repo            = "https://github.com/mijahauan/igmp-querier"
+uses            = []
+contract        = ""                                  # not a contract-conformant client
+install_script  = "/opt/git/igmp-querier/install.sh"

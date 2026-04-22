@@ -264,12 +264,18 @@ def parse_proc_net_igmp(path: str = '/proc/net/igmp') -> tuple[list, dict]:
 # Tier 2: passive IGMP query listen (root only)
 # ---------------------------------------------------------------------------
 
-def listen_for_queriers(seconds: int, interface: Optional[str] = None
-                        ) -> tuple[list, list]:
+def listen_for_queriers(seconds: int, interface: Optional[str] = None,
+                        progress=None,
+                        ) -> tuple[list, list, int]:
     """Raw-socket listen on IPPROTO_IGMP for general queries.
 
-    Returns (queriers, errors). Dedupes by (interface, source, version).
-    Needs CAP_NET_RAW — if unavailable, returns ([], ['<reason>']).
+    Returns (queriers, errors, elapsed_seconds). Dedupes by
+    (interface, source, version). Needs CAP_NET_RAW — if unavailable,
+    returns ([], ['<reason>'], 0).
+
+    `progress` is an optional callable `progress(elapsed, total, n_queriers)`
+    invoked roughly every 10 s and once on exit. Ctrl-C exits cleanly and
+    returns whatever was captured so far.
     """
     errors: list = []
     seen: dict = {}
@@ -277,9 +283,9 @@ def listen_for_queriers(seconds: int, interface: Optional[str] = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IGMP)
     except PermissionError:
-        return [], ['raw socket requires CAP_NET_RAW — re-run with sudo']
+        return [], ['raw socket requires CAP_NET_RAW — re-run with sudo'], 0
     except OSError as exc:
-        return [], [f'raw socket: {exc}']
+        return [], [f'raw socket: {exc}'], 0
 
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     if interface:
@@ -290,13 +296,24 @@ def listen_for_queriers(seconds: int, interface: Optional[str] = None
         except (OSError, PermissionError) as exc:
             errors.append(f'bind-to-device {interface}: {exc} (listening on all)')
 
-    deadline = time.monotonic() + seconds
+    started = time.monotonic()
+    deadline = started + seconds
+    next_progress = started + 10.0
+    interrupted = False
     try:
         while True:
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            remaining = deadline - now
             if remaining <= 0:
                 break
-            r, _, _ = select.select([sock], [], [], min(remaining, 1.0))
+            if progress and now >= next_progress:
+                progress(int(now - started), seconds, len(seen))
+                next_progress = now + 10.0
+            try:
+                r, _, _ = select.select([sock], [], [], min(remaining, 1.0))
+            except KeyboardInterrupt:
+                interrupted = True
+                break
             if not r:
                 continue
             try:
@@ -316,7 +333,12 @@ def listen_for_queriers(seconds: int, interface: Optional[str] = None
     finally:
         sock.close()
 
-    return list(seen.values()), errors
+    elapsed = int(time.monotonic() - started)
+    if interrupted:
+        errors.append(f'listen interrupted after {elapsed}s (partial results)')
+    if progress:
+        progress(elapsed, seconds, len(seen))
+    return list(seen.values()), errors, elapsed
 
 
 def _parse_igmp_query(pkt: bytes, src_addr: str) -> Optional[Querier]:
@@ -468,15 +490,17 @@ def classify(interfaces: list, groups: list, queriers: list,
 # Top-level entry
 # ---------------------------------------------------------------------------
 
-def run(listen_seconds: int = 130, interface: Optional[str] = None
+def run(listen_seconds: int = 130, interface: Optional[str] = None,
+        progress=None,
         ) -> NetDiagReport:
     interfaces = enumerate_interfaces()
     groups, _ = parse_proc_net_igmp()
     listen_root = (os.geteuid() == 0)
     if listen_root and listen_seconds > 0:
-        queriers, listen_errors = listen_for_queriers(listen_seconds, interface)
+        queriers, listen_errors, elapsed = listen_for_queriers(
+            listen_seconds, interface, progress=progress)
     else:
-        queriers, listen_errors = [], []
+        queriers, listen_errors, elapsed = [], [], 0
         if not listen_root:
             listen_errors.append('passive listen skipped (needs root)')
     classification, reasons, recommendation = classify(
@@ -485,7 +509,7 @@ def run(listen_seconds: int = 130, interface: Optional[str] = None
         interfaces=interfaces,
         joined_groups=groups,
         queriers=queriers,
-        listen_seconds=listen_seconds if listen_root else 0,
+        listen_seconds=elapsed,
         listen_root=listen_root,
         listen_errors=listen_errors,
         classification=classification,

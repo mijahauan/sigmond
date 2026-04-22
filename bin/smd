@@ -1476,6 +1476,7 @@ def _list_catalog(args, *, include_configured: bool) -> int:
     else:
         servers = [(n, e) for n, e in sorted(catalog.items()) if e.kind == 'server']
         clients = [(n, e) for n, e in sorted(catalog.items()) if e.kind == 'client']
+        infra   = [(n, e) for n, e in sorted(catalog.items()) if e.kind == 'infra']
 
         _heading('catalog — available')
         if servers:
@@ -1485,6 +1486,10 @@ def _list_catalog(args, *, include_configured: bool) -> int:
         if clients:
             print(f'\n  Clients ({len(clients)})')
             for _, entry in clients:
+                _print_catalog_entry(entry)
+        if infra:
+            print(f'\n  Infra ({len(infra)})')
+            for _, entry in infra:
                 _print_catalog_entry(entry)
 
     if include_configured:
@@ -1756,7 +1761,23 @@ def cmd_diag_net(args) -> int:
     iface = getattr(args, 'interface', None)
     want_json = getattr(args, 'json', False)
 
-    report = net_diag.run(listen_seconds=listen_s, interface=iface)
+    # Progress callback for the passive listen — prints to stderr so
+    # --json stdout stays clean. Skipped in JSON mode to keep logs tidy.
+    def _progress(elapsed, total, n_queriers):
+        if want_json:
+            return
+        suffix = f', {n_queriers} querier(s) seen' if n_queriers else ''
+        print(f'  listening for IGMP queries... {elapsed}/{total} s{suffix}',
+              file=sys.stderr, flush=True)
+
+    prog = _progress if (os.geteuid() == 0 and listen_s > 0) else None
+
+    try:
+        report = net_diag.run(listen_seconds=listen_s, interface=iface,
+                              progress=prog)
+    except KeyboardInterrupt:
+        _warn('interrupted before classification could complete')
+        return 130
     # Explicit `smd diag net` always refreshes the cache so subsequent
     # fast verbs (status, list, validate) see the latest classification.
     if report.listen_root and report.classification != 'unknown':
