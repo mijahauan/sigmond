@@ -74,6 +74,7 @@ class SigmondApp(App):
         Binding("t", "show_topology", "Topology"),
         Binding("c", "show_cpu_affinity", "CPU affinity"),
         Binding("r", "show_radiod", "Radiod"),
+        Binding("a", "show_rac", "RAC"),
         Binding("v", "show_validate", "Validate"),
         Binding("b", "show_backup", "Backup"),
         Binding("R", "show_restore", "Restore"),
@@ -329,6 +330,25 @@ class SigmondApp(App):
             "select a file with Enter or double-click.\n\n"
             "After restore, run  sudo smd apply  to reconcile any "
             "service state changes.",
+        )
+
+    def action_show_rac(self) -> None:
+        from .screens.rac import RacScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(RacScreen(self.topology))
+
+        self.query_one(ContextPanel).show_help(
+            "Remote Access Channel",
+            "Configures frpc to open an authenticated reverse tunnel "
+            "back to vpn.wsprdaemon.org.\n\n"
+            "Two values are needed:\n"
+            "  RAC ID — your site name (defaults to first receiver call)\n"
+            "  RAC number — integer assigned by the RAC admin (emailed)\n\n"
+            "After pressing 'Apply & enable', sigmond downloads the frpc "
+            "binary, writes /etc/sigmond/frpc.ini, and starts wd-rac.service.\n\n"
+            "Once running, an admin can SSH to this site via:\n"
+            "  ssh -p <35800+n> wsprdaemon@vpn.wsprdaemon.org",
         )
 
     def action_show_update(self) -> None:

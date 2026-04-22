@@ -42,6 +42,13 @@ description = "WSPR decoder + poster + uploader (wsprd + jt9 --fst4w)"
 enabled = true
 description = "ka9q-web radiod status web UI"
 
-[component.rac]
-enabled = false
-description = "Remote access channel (frpc reverse tunnel)"
+[component.wd-rac]
+enabled    = false
+description = "WsprDaemon Remote Access Channel (frpc reverse tunnel)"
+# rac_id     — the name this site registers with the frps server.
+#              Defaults to the first receiver's call sign from wsprdaemon.conf
+#              (e.g. "AC0G-KA9Q").  Set explicitly to override.
+# rac_number — integer assigned by the RAC administrator (emailed to you).
+#              remote_port = 35800 + rac_number.  REQUIRED to enable.
+# rac_id     = "AC0G-KA9Q"
+# rac_number = 50

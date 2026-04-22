@@ -458,6 +458,253 @@ def _collect_deps_for_components(components: list) -> list:
 
 
 # ---------------------------------------------------------------------------
+# WD-RAC (frpc) install + config
+# ---------------------------------------------------------------------------
+
+_FRPC_VERSION   = '0.64.0'
+_FRPS_URL       = 'vpn.wsprdaemon.org'
+_FRPS_URL_HAMSCI = 'vpn.hamsci.org'
+_FRPS_PORT      = 35735
+_RAC_PORT_BASE  = 35800
+_RAC_WEB_OFFSET = 10000
+_FRPC_BIN       = Path('/usr/local/sbin/frpc')
+_FRPC_INI       = Path('/etc/sigmond/frpc.ini')
+_RAC_SERVICE    = 'wd-rac'
+
+
+def _frpc_arch_suffix() -> str:
+    import platform
+    machine = platform.machine()
+    if machine == 'x86_64':
+        return 'linux_amd64'
+    if machine in ('armv7l', 'armv6l'):
+        return 'linux_arm'
+    if machine == 'aarch64':
+        return 'linux_arm64'
+    raise RuntimeError(f'frpc: unsupported architecture {machine}')
+
+
+def _install_frpc(dry_run: bool = False) -> bool:
+    """Download the frpc binary if not present or version is wrong."""
+    if _FRPC_BIN.exists():
+        r = _run([str(_FRPC_BIN), '--version'])
+        if r.returncode == 0 and _FRPC_VERSION in r.stdout:
+            _ok(f'frpc: {_FRPC_VERSION} already installed')
+            return True
+        _info(f'frpc: version mismatch, reinstalling {_FRPC_VERSION}')
+
+    try:
+        arch = _frpc_arch_suffix()
+    except RuntimeError as exc:
+        _err(str(exc))
+        return False
+
+    import urllib.request, tarfile, tempfile
+    tarname = f'frp_{_FRPC_VERSION}_{arch}.tar.gz'
+    url = f'https://github.com/fatedier/frp/releases/download/v{_FRPC_VERSION}/{tarname}'
+
+    if dry_run:
+        _info(f'dry-run: would download {url} → {_FRPC_BIN}')
+        return True
+
+    _info(f'Downloading frpc {_FRPC_VERSION} ({arch}) ...')
+    with tempfile.TemporaryDirectory() as tmp:
+        tar_path = Path(tmp) / tarname
+        try:
+            urllib.request.urlretrieve(url, str(tar_path))
+        except Exception as exc:
+            _err(f'frpc download failed: {exc}')
+            return False
+        with tarfile.open(str(tar_path)) as tf:
+            # The binary is at frp_VERSION_ARCH/frpc inside the archive
+            member = next((m for m in tf.getmembers() if m.name.endswith('/frpc')), None)
+            if member is None:
+                _err('frpc not found in downloaded archive')
+                return False
+            member.name = 'frpc'
+            tf.extract(member, path=tmp)
+        frpc_extracted = Path(tmp) / 'frpc'
+        r = _run(['install', '-m', '755', str(frpc_extracted), str(_FRPC_BIN)], sudo=True)
+        if r.returncode != 0:
+            _err(f'frpc install failed: {r.stderr.strip()}')
+            return False
+
+    _ok(f'frpc: {_FRPC_VERSION} installed to {_FRPC_BIN}')
+    return True
+
+
+def _read_rac_topology(topology: dict) -> tuple[str, int]:
+    """Return (rac_id, rac_number) from topology, or ('', -1) if not configured."""
+    comp = topology.get('components', {}).get('wd-rac', {})
+    rac_id     = comp.get('rac_id', '').strip()
+    rac_number = comp.get('rac_number', -1)
+    try:
+        rac_number = int(rac_number)
+    except (TypeError, ValueError):
+        rac_number = -1
+    return rac_id, rac_number
+
+
+def _write_frpc_ini(rac_id: str, rac_number: int, dry_run: bool = False) -> bool:
+    """Write /etc/sigmond/frpc.ini for the given RAC ID and number."""
+    if not rac_id:
+        _err('wd-rac: rac_id is empty — set it in topology.toml [component.wd-rac]')
+        return False
+    if rac_number < 0:
+        _err('wd-rac: rac_number not set — obtain it from the RAC administrator')
+        return False
+
+    frps_host = _FRPS_URL_HAMSCI if 200 <= rac_number <= 299 else _FRPS_URL
+    ssh_port  = _RAC_PORT_BASE + rac_number
+    web_port  = ssh_port + _RAC_WEB_OFFSET
+
+    # Detect non-standard sshd port
+    local_ssh_port = 22
+    try:
+        sshd_cfg = Path('/etc/ssh/sshd_config').read_text()
+        for line in sshd_cfg.splitlines():
+            if line.startswith('Port '):
+                local_ssh_port = int(line.split()[1])
+    except Exception:
+        pass
+
+    ini_content = f"""\
+[common]
+admin_addr = 127.0.0.1
+admin_port = 7500
+server_addr = {frps_host}
+server_port = {_FRPS_PORT}
+
+[{rac_id}]
+type = tcp
+local_ip = 127.0.0.1
+local_port = {local_ssh_port}
+remote_port = {ssh_port}
+
+[{rac_id}-WEB]
+type = tcp
+local_ip = 127.0.0.1
+local_port = 8081
+remote_port = {web_port}
+"""
+    if dry_run:
+        _info(f'dry-run: would write {_FRPC_INI}:\n{textwrap.indent(ini_content, "     ")}')
+        return True
+
+    _run(['mkdir', '-p', str(_FRPC_INI.parent)], sudo=True)
+    import tempfile, shutil as _shutil
+    with tempfile.NamedTemporaryFile('w', suffix='.ini', delete=False) as tf:
+        tf.write(ini_content)
+        tf_path = tf.name
+    r = _run(['install', '-m', '640', tf_path, str(_FRPC_INI)], sudo=True)
+    Path(tf_path).unlink(missing_ok=True)
+    if r.returncode != 0:
+        _err(f'frpc.ini write failed: {r.stderr.strip()}')
+        return False
+    _ok(f'frpc.ini: written ({rac_id}, channel {rac_number}, port {ssh_port})')
+    return True
+
+
+def _install_rac_service(dry_run: bool = False) -> bool:
+    """Write and enable the wd-rac systemd service."""
+    unit_path = Path('/etc/systemd/system/wd-rac.service')
+    unit_content = f"""\
+[Unit]
+Description=WsprDaemon Remote Access Channel (frpc tunnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={_FRPC_BIN} -c {_FRPC_INI}
+Restart=always
+RestartSec=30s
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
+"""
+    if dry_run:
+        _info(f'dry-run: would write {unit_path} and enable wd-rac.service')
+        return True
+
+    import tempfile
+    with tempfile.NamedTemporaryFile('w', suffix='.service', delete=False) as tf:
+        tf.write(unit_content)
+        tf_path = tf.name
+    r = _run(['install', '-m', '644', tf_path, str(unit_path)], sudo=True)
+    Path(tf_path).unlink(missing_ok=True)
+    if r.returncode != 0:
+        _err(f'wd-rac.service write failed: {r.stderr.strip()}')
+        return False
+    _run(['systemctl', 'daemon-reload'], sudo=True)
+    _run(['systemctl', 'enable', '--now', 'wd-rac.service'], sudo=True)
+    _ok('wd-rac.service: installed and enabled')
+    return True
+
+
+def _install_wd_rac(topology: dict, dry_run: bool = False) -> bool:
+    """Full wd-rac install: frpc binary + frpc.ini + systemd service."""
+    rac_id, rac_number = _read_rac_topology(topology)
+    if not rac_id or rac_number < 0:
+        _warn('wd-rac: rac_id or rac_number not set in topology.toml — '
+              'run: smd tui  (or edit [component.wd-rac] manually)')
+        _warn('wd-rac: frpc binary will be installed but service not started')
+
+    ok = True
+    ok = _install_frpc(dry_run) and ok
+    if rac_id and rac_number >= 0:
+        ok = _write_frpc_ini(rac_id, rac_number, dry_run) and ok
+        ok = _install_rac_service(dry_run) and ok
+    return ok
+
+
+def rac_status() -> dict:
+    """Return a dict with frpc connection status for display/TUI."""
+    result = {
+        'frpc_installed': _FRPC_BIN.exists(),
+        'frpc_version':   '',
+        'ini_exists':     _FRPC_INI.exists(),
+        'service_active': False,
+        'tunnel_ok':      False,
+        'rac_id':         '',
+        'rac_number':     -1,
+        'ssh_port':       -1,
+    }
+    if result['frpc_installed']:
+        r = _run([str(_FRPC_BIN), '--version'])
+        if r.returncode == 0:
+            result['frpc_version'] = r.stdout.strip().split()[-1]
+
+    if result['ini_exists']:
+        try:
+            cfg = configparser.ConfigParser()
+            cfg.read(_FRPC_INI)
+            sections = [s for s in cfg.sections() if s != 'common' and not s.endswith('-WEB')]
+            if sections:
+                result['rac_id'] = sections[0]
+                rp = cfg.getint(sections[0], 'remote_port', fallback=-1)
+                result['ssh_port']   = rp
+                result['rac_number'] = rp - _RAC_PORT_BASE if rp > 0 else -1
+        except Exception:
+            pass
+
+    r = _run(['systemctl', 'is-active', 'wd-rac.service'])
+    result['service_active'] = (r.returncode == 0 and r.stdout.strip() == 'active')
+
+    # Quick reachability test: can we talk to the frps server port?
+    if result['service_active']:
+        import socket
+        try:
+            with socket.create_connection((_FRPS_URL, _FRPS_PORT), timeout=3):
+                result['tunnel_ok'] = True
+        except OSError:
+            result['tunnel_ok'] = False
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # System-level install steps
 # ---------------------------------------------------------------------------
 
@@ -775,6 +1022,12 @@ def _install_full_suite(args) -> int:
                         errors += 1
                 else:
                     _warn(f'{dep}: unknown type "{dep_type}" in deps.conf — skipping')
+
+    # --- 5. wd-rac (frpc tunnel) ---
+    if 'wd-rac' in components:
+        _heading('wd-rac (Remote Access Channel)')
+        if not _install_wd_rac(topology, dry_run):
+            errors += 1
 
     # --- Summary ---
     print()

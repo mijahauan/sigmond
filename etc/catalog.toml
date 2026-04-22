@@ -58,3 +58,11 @@ repo            = "https://github.com/mijahauan/igmp-querier"
 uses            = []
 contract        = ""                                  # not a contract-conformant client
 install_script  = "/opt/git/igmp-querier/install.sh"
+
+[client.wd-rac]
+kind            = "infra"
+description     = "WsprDaemon Remote Access Channel — frpc reverse-tunnel for remote SSH access"
+repo            = ""                                  # frpc binary downloaded from github.com/fatedier/frp releases
+uses            = []
+contract        = ""                                  # managed natively by sigmond
+install_script  = ""                                  # sigmond handles install directly (_install_frpc)
