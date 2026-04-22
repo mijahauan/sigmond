@@ -275,6 +275,18 @@ def _install_git_dep(section: str, dcfg: configparser.ConfigParser) -> bool:
     elif use_latest:
         _info(f'Pulling {section} to latest ...')
         _run(['git', '-C', str(target), 'pull'])
+    else:
+        # Repo exists and a specific commit is pinned — fetch and checkout if needed.
+        r = _run(['git', '-c', f'safe.directory={target}',
+                  '-C', str(target), 'rev-parse', 'HEAD'])
+        current = r.stdout.strip()
+        if pinned and current and not current.startswith(pinned[:12]):
+            _info(f'{section}: at {current[:12]}, fetching pinned {pinned[:12]} ...')
+            _run(['git', '-C', str(target), 'fetch', '--tags', 'origin'])
+            r2 = _run(['git', '-C', str(target), 'checkout', pinned])
+            if r2.returncode != 0:
+                _err(f'{section}: checkout {pinned[:12]} failed: {r2.stderr.strip()}')
+                return False
 
     r = _run(['git', '-c', f'safe.directory={target}',
               '-C', str(target), 'rev-parse', 'HEAD'])
@@ -282,8 +294,7 @@ def _install_git_dep(section: str, dcfg: configparser.ConfigParser) -> bool:
     if use_latest:
         _ok(f'{section}: {current[:12]} (latest)')
     elif pinned and current and not current.startswith(pinned[:12]):
-        _warn(f'{section}: at {current[:12]}, deps.conf pins {pinned[:12]}')
-        _info(f'To update: git -C {target} fetch && git -C {target} checkout {pinned}')
+        _warn(f'{section}: at {current[:12]}, want {pinned[:12]} — checkout failed?')
     else:
         _ok(f'{section}: {current[:12]}')
 
@@ -735,6 +746,35 @@ def _install_full_suite(args) -> int:
         except RuntimeError as exc:
             _err(f'{entry.name}: {exc}')
             errors += 1
+
+    # --- 4. deps.conf dependencies ---
+    client_dir = topology['client_dir']
+    dcfg = _load_deps_conf(client_dir)
+    if dcfg:
+        deps_needed = _collect_deps_for_components(components)
+        if deps_needed:
+            _heading('dependencies (deps.conf)')
+            venv_dir = Path('/opt/wsprdaemon/venv')
+            for dep in deps_needed:
+                if dep not in dcfg.sections():
+                    _warn(f'{dep}: not found in deps.conf — skipping')
+                    continue
+                dep_type = dcfg.get(dep, 'type', fallback='').strip()
+                if dep_type == 'git':
+                    if not _install_git_dep(dep, dcfg):
+                        errors += 1
+                    # Trigger build step if this dep needs one
+                    if dep in BUILD_STEPS:
+                        install_to = dcfg.get(dep, 'install_to', fallback='').strip()
+                        if install_to:
+                            build_fn = globals().get(BUILD_STEPS[dep])
+                            if build_fn and not build_fn(Path(install_to)):
+                                errors += 1
+                elif dep_type == 'pypi':
+                    if not _install_pypi_dep(dep, dcfg, venv_dir):
+                        errors += 1
+                else:
+                    _warn(f'{dep}: unknown type "{dep_type}" in deps.conf — skipping')
 
     # --- Summary ---
     print()
