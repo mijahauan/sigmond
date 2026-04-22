@@ -5,3 +5,18 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+# Claude Code session data
+.claude/
+# wsprd runtime artifacts (written by wd-decode when run from this directory)
+ALL_WSPR.TXT
+hashtable.txt
+wspr_spots.txt
+wspr_timer.out
+wspr_wisdom.dat
+jt9_wisdom.dat
+.wsprd_result
+*.c2
+# Dependency repos managed at this level (not committed)
+ka9q-radio/
+ka9q-web/
+onion/

@@ -153,7 +153,7 @@ def _expand_template(
     known = set(configured)
     try:
         result = subprocess.run(
-            ["systemctl", "list-units", f"{template}@*.{kind}", "--all", "--output=json"],
+            ["systemctl", "list-units", template.replace('@.', '@*.'), "--all", "--output=json"],
             capture_output=True,
             text=True,
             check=False,
@@ -172,7 +172,10 @@ def _expand_template(
     # Create UnitRef for each known instance
     for instance in sorted(known):
         unit_name = template.replace('@.', f"@{instance}.")
-        orphaned = instance not in configured
+        # Only orphan if sigmond owns instance config (env files exist) but
+        # this instance isn't among them. If no env files exist the client
+        # manages its own instances and nothing is orphaned.
+        orphaned = bool(configured) and instance not in configured
         units.append(
             UnitRef(
                 component=component,

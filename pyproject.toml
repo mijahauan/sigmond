@@ -21,6 +21,7 @@ dependencies = []
 tui = [
   "textual>=8.0.0",
   "rich>=13.0.0",
+  "ka9q-python",
 ]
 dev = [
   "pytest>=7.0.0",
@@ -32,3 +33,11 @@ include = ["sigmond*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv.sources]
+ka9q-python = { path = "../ka9q-python" }
+
+[dependency-groups]
+dev = [
+    "ka9q-python",
+]
