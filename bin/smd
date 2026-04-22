@@ -601,6 +601,8 @@ def _install_single_client(args) -> int:
     if _need_root('install'):
         return 1
 
+    _netdiag_auto_refresh('install')
+
     try:
         result = _do_install_client(entry, dry_run=dry_run, yes=yes, pull=True)
     except RuntimeError as exc:
@@ -629,6 +631,7 @@ def _install_full_suite(args) -> int:
         return 1
 
     print(BANNER)
+    _netdiag_auto_refresh('install')
     topology = _load_topology(
         Path(args.topology) if args.topology else TOPOLOGY_PATH,
         client_dir_override=getattr(args, 'client_dir', None),
@@ -827,6 +830,7 @@ def cmd_apply(args) -> int:
         Path(args.topology) if args.topology else TOPOLOGY_PATH,
     )
     _heading('apply')
+    _netdiag_auto_refresh('apply')
     ok = _run_wd_ctl_apply(topology['client_dir'], getattr(args, 'dry_run', False))
     return 0 if ok else 1
 
@@ -857,6 +861,7 @@ def cmd_start(args) -> int:
         units = order_units(units, coordination=coord)
 
     _heading('start')
+    _netdiag_auto_refresh('start')
     for unit in units:
         r = _run(['systemctl', 'start', unit.unit], sudo=True)
         if r.returncode == 0:
@@ -1429,6 +1434,8 @@ def cmd_status(args) -> int:
             else:
                 _ok('plan applied, no contention, no foreign drop-ins')
 
+    _netdiag_status_line()
+
     print()
     return 1 if any_bad else 0
 
@@ -1659,6 +1666,180 @@ def cmd_update(args) -> int:
 # smd diag
 # ---------------------------------------------------------------------------
 
+def _netdiag_auto_refresh(verb: str) -> None:
+    """Ensure the net-diag cache is fresh before a mutating verb runs.
+
+    Best-effort: any failure is non-fatal (we don't want a broken diag
+    path to block install/apply/start). Prints a one-liner summary of
+    the classification so the operator sees the network verdict every
+    time they mutate state.
+
+    Only does a live run if the cache is stale or missing. A live run
+    with root will perform a 130 s passive listen; a live run without
+    root is still useful (tier 1 can classify single-host-safe /
+    lan-unsafe / multicast-blocked definitively).
+    """
+    if not _HAS_SIGMOND_LIB:
+        return
+    try:
+        from sigmond import net_diag
+    except Exception:
+        return
+    try:
+        cache = net_diag.load_cache()
+        if net_diag.is_cache_fresh(cache):
+            report = net_diag._report_from_dict(cache['report'])
+            _info(f'network: {report.classification} '
+                  f'(cached {int(cache["age_s"]/60)}m ago)')
+            return
+        if os.geteuid() != 0:
+            # Can't do the definitive listen; do tier 1 only.
+            report, _from_cache = net_diag.run_cached(
+                listen_seconds=0, force=True)
+        else:
+            _info(f'network: refreshing diagnosis (~130 s passive IGMP listen)...')
+            report, _from_cache = net_diag.run_cached(force=True)
+        _info(f'network: {report.classification}')
+        if report.classification in ('lan-needs-querier', 'lan-unsafe'):
+            for line in report.recommendation.split('. '):
+                line = line.strip().rstrip('.')
+                if line:
+                    _warn(line)
+    except Exception as exc:
+        # Diagnosis must never block a mutating verb.
+        _warn(f'network diagnosis skipped: {exc}')
+
+
+def _netdiag_status_line() -> None:
+    """Render the cached classification as a block in `smd status`."""
+    if not _HAS_SIGMOND_LIB:
+        return
+    try:
+        from sigmond import net_diag
+    except Exception:
+        return
+    cache = net_diag.load_cache()
+    print('\n  network:')
+    if cache is None:
+        _info('no cached diagnosis — run: sudo smd diag net')
+        return
+    report = net_diag._report_from_dict(cache['report'])
+    age_min = int(cache['age_s'] / 60)
+    stale = ' [stale]' if not net_diag.is_cache_fresh(cache) else ''
+    label = f'{report.classification} (checked {age_min}m ago){stale}'
+    if report.classification == 'lan-capable':
+        _ok(label)
+    elif report.classification in ('lan-needs-querier', 'lan-unsafe'):
+        _warn(label)
+    else:
+        _info(label)
+    if report.queriers:
+        q = report.queriers[0]
+        _info(f'querier: v{q.version} {q.source} on {q.interface or "?"}')
+    if report.classification in ('lan-needs-querier', 'lan-unsafe'):
+        _info(f'fix: {report.recommendation}')
+
+
+def cmd_diag_net(args) -> int:
+    """Classify the host's network environment for multi-host radiod safety.
+
+    Tier 1 checks run unprivileged (interface enum, /proc/net/igmp).
+    Tier 2 (passive raw-socket IGMP listen) needs root; without it, we
+    still classify from kernel state but may return 'unknown'.
+    """
+    import json as _json
+    from sigmond import net_diag
+
+    listen_s = getattr(args, 'listen', None)
+    if listen_s is None:
+        listen_s = 130
+    iface = getattr(args, 'interface', None)
+    want_json = getattr(args, 'json', False)
+
+    report = net_diag.run(listen_seconds=listen_s, interface=iface)
+    # Explicit `smd diag net` always refreshes the cache so subsequent
+    # fast verbs (status, list, validate) see the latest classification.
+    if report.listen_root and report.classification != 'unknown':
+        net_diag.save_cache(report)
+
+    if want_json:
+        _json.dump(report.to_dict(), sys.stdout, indent=2)
+        sys.stdout.write('\n')
+        return 0
+
+    _heading('diag: network')
+
+    # Interfaces
+    _info('Interfaces:')
+    for i in report.interfaces:
+        if not i.is_up or i.is_loopback:
+            continue
+        tags = []
+        if i.is_wireless:    tags.append('wireless')
+        if i.is_bridge:      tags.append(f'bridge[{",".join(i.bridge_members) or "-"}]')
+        if i.is_bond:        tags.append('bond')
+        if i.is_overlay:     tags.append('overlay')
+        if not i.has_multicast: tags.append('no-multicast')
+        if i.is_default_route: tags.append('default-route')
+        tag_str = f'  ({", ".join(tags)})' if tags else ''
+        addrs = ', '.join(i.addrs_v4) or '(no v4)'
+        print(f'         {i.name:<14s}  {addrs}{tag_str}')
+    print()
+
+    # Joined groups by interface (collapsed)
+    if report.joined_groups:
+        _info('Multicast groups joined (/proc/net/igmp):')
+        by_iface: dict = {}
+        for g in report.joined_groups:
+            by_iface.setdefault(g.interface, []).append(g)
+        for ifname, groups in sorted(by_iface.items()):
+            ver = groups[0].igmp_version
+            uniq = sorted({g.group for g in groups})
+            non_local = [g for g in uniq if not g.startswith('224.0.0.')]
+            local_count = len(uniq) - len(non_local)
+            if non_local:
+                extra = f'  [+{local_count} link-local]' if local_count else ''
+                shown = ', '.join(non_local[:6]) + ('...' if len(non_local) > 6 else '')
+            else:
+                extra = ''
+                shown = f'(link-local only: {local_count} group{"s" if local_count != 1 else ""})'
+            print(f'         {ifname:<14s}  {ver}   {shown}{extra}')
+        print()
+
+    # Queriers
+    if report.listen_root:
+        if report.queriers:
+            _info('IGMP queriers observed:')
+            for q in report.queriers:
+                qqic = f', QQIC={q.qqic_s}s' if q.qqic_s is not None else ''
+                _ok(f'{q.interface or "?"}  v{q.version} from {q.source}  '
+                    f'(max_resp={q.max_resp_ms}ms{qqic})')
+        else:
+            _info(f'IGMP queriers: none observed in {report.listen_seconds}s listen')
+        for err in report.listen_errors:
+            _warn(err)
+        print()
+    else:
+        _info('IGMP queriers: passive listen skipped (re-run with sudo for '
+              'definitive querier detection)')
+        print()
+
+    # Classification
+    _info(f'Classification: {report.classification}')
+    from sigmond.net_diag import CLASSES
+    _info(f'  {CLASSES.get(report.classification, "")}')
+    for reason in report.reasons:
+        _info(f'  • {reason}')
+    print()
+    _info('Recommendation:')
+    for line in report.recommendation.split('. '):
+        line = line.strip().rstrip('.')
+        if line:
+            _info(f'  {line}.')
+    print()
+    return 0
+
+
 def cmd_diag(args) -> int:
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
     client_dir = topology['client_dir']
@@ -1794,7 +1975,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "--components --topology" -- "$cur"))
                     ;;
                 diag)
-                    COMPREPLY=($(compgen -W "cpu-affinity cpu-freq --components --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
                     ;;
                 validate)
                     COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
@@ -1826,8 +2007,11 @@ _smd_complete() {
                         cpu-freq)
                             COMPREPLY=($(compgen -W "--apply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
                             ;;
+                        net)
+                            COMPREPLY=($(compgen -W "--interface --listen --json --topology" -- "$cur"))
+                            ;;
                         *)
-                            COMPREPLY=($(compgen -W "cpu-affinity cpu-freq --components --topology" -- "$cur"))
+                            COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -2133,6 +2317,7 @@ def main() -> int:
               diag               run diagnostics  (see: smd diag --help)
               diag cpu-affinity  show CPU affinity of all managed service processes
               diag cpu-freq      show/apply CPU frequency limits per radiod policy
+              diag net           classify network for multi-host radiod (IGMP/mcast)
               completion bash    emit bash tab-completion script
         '''),
     )
@@ -2226,6 +2411,15 @@ def main() -> int:
     p.add_argument('--other-max-mhz', type=int, metavar='MHZ',
                    help='override other CPU max frequency (default: from topology.toml or 1400)')
 
+    p = diag_sub.add_parser('net',
+                             help='classify network for multi-host radiod (IGMP, multicast)')
+    p.add_argument('--interface', metavar='IFACE',
+                   help='bind passive IGMP listen to this interface (default: all)')
+    p.add_argument('--listen', type=int, metavar='SECONDS', default=130,
+                   help='seconds to listen for IGMP queries when run as root (default: 130)')
+    p.add_argument('--json', action='store_true',
+                   help='emit full report as JSON')
+
     # completion
     p_completion = sub.add_parser('completion', help='emit shell tab-completion script')
     completion_sub = p_completion.add_subparsers(dest='completion_command')
@@ -2305,6 +2499,8 @@ def main() -> int:
                 topo['cpu_freq']['other_max_mhz'] = args.other_max_mhz
             args._topology_override = topo
             return cmd_diag_cpu_freq(args)
+        if diag_cmd == 'net':
+            return cmd_diag_net(args)
         return cmd_diag(args)
 
     if args.command in ('validate', 'config'):

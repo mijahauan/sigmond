@@ -212,6 +212,18 @@ Checks:
 - Per-client self-validation (`<client> validate --json`)
 - Service health
 
+### Check multicast / IGMP readiness
+
+```bash
+smd diag net              # unprivileged; uses /proc/net/igmp state
+sudo smd diag net         # adds passive raw-socket listen for queriers
+```
+
+Classifies your network for multi-host radiod safety and tells you
+whether to stay host-local (`ttl=0`), enable a querier, or avoid a
+Wi-Fi path. See [docs/networking.md](docs/networking.md) for the full
+guide.
+
 ### Cross-client validation
 
 ```bash
