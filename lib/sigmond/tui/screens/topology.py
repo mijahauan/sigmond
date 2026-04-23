@@ -37,16 +37,24 @@ class TopologyScreen(Vertical):
         super().__init__(**kwargs)
         self._topology = topology
         self._catalog = catalog
+        self._enabled_col = None  # ColumnKey for the Enabled column
 
     def compose(self):
         yield Static("Topology — enabled components", id="topo-title")
-        table = DataTable(id="topo-table", cursor_type="row")
-        table.add_columns("Component", "Enabled", "Managed", "Description")
-        yield table
+        yield DataTable(id="topo-table", cursor_type="row")
         yield Button("Save topology.toml", id="topo-save", variant="primary")
-        yield Static("Click a row to select it, then click again or press Enter to toggle. Save when done.", id="topo-status")
+        yield Static(
+            "Click a row to select it, then click again or press Enter to toggle. Save when done.",
+            id="topo-status",
+        )
 
     def on_mount(self) -> None:
+        table = self.query_one("#topo-table", DataTable)
+        # Capture column keys so update_cell can reference them by key, not label.
+        _comp_col, self._enabled_col, _mgd_col, _desc_col = table.add_columns(
+            "Component", "Enabled", "Managed", "Description"
+        )
+
         # Merge catalog entries not yet in topology so new clients are visible.
         for cat_name, entry in self._catalog.items():
             if cat_name not in self._topology.components:
@@ -58,7 +66,6 @@ class TopologyScreen(Vertical):
                     description=entry.description,
                 )
 
-        table = self.query_one("#topo-table", DataTable)
         for name in sorted(self._topology.components):
             comp = self._topology.components[name]
             desc = comp.description or ""
@@ -77,7 +84,7 @@ class TopologyScreen(Vertical):
         comp.enabled = not comp.enabled
         table = self.query_one("#topo-table", DataTable)
         enabled_str = "✔ yes" if comp.enabled else "✘ no"
-        table.update_cell(name, "Enabled", enabled_str)
+        table.update_cell(row_key, self._enabled_col, enabled_str)
         self.query_one("#topo-status", Static).update("(unsaved changes)")
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
