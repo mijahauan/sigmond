@@ -134,13 +134,10 @@ $SUDO chmod 750 /var/lib/sigmond /var/log/sigmond
 ok "System directories ready"
 
 # ─── catalog.toml ─────────────────────────────────────────────────────────────
-if [[ ! -f /etc/sigmond/catalog.toml ]]; then
-    info "Installing catalog → /etc/sigmond/catalog.toml"
-    $SUDO cp "$REPO_DIR/etc/catalog.toml" /etc/sigmond/catalog.toml
-    ok "catalog.toml installed"
-else
-    ok "catalog.toml already present — not overwritten"
-fi
+# Always refresh from repo — catalog is Sigmond-managed and not user-edited.
+info "Installing catalog → /etc/sigmond/catalog.toml"
+$SUDO cp "$REPO_DIR/etc/catalog.toml" /etc/sigmond/catalog.toml
+ok "catalog.toml installed"
 
 # ─── default topology.toml ────────────────────────────────────────────────────
 if [[ ! -f /etc/sigmond/topology.toml ]]; then

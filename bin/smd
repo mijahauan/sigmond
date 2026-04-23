@@ -1608,6 +1608,25 @@ def cmd_status(args) -> int:
     only = [c.strip() for c in args.components.split(',')] if args.components else None
     enabled = _enabled_components(topology, only)
 
+    # ── action needed ────────────────────────────────────────────────────────
+    if _HAS_SIGMOND_LIB:
+        try:
+            from sigmond.catalog import load_catalog, next_steps
+            _catalog = load_catalog()
+            _items = next_steps(enabled, _catalog)
+            if _items:
+                _heading('action needed')
+                for kind, subject, action in _items:
+                    if kind == 'install':
+                        _warn(f'{subject}  —  enabled in topology but not yet installed')
+                        _info(f'       run:  {action}')
+                    elif kind == 'enable_dep':
+                        _warn(subject)
+                        _info(f'       fix:  {action}')
+                print()
+        except Exception:
+            pass
+
     try:
         units = resolve_units(enabled, enabled)
     except ValueError as exc:

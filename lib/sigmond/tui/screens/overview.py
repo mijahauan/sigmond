@@ -23,6 +23,7 @@ from textual.worker import Worker, WorkerState
 class _OverviewData:
     units_by_component: dict = field(default_factory=dict)   # comp -> list[UnitRef]
     unit_states: dict = field(default_factory=dict)          # unit -> state string
+    action_items: list = field(default_factory=list)         # (kind, subject, action) tuples
     view: object = None                                       # SystemView | None
     affinity: object = None                                   # AffinityReport | None
     error: Optional[str] = None
@@ -84,6 +85,14 @@ def _gather_overview() -> _OverviewData:
             data.affinity = build_affinity_report(dict(topology.cpu_affinity))
         except Exception:
             data.affinity = None
+
+        try:
+            from ...catalog import load_catalog, next_steps
+            catalog = load_catalog()
+            data.action_items = next_steps(enabled, catalog)
+        except Exception:
+            data.action_items = []
+
     except Exception as exc:
         data.error = str(exc)
     return data
@@ -91,13 +100,13 @@ def _gather_overview() -> _OverviewData:
 
 def _state_badge(state: str) -> str:
     if state == 'active':
-        return '[green]\u2714 active[/]'
+        return '[green]✔ active[/]'
     if state == 'inactive':
-        return '[dim]\u25cb inactive[/]'
+        return '[dim]○ inactive[/]'
     if state == 'failed':
-        return '[red]\u2718 failed[/]'
+        return '[red]✘ failed[/]'
     if state == 'activating' or state == 'reloading':
-        return f'[yellow]\u25b6 {state}[/]'
+        return f'[yellow]▶ {state}[/]'
     return f'[yellow]? {state}[/]'
 
 
@@ -121,6 +130,9 @@ class OverviewScreen(Vertical):
         margin-bottom: 0;
     }
     OverviewScreen #ov-summary {
+        margin-bottom: 0;
+    }
+    OverviewScreen #ov-actions {
         margin-bottom: 1;
     }
     OverviewScreen #ov-inventory,
@@ -136,7 +148,8 @@ class OverviewScreen(Vertical):
 
     def compose(self):
         yield Static("Overview", classes="ov-title")
-        yield Static("[dim]loading\u2026[/]", id="ov-summary")
+        yield Static("[dim]loading…[/]", id="ov-summary")
+        yield Static("", id="ov-actions")
         yield Static("Service health", classes="ov-section")
         table = DataTable(id="ov-services")
         table.add_columns("Component", "Unit", "State")
@@ -155,7 +168,8 @@ class OverviewScreen(Vertical):
             self._refresh()
 
     def _refresh(self) -> None:
-        self.query_one("#ov-summary", Static).update("[dim]loading\u2026[/]")
+        self.query_one("#ov-summary", Static).update("[dim]loading…[/]")
+        self.query_one("#ov-actions", Static).update("")
         self.run_worker(_gather_overview, thread=True)
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
@@ -178,9 +192,25 @@ class OverviewScreen(Vertical):
             summary += f"  [yellow](partial: {data.error})[/]"
         self.query_one("#ov-summary", Static).update(summary)
 
+        self._render_actions(data)
         self._render_services(data)
         self._render_inventory(data)
         self._render_cpu(data)
+
+    def _render_actions(self, data: _OverviewData) -> None:
+        widget = self.query_one("#ov-actions", Static)
+        if not data.action_items:
+            widget.update("")
+            return
+        lines = ["[bold yellow]⚠ Action needed:[/]"]
+        for kind, subject, action in data.action_items:
+            if kind == 'install':
+                lines.append(f"  [yellow]• {subject}[/] — not yet installed")
+                lines.append(f"    [dim]run:  {action}[/]")
+            elif kind == 'enable_dep':
+                lines.append(f"  [yellow]• {subject}[/]")
+                lines.append(f"    [dim]fix:  {action}[/]")
+        widget.update("\n".join(lines))
 
     def _render_services(self, data: _OverviewData) -> None:
         table = self.query_one("#ov-services", DataTable)
@@ -219,12 +249,11 @@ class OverviewScreen(Vertical):
                 if inst.frequencies_hz:
                     parts.append(f"{len(inst.frequencies_hz)} freqs")
                 meta = f'  ({", ".join(parts)})' if parts else ""
-                lines.append(f"    \u2022 {inst.instance}{meta}")
+                lines.append(f"    • {inst.instance}{meta}")
             for issue in cv.issues:
-                lines.append(f"    [yellow]\u26a0 {issue}[/]")
+                lines.append(f"    [yellow]⚠ {issue}[/]")
             lines.append("")
 
-        # Trim trailing blank line.
         while lines and lines[-1] == "":
             lines.pop()
         widget.update("\n".join(lines) if lines else "[dim](no installed clients)[/]")
@@ -258,8 +287,8 @@ class OverviewScreen(Vertical):
 
         if warnings:
             for w in warnings:
-                lines.append(f"  [yellow]\u26a0[/] {w}")
+                lines.append(f"  [yellow]⚠[/] {w}")
             lines.append("  [dim]fix:  sudo smd diag cpu-affinity --apply[/]")
         else:
-            lines.append("  [green]\u2714 plan applied; no contention or foreign drop-ins[/]")
+            lines.append("  [green]✔ plan applied; no contention or foreign drop-ins[/]")
         widget.update("\n".join(lines))

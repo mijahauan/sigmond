@@ -32,7 +32,8 @@ class CatalogEntry:
     kind: str                                 # "client" | "server"
     description: str
     repo: str                                 # git URL
-    uses: tuple[str, ...] = ()                # shared deps, e.g. ("ka9q-python",)
+    uses: tuple[str, ...] = ()                # shared Python/library deps
+    requires: tuple[str, ...] = ()            # component deps that must be enabled+installed
     contract: Optional[str] = None            # min contract version, None if N/A
     install_script: Optional[str] = None      # canonical installer path
     topology_alias: Optional[str] = None      # old topology name, e.g. "grape"
@@ -102,6 +103,7 @@ def load_catalog(path: Optional[Path] = None) -> dict[str, CatalogEntry]:
             description=cfg.get('description', ''),
             repo=cfg.get('repo', ''),
             uses=tuple(cfg.get('uses', ())),
+            requires=tuple(cfg.get('requires', ())),
             contract=cfg.get('contract') or None,
             install_script=cfg.get('install_script') or None,
             topology_alias=cfg.get('topology_alias') or None,
@@ -144,3 +146,47 @@ def get_entry(
     """Look up a catalog entry by canonical name or topology alias."""
     canonical = resolve_name(name, entries)
     return entries.get(canonical)
+
+
+def next_steps(
+    enabled_components: list[str],
+    catalog: dict[str, 'CatalogEntry'],
+) -> list[tuple[str, str, str]]:
+    """Return actionable items for enabled components.
+
+    Each item is a (kind, subject, action) tuple:
+      kind     — 'install' | 'enable_dep'
+      subject  — component name or dependency description
+      action   — human-readable instruction
+
+    Checks two things per enabled component:
+    1. Is it installed on disk?  If not → suggest smd install.
+    2. Are all its declared requires enabled?  If not → suggest enabling.
+    """
+    enabled_set = set(enabled_components)
+    items: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+
+    for comp in sorted(enabled_set):
+        entry = get_entry(comp, catalog)
+        if entry is None:
+            continue
+
+        if not entry.is_installed():
+            items.append(('install', comp, f'sudo smd install {comp}'))
+
+        for dep in entry.requires:
+            key = (comp, dep)
+            if key in seen:
+                continue
+            seen.add(key)
+            if dep not in enabled_set:
+                dep_entry = catalog.get(dep)
+                dep_desc = dep_entry.description if dep_entry else dep
+                items.append((
+                    'enable_dep',
+                    f'{comp} requires {dep}',
+                    f'enable {dep} in topology  ({dep_desc})',
+                ))
+
+    return items
