@@ -24,6 +24,45 @@ _FRPC_INI   = Path('/etc/sigmond/frpc.ini')
 _FRPS_URL   = 'vpn.wsprdaemon.org'
 _FRPS_PORT  = 35735
 _PORT_BASE  = 35800
+_WD_CONF    = Path('/etc/wsprdaemon/wsprdaemon.conf')
+
+
+def _detect_rac_defaults_tui(current_id: str, current_num: str) -> tuple[str, str]:
+    """Try to fill in rac_id / rac_number from the wsprdaemon v4 config.
+
+    Returns (rac_id, rac_number_str), keeping current values if detection fails.
+    """
+    if not _WD_CONF.exists():
+        return current_id, current_num
+    try:
+        cfg = configparser.ConfigParser(
+            comment_prefixes=(';', '#'),
+            inline_comment_prefixes=(';', '#'),
+            strict=False,
+            interpolation=None,
+        )
+        cfg.read(_WD_CONF)
+        new_id  = current_id
+        new_num = current_num
+        if not new_id:
+            for section in cfg.sections():
+                parts = section.split(':')
+                if parts[0] == 'receiver' and len(parts) == 2:
+                    call = cfg.get(section, 'call', fallback='').strip()
+                    if call:
+                        new_id = call
+                        break
+        if new_num in ('', '-1'):
+            rac_val = cfg.get('general', 'rac', fallback='').strip() if cfg.has_section('general') else ''
+            if rac_val:
+                try:
+                    int(rac_val)   # validate it's numeric
+                    new_num = rac_val
+                except ValueError:
+                    pass
+        return new_id, new_num
+    except Exception:
+        return current_id, current_num
 
 
 class RacScreen(Vertical):
@@ -77,7 +116,7 @@ class RacScreen(Vertical):
             self._rac_id = ''
             self._rac_number = ''
 
-        # Try to prefill rac_id from existing frpc.ini
+        # Pre-fill from existing frpc.ini
         if not self._rac_id and _FRPC_INI.exists():
             try:
                 cfg = configparser.ConfigParser()
@@ -91,6 +130,12 @@ class RacScreen(Vertical):
                         self._rac_number = str(rp - _PORT_BASE)
             except Exception:
                 pass
+
+        # Fall back to wsprdaemon.conf auto-detection
+        if not self._rac_id or self._rac_number in ('', '-1'):
+            self._rac_id, self._rac_number = _detect_rac_defaults_tui(
+                self._rac_id, self._rac_number
+            )
 
     # ------------------------------------------------------------------
     def compose(self):
@@ -148,10 +193,9 @@ class RacScreen(Vertical):
             self._do_test()
 
     def _do_apply(self) -> None:
-        from textual.app import App
-        rac_id     = self.query_one('#rac-id-input', Input).value.strip()
+        rac_id         = self.query_one('#rac-id-input', Input).value.strip()
         rac_number_str = self.query_one('#rac-number-input', Input).value.strip()
-        result_widget = self.query_one('#rac-result', Static)
+        result_widget  = self.query_one('#rac-result', Static)
 
         if not rac_id:
             result_widget.update("[red]RAC ID is required.[/red]")
@@ -164,29 +208,79 @@ class RacScreen(Vertical):
             result_widget.update("[red]RAC number must be a non-negative integer.[/red]")
             return
 
-        # Import and call smd's write functions directly
+        # Persist rac_id/rac_number to topology.toml so smd install can read them.
         try:
-            import sys as _sys
-            _smd_dir = str(Path(__file__).resolve().parents[4] / 'bin')
-            if _smd_dir not in _sys.path:
-                _sys.path.insert(0, _smd_dir)
-
-            # Use subprocess so we run with sudo
-            import subprocess
-            r = subprocess.run(
-                ['sudo', 'python3', str(Path(__file__).resolve().parents[4] / 'bin' / 'smd'),
-                 'install', '--components', 'wd-rac', '--yes'],
-                capture_output=True, text=True,
-            )
-            if r.returncode == 0:
-                result_widget.update(
-                    f"[green]✓ wd-rac configured: {rac_id}, channel {rac_number}[/green]"
-                )
-                self.query_one('#rac-status', Static).update(self._status_text())
-            else:
-                result_widget.update(f"[red]Install failed:\n{r.stderr[-300:]}[/red]")
+            self._write_rac_to_topology(rac_id, rac_number)
         except Exception as exc:
-            result_widget.update(f"[red]Error: {exc}[/red]")
+            result_widget.update(f"[red]Failed to update topology.toml: {exc}[/red]")
+            return
+
+        # Run smd install --components wd-rac with sudo.
+        import subprocess
+        smd_bin = str(Path(__file__).resolve().parents[4] / 'bin' / 'smd')
+        r = subprocess.run(
+            ['sudo', 'python3', smd_bin, 'install', '--components', 'wd-rac', '--yes'],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+        if r.returncode == 0:
+            result_widget.update(
+                f"[green]✓ wd-rac configured: {rac_id}, channel {rac_number}[/green]"
+            )
+            self.query_one('#rac-status', Static).update(self._status_text())
+        else:
+            result_widget.update(
+                f"[red]Install failed:\n{(r.stderr or r.stdout)[-400:]}[/red]"
+            )
+
+    def _write_rac_to_topology(self, rac_id: str, rac_number: int) -> None:
+        """Persist rac_id and rac_number into the wd-rac topology component."""
+        from ...paths import TOPOLOGY_PATH
+        import tomllib, subprocess, tempfile
+
+        # Read current topology.toml (may not exist yet)
+        raw: dict = {}
+        if TOPOLOGY_PATH.exists():
+            with open(TOPOLOGY_PATH, 'rb') as f:
+                raw = tomllib.load(f)
+
+        rac_comp = raw.setdefault('component', {}).setdefault('wd-rac', {})
+        rac_comp['enabled']    = True
+        rac_comp['managed']    = False
+        rac_comp['rac_id']     = rac_id
+        rac_comp['rac_number'] = rac_number
+
+        # Rebuild TOML text (simple hand-rolled writer — no tomlw dep)
+        lines = [
+            "# /etc/sigmond/topology.toml",
+            "# Managed by smd tui. Manual edits are fine too.",
+            "",
+        ]
+        for comp_name in sorted(raw.get('component', {})):
+            cfg = raw['component'][comp_name]
+            lines.append(f"[component.{comp_name}]")
+            lines.append(f'enabled = {"true" if cfg.get("enabled", False) else "false"}')
+            if not cfg.get('managed', True):
+                lines.append("managed = false")
+            if cfg.get('description'):
+                lines.append(f'description = "{cfg["description"]}"')
+            if comp_name == 'wd-rac':
+                lines.append(f'rac_id = "{cfg["rac_id"]}"')
+                lines.append(f'rac_number = {cfg["rac_number"]}')
+            lines.append("")
+
+        content = "\n".join(lines) + "\n"
+
+        # Write via sudo (topology.toml is root-owned)
+        with tempfile.NamedTemporaryFile('w', suffix='.toml', delete=False) as tf:
+            tf.write(content)
+            tf_path = tf.name
+        try:
+            subprocess.run(
+                ['sudo', 'install', '-m', '644', tf_path, str(TOPOLOGY_PATH)],
+                check=True, stdin=subprocess.DEVNULL,
+            )
+        finally:
+            Path(tf_path).unlink(missing_ok=True)
 
     def _do_test(self) -> None:
         result_widget = self.query_one('#rac-result', Static)

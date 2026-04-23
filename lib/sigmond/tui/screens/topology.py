@@ -178,6 +178,11 @@ class TopologyScreen(Vertical):
                 lines.append("managed = false")
             if comp.description:
                 lines.append(f'description = "{comp.description}"')
+            if name == 'wd-rac':
+                if comp.rac_id:
+                    lines.append(f'rac_id = "{comp.rac_id}"')
+                if comp.rac_number >= 0:
+                    lines.append(f'rac_number = {comp.rac_number}')
             lines.append("")
 
         path.parent.mkdir(parents=True, exist_ok=True)

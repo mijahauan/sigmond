@@ -20,6 +20,9 @@ class Component:
     enabled: bool = False
     managed: bool = True
     description: str = ""
+    # wd-rac specific fields (only meaningful for component 'wd-rac')
+    rac_id: str = ""        # frpc proxy name, e.g. "AI6VN-0"
+    rac_number: int = -1    # integer assigned by RAC administrator
 
 
 # CPU affinity and frequency defaults.  See CLAUDE.md + the cpu-affinity
@@ -99,11 +102,18 @@ def load_topology(path: Path = TOPOLOGY_PATH,
         smd_bin = Path(sig['smd_bin'])
 
     for name, cfg in raw.get('component', {}).items():
+        rac_number = -1
+        try:
+            rac_number = int(cfg.get('rac_number', -1))
+        except (TypeError, ValueError):
+            pass
         components[name] = Component(
             name=name,
             enabled=cfg.get('enabled', False),
             managed=cfg.get('managed', True),
             description=cfg.get('description', ''),
+            rac_id=str(cfg.get('rac_id', '') or '').strip(),
+            rac_number=rac_number,
         )
 
     cpu_affinity = dict(_DEFAULT_CPU_AFFINITY)

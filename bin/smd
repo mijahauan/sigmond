@@ -196,6 +196,8 @@ def _load_topology(path: Path, client_dir_override: str = None) -> dict:
                 'enabled':     c.enabled,
                 'managed':     c.managed,
                 'description': c.description,
+                'rac_id':      c.rac_id,
+                'rac_number':  c.rac_number,
             } for name, c in t.components.items()
         },
         'cpu_freq':     dict(t.cpu_freq),
@@ -550,6 +552,52 @@ def _read_rac_topology(topology: dict) -> tuple[str, int]:
     return rac_id, rac_number
 
 
+def _detect_rac_defaults() -> tuple[str, int]:
+    """Try to detect RAC ID and number from the wsprdaemon v4 config.
+
+    Returns (rac_id, rac_number) where either can be empty/''-1 if undetectable.
+
+    Reads /etc/wsprdaemon/wsprdaemon.conf (INI format):
+      [general]  rac = <number>
+      [receiver:NAME]  call = <reporter-id>   ← first one becomes default rac_id
+    """
+    import configparser as _cp
+    wdconf = Path('/etc/wsprdaemon/wsprdaemon.conf')
+    if not wdconf.exists():
+        return '', -1
+
+    cfg = _cp.ConfigParser(
+        comment_prefixes=(';', '#'),
+        inline_comment_prefixes=(';', '#'),
+        strict=False,
+        interpolation=None,
+    )
+    try:
+        cfg.read(wdconf)
+    except Exception:
+        return '', -1
+
+    # rac_number from [general] rac =
+    rac_number = -1
+    if cfg.has_section('general'):
+        try:
+            rac_number = int(cfg.get('general', 'rac', fallback='').strip())
+        except (ValueError, TypeError):
+            pass
+
+    # rac_id from first [receiver:NAME] call =
+    rac_id = ''
+    for section in cfg.sections():
+        parts = section.split(':')
+        if parts[0] == 'receiver' and len(parts) == 2:
+            call = cfg.get(section, 'call', fallback='').strip()
+            if call:
+                rac_id = call
+                break
+
+    return rac_id, rac_number
+
+
 def _write_frpc_ini(rac_id: str, rac_number: int, dry_run: bool = False) -> bool:
     """Write /etc/sigmond/frpc.ini for the given RAC ID and number."""
     if not rac_id:
@@ -651,10 +699,21 @@ WantedBy=multi-user.target
 def _install_wd_rac(topology: dict, dry_run: bool = False) -> bool:
     """Full wd-rac install: frpc binary + frpc.ini + systemd service."""
     rac_id, rac_number = _read_rac_topology(topology)
+
+    # Fall back to wsprdaemon.conf auto-detection when not explicitly configured.
     if not rac_id or rac_number < 0:
-        _warn('wd-rac: rac_id or rac_number not set in topology.toml — '
-              'run: smd tui  (or edit [component.wd-rac] manually)')
-        _warn('wd-rac: frpc binary will be installed but service not started')
+        detected_id, detected_num = _detect_rac_defaults()
+        if not rac_id and detected_id:
+            rac_id = detected_id
+            _info(f'wd-rac: rac_id auto-detected from wsprdaemon.conf: {rac_id}')
+        if rac_number < 0 and detected_num >= 0:
+            rac_number = detected_num
+            _info(f'wd-rac: rac_number auto-detected from wsprdaemon.conf: {rac_number}')
+
+    if not rac_id or rac_number < 0:
+        _warn('wd-rac: rac_id or rac_number not set — '
+              'configure via: smd tui  (RAC screen)  or edit [component.wd-rac] in topology.toml')
+        _warn('wd-rac: frpc binary will be installed but tunnel not started')
 
     ok = True
     ok = _install_frpc(dry_run) and ok
