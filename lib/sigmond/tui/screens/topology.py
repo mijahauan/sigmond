@@ -75,17 +75,43 @@ class TopologyScreen(Vertical):
             managed_str = "yes" if comp.managed else "no"
             table.add_row(name, enabled_str, managed_str, desc, key=name)
 
+    def _set_enabled(self, name: str, enabled: bool) -> None:
+        """Enable or disable a single component and refresh its table row."""
+        comp = self._topology.components.get(name)
+        if comp is None:
+            return
+        comp.enabled = enabled
+        table = self.query_one("#topo-table", DataTable)
+        enabled_str = "✔ yes" if comp.enabled else "✘ no"
+        try:
+            table.update_cell(name, self._enabled_col, enabled_str)
+        except Exception:
+            pass  # row may not exist yet if catalog entry isn't in topology
+
     def _toggle_row(self, row_key) -> None:
-        """Toggle enabled state for a row."""
+        """Toggle a component; auto-enable its full dependency chain when turning on."""
+        from sigmond.catalog import transitive_requires
         name = row_key.value if hasattr(row_key, 'value') else row_key
         comp = self._topology.components.get(name)
         if comp is None:
             return
-        comp.enabled = not comp.enabled
-        table = self.query_one("#topo-table", DataTable)
-        enabled_str = "✔ yes" if comp.enabled else "✘ no"
-        table.update_cell(row_key, self._enabled_col, enabled_str)
-        self.query_one("#topo-status", Static).update("(unsaved changes)")
+
+        turning_on = not comp.enabled
+        self._set_enabled(name, turning_on)
+
+        auto_enabled: list[str] = []
+        if turning_on and self._catalog:
+            for dep in transitive_requires(name, self._catalog):
+                dep_comp = self._topology.components.get(dep)
+                if dep_comp is not None and not dep_comp.enabled:
+                    self._set_enabled(dep, True)
+                    auto_enabled.append(dep)
+
+        if auto_enabled:
+            msg = f"(unsaved changes — also enabled: {', '.join(auto_enabled)})"
+        else:
+            msg = "(unsaved changes)"
+        self.query_one("#topo-status", Static).update(msg)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Toggle on Enter key or click on the already-highlighted row."""

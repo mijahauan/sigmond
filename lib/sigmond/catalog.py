@@ -148,6 +148,39 @@ def get_entry(
     return entries.get(canonical)
 
 
+def transitive_requires(
+    name: str,
+    catalog: dict[str, 'CatalogEntry'],
+) -> list[str]:
+    """Return all transitive component dependencies of *name* in install order.
+
+    Uses depth-first traversal with cycle detection.  The returned list is
+    ordered so that every dependency appears before the components that need it
+    (i.e. safe install order), and *name* itself is excluded.
+    """
+    ordered: list[str] = []
+    visited: set[str] = set()
+
+    def _visit(comp: str) -> None:
+        if comp in visited:
+            return
+        visited.add(comp)
+        entry = get_entry(comp, catalog)
+        if entry is None:
+            return
+        for dep in entry.requires:
+            _visit(dep)
+        if comp != name:
+            ordered.append(comp)
+
+    entry = get_entry(name, catalog)
+    if entry:
+        for dep in entry.requires:
+            _visit(dep)
+
+    return ordered
+
+
 def next_steps(
     enabled_components: list[str],
     catalog: dict[str, 'CatalogEntry'],
@@ -161,11 +194,12 @@ def next_steps(
 
     Checks two things per enabled component:
     1. Is it installed on disk?  If not → suggest smd install.
-    2. Are all its declared requires enabled?  If not → suggest enabling.
+    2. Are all transitive dependencies enabled?  If not → suggest enabling.
+       Missing deps of missing deps are surfaced immediately, not iteratively.
     """
     enabled_set = set(enabled_components)
     items: list[tuple[str, str, str]] = []
-    seen: set[str] = set()
+    seen_dep: set[tuple[str, str]] = set()
 
     for comp in sorted(enabled_set):
         entry = get_entry(comp, catalog)
@@ -175,11 +209,11 @@ def next_steps(
         if not entry.is_installed():
             items.append(('install', comp, f'sudo smd install {comp}'))
 
-        for dep in entry.requires:
+        for dep in transitive_requires(comp, catalog):
             key = (comp, dep)
-            if key in seen:
+            if key in seen_dep:
                 continue
-            seen.add(key)
+            seen_dep.add(key)
             if dep not in enabled_set:
                 dep_entry = catalog.get(dep)
                 dep_desc = dep_entry.description if dep_entry else dep
