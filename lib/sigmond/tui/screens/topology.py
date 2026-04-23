@@ -64,22 +64,30 @@ class TopologyScreen(Vertical):
             desc = comp.description or ""
             if not desc and name in self._catalog:
                 desc = self._catalog[name].description
-            enabled_str = "\u2714 yes" if comp.enabled else "\u2718 no"
+            enabled_str = "✔ yes" if comp.enabled else "✘ no"
             managed_str = "yes" if comp.managed else "no"
             table.add_row(name, enabled_str, managed_str, desc, key=name)
 
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Toggle enabled state on row selection."""
-        name = event.row_key.value
+    def _toggle_row(self, row_key) -> None:
+        """Toggle enabled state for a row."""
+        name = row_key.value if hasattr(row_key, 'value') else row_key
         comp = self._topology.components.get(name)
         if comp is None:
             return
         comp.enabled = not comp.enabled
-        # Update the table cell.
         table = self.query_one("#topo-table", DataTable)
-        enabled_str = "\u2714 yes" if comp.enabled else "\u2718 no"
+        enabled_str = "✔ yes" if comp.enabled else "✘ no"
         table.update_cell(name, "Enabled", enabled_str)
         self.query_one("#topo-status", Static).update("(unsaved changes)")
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Toggle on Enter key."""
+        self._toggle_row(event.row_key)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Toggle on mouse click."""
+        if event.row_key is not None:
+            self._toggle_row(event.row_key)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "topo-save":
