@@ -205,6 +205,11 @@ sudo smd install wsprdaemon-client
 sudo smd install
 ```
 
+> **Note on first-run timing:** The first `smd install` run will spend
+> 10–30 minutes running `fftwf-wisdom` to precompute FFT plans for all the
+> sample rates ka9q-radio supports. This is a one-time operation; subsequent
+> `smd install` runs skip it because the wisdom file is cached.
+
 ---
 
 ## 7. Topology Reference
@@ -257,6 +262,22 @@ enabled = true
 | 2 | `ka9q-python` sibling repo not cloned before running `install.sh` | Clone `ka9q-python` alongside `sigmond` before running installer |
 | 3 | `install.sh` fails on re-run: `uv venv` won't overwrite existing venv | Added `--clear` flag to `uv venv` and `python -m venv` calls in `_venv_create()` |
 | 4 | `/usr/local/sbin` not in default PATH on Debian 13 | Add `export PATH="$PATH:/usr/local/sbin"` to `~/.bashrc` |
+| 5 | TUI topology table: mouse click doesn't toggle rows | Fixed: use `cursor_type="row"` + `RowSelected` event; `RowHighlighted` fires on arrow-key navigation too |
+| 6 | TUI `CellDoesNotExist` crash on second click | Fixed: capture `ColumnKey` from `add_columns()` return value and pass key (not label string) to `update_cell()` |
+| 7 | `ka9q-web` and `radiod` enabled=True by default in topology | Fixed `_DEFAULT_COMPONENTS` to start all components as `enabled=False` |
+| 8 | `'rac'` vs `'wd-rac'` naming mismatch between topology and catalog | Renamed `'rac'` to `'wd-rac'` in `_DEFAULT_COMPONENTS` |
+| 9 | `ka9q-python` not visible in topology/catalog | Added as `kind = "library"` catalog entry with `requires = []` |
+| 10 | Cascade-disable broken: shared deps (e.g. `radiod`) not removed when last client disabled | Fixed: iterate `reversed(transitive_requires(...))` to process deepest dependents first, removing them from `enabled_now` before checking shared deps |
+| 11 | `ka9q-update` not found, or radiod cloned to wrong directory | `smd install` now passes `/opt/git` as target dir to `install-ka9q.sh` |
+| 12 | `radio` group missing on fresh Debian 13; `chown: invalid group: 'wsprdaemon:radio'` | `sudo groupadd radio && sudo usermod -aG radio wsprdaemon` before installing wsprdaemon-client. Bug in `wsprdaemon-client/install.sh` (should create group before using it) |
+| 13 | `wireshark-common` debconf interactive prompt hangs `ka9q-update` apt install | Pre-answer: `echo "wireshark-common wireshark-common/install-setuid boolean false" \| sudo debconf-set-selections`, then set `DEBIAN_FRONTEND=noninteractive` |
+| 14 | `ka9q-radio` cloned to sigmond source dir instead of `/opt/git/ka9q-radio` | Fixed in `bin/smd`: pass `/opt/git` as arg to `install-ka9q.sh` |
+| 15 | `ka9q-python` treated as "unknown" component during `smd install` | Fixed: `library`/`infra` entries without `install_script` are silently skipped (handled by sigmond venv) |
+| 16 | `deps.conf not found at /home/wsprdaemon/...` error on fresh install | Fixed: `_load_deps_conf()` falls back to `/opt/git/wsprdaemon-client/deps.conf`; also updated `_DEFAULT_CLIENT_DIR` |
+| 17 | `ka9q-python` reinstalled from deps.conf even though already catalog-managed | Fixed: skip pypi deps.conf entries whose name matches a catalog entry |
+| 18 | `ka9q-update/install-ka9q.sh` fails on re-run: `git pull` on detached HEAD | Fixed in `install-ka9q.sh`: check out main/master branch before pulling |
+| 19 | `install-ka9q.sh` exits with code 1 when stdin is not a TTY (`read -p` returns EOF with `set -e`) | Fixed: add `\|\| true` to both `read -p` calls in `install-ka9q.sh` |
+| 20 | `fftwf-wisdom` takes 10–30 minutes during first `smd install` | Expected behavior; runs once. Second `smd install` is fast because wisdom is cached |
 
 ---
 
