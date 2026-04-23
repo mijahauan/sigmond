@@ -41,11 +41,19 @@ class CatalogEntry:
     def is_installed(self) -> bool:
         """Best-effort check that this entry is installed on the local host.
 
-        Primary: repo cloned to /opt/git/<name> (installer always uses this path).
+        Primary: repo cloned to /opt/git/<name> (production install path).
+        Library kind: also checks the dev sibling location ~/ka9q-python etc.
         Fallback: install_script exists, or binary found in PATH.
         """
         if (Path('/opt/git') / self.name).exists():
             return True
+        # Library packages may live as dev siblings of the sigmond repo.
+        if self.kind == 'library':
+            import os
+            home = Path(os.path.expanduser('~'))
+            for candidate in (home / self.name, Path('/opt') / self.name):
+                if candidate.exists():
+                    return True
         if self.install_script:
             return Path(self.install_script).exists()
         return shutil.which(self.name) is not None

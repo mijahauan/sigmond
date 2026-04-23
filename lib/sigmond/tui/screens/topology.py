@@ -89,7 +89,12 @@ class TopologyScreen(Vertical):
             pass  # row may not exist yet if catalog entry isn't in topology
 
     def _toggle_row(self, row_key) -> None:
-        """Toggle a component; auto-enable its full dependency chain when turning on."""
+        """Toggle a component with full cascade logic.
+
+        Turning ON:  auto-enable every transitive dependency.
+        Turning OFF: auto-disable any dep that is now orphaned — i.e. no
+                     remaining enabled component requires it.
+        """
         from sigmond.catalog import transitive_requires
         name = row_key.value if hasattr(row_key, 'value') else row_key
         comp = self._topology.components.get(name)
@@ -99,18 +104,40 @@ class TopologyScreen(Vertical):
         turning_on = not comp.enabled
         self._set_enabled(name, turning_on)
 
-        auto_enabled: list[str] = []
         if turning_on and self._catalog:
+            auto_enabled: list[str] = []
             for dep in transitive_requires(name, self._catalog):
                 dep_comp = self._topology.components.get(dep)
                 if dep_comp is not None and not dep_comp.enabled:
                     self._set_enabled(dep, True)
                     auto_enabled.append(dep)
+            msg = (f"(unsaved — also enabled: {', '.join(auto_enabled)})"
+                   if auto_enabled else "(unsaved changes)")
 
-        if auto_enabled:
-            msg = f"(unsaved changes — also enabled: {', '.join(auto_enabled)})"
+        elif not turning_on and self._catalog:
+            # Collect the enabled set after this disable (name is already off).
+            enabled_now = {n for n, c in self._topology.components.items() if c.enabled}
+            auto_disabled: list[str] = []
+            for dep in transitive_requires(name, self._catalog):
+                dep_comp = self._topology.components.get(dep)
+                if dep_comp is None or not dep_comp.enabled:
+                    continue
+                # Keep the dep if any currently-enabled component still needs it.
+                still_needed = any(
+                    dep in transitive_requires(other, self._catalog)
+                    for other in enabled_now
+                    if other != dep
+                )
+                if not still_needed:
+                    self._set_enabled(dep, False)
+                    auto_disabled.append(dep)
+                    enabled_now.discard(dep)
+            msg = (f"(unsaved — also disabled: {', '.join(auto_disabled)})"
+                   if auto_disabled else "(unsaved changes)")
+
         else:
             msg = "(unsaved changes)"
+
         self.query_one("#topo-status", Static).update(msg)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
