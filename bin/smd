@@ -1016,9 +1016,12 @@ def _install_full_suite(args) -> int:
     for comp in unknown:
         _warn(f'unknown:      {comp} (not in catalog, skipping)')
 
-    if not catalog_queue and not ka9q_update_needed:
+    wd_rac_needed = 'wd-rac' in components
+    if not catalog_queue and not ka9q_update_needed and not wd_rac_needed:
         _warn('nothing to install')
         return 0
+    if wd_rac_needed:
+        _info('wd-rac:       Remote Access Channel (frpc tunnel)')
 
     if dry_run:
         print('\n(dry-run mode — no changes will be made)')

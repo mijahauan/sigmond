@@ -30,6 +30,21 @@ def clone_repo(
     repo_dir = base / entry.name
     if repo_dir.exists():
         if pull_if_exists:
+            # If remote is SSH but catalog has HTTPS, normalize — root has no SSH host keys.
+            if entry.repo and entry.repo.startswith('https://'):
+                cur = subprocess.run(
+                    ['git', '-C', str(repo_dir), 'remote', 'get-url', 'origin'],
+                    capture_output=True, text=True,
+                )
+                cur_url = cur.stdout.strip()
+                if cur_url.startswith('git@'):
+                    https_url = entry.repo.rstrip('/')
+                    if not https_url.endswith('.git'):
+                        https_url += '.git'
+                    subprocess.run(
+                        ['git', '-C', str(repo_dir), 'remote', 'set-url', 'origin', https_url],
+                        capture_output=True, text=True,
+                    )
             r = subprocess.run(
                 ['git', '-C', str(repo_dir), 'pull', '--ff-only'],
                 capture_output=True, text=True,
