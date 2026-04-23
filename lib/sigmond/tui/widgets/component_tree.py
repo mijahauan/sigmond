@@ -38,6 +38,7 @@ class ComponentTree(Tree):
         configure.add_leaf("\u2630 Topology",     data={"screen": "topology"})
         configure.add_leaf("\u2699 CPU affinity", data={"screen": "cpu_affinity"})
         configure.add_leaf("\u21f5 CPU frequency", data={"screen": "cpu_freq"})
+        configure.add_leaf("\u21c6 RAC tunnel",    data={"screen": "rac"})
         configure.add_leaf("\u2193 Backup",        data={"screen": "backup"})
         configure.add_leaf("\u2191 Restore",       data={"screen": "restore"})
 
@@ -76,6 +77,8 @@ class ComponentTree(Tree):
             self.app.action_show_install()
         elif screen == "update":
             self.app.action_show_update()
+        elif screen == "rac":
+            self.app.action_show_rac()
         elif screen == "backup":
             self.app.action_show_backup()
         elif screen == "restore":
