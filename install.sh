@@ -211,9 +211,9 @@ fi
 _venv_create() {
     local target="$1"
     if [[ -n "$UV" ]]; then
-        $SUDO "$UV" venv --python "$PYTHON3" "$target"
+        $SUDO "$UV" venv --python "$PYTHON3" --clear "$target"
     else
-        $SUDO "$PYTHON3" -m venv "$target"
+        $SUDO "$PYTHON3" -m venv --clear "$target"
         $SUDO "$target/bin/pip" install --quiet --upgrade pip
     fi
 }
