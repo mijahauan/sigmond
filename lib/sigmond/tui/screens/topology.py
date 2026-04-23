@@ -118,7 +118,10 @@ class TopologyScreen(Vertical):
             # Collect the enabled set after this disable (name is already off).
             enabled_now = {n for n, c in self._topology.components.items() if c.enabled}
             auto_disabled: list[str] = []
-            for dep in transitive_requires(name, self._catalog):
+            # Reverse order: disable deepest dependents first so that when we
+            # check a shared dep (e.g. radiod), the components that needed it
+            # have already been removed from enabled_now.
+            for dep in reversed(transitive_requires(name, self._catalog)):
                 dep_comp = self._topology.components.get(dep)
                 if dep_comp is None or not dep_comp.enabled:
                     continue
