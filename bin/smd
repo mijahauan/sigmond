@@ -696,7 +696,7 @@ WantedBy=multi-user.target
     return True
 
 
-def _install_wd_rac(topology: dict, dry_run: bool = False) -> bool:
+def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False) -> bool:
     """Full wd-rac install: frpc binary + frpc.ini + systemd service."""
     rac_id, rac_number = _read_rac_topology(topology)
 
@@ -710,10 +710,30 @@ def _install_wd_rac(topology: dict, dry_run: bool = False) -> bool:
             rac_number = detected_num
             _info(f'wd-rac: rac_number auto-detected from wsprdaemon.conf: {rac_number}')
 
+    # Interactive prompt when still missing and running in a real terminal.
+    if (not rac_id or rac_number < 0) and not yes and sys.stdin.isatty():
+        import readline  # noqa: F401 — enables line editing on input()
+        print()
+        print('  wd-rac needs two values from the RAC administrator:')
+        if not rac_id:
+            try:
+                val = input('  RAC ID   (e.g. AI6VN-0, leave blank to skip): ').strip()
+                if val:
+                    rac_id = val
+            except (EOFError, KeyboardInterrupt):
+                pass
+        if rac_number < 0:
+            try:
+                val = input('  RAC number (integer from admin email, leave blank to skip): ').strip()
+                if val:
+                    rac_number = int(val)
+            except (EOFError, KeyboardInterrupt, ValueError):
+                pass
+
     if not rac_id or rac_number < 0:
-        _warn('wd-rac: rac_id or rac_number not set — '
-              'configure via: smd tui  (RAC screen)  or edit [component.wd-rac] in topology.toml')
-        _warn('wd-rac: frpc binary will be installed but tunnel not started')
+        _warn('wd-rac: rac_id or rac_number not set — tunnel will not be started')
+        _warn('  To configure: run  smd tui  and press  a  (RAC screen)')
+        _warn('  Or:           sudo smd install --components wd-rac  (prompts interactively)')
 
     ok = True
     ok = _install_frpc(dry_run) and ok
@@ -907,6 +927,14 @@ def _install_single_client(args) -> int:
         return 1
 
     if not entry.install_script:
+        # wd-rac is handled natively (frpc binary + ini + service).
+        if entry.name == 'wd-rac':
+            if _need_root('install'):
+                return 1
+            _netdiag_auto_refresh('install')
+            _heading('wd-rac (Remote Access Channel)')
+            topology = _load_topology(TOPOLOGY_PATH)
+            return 0 if _install_wd_rac(topology, dry_run, yes=yes) else 1
         _err(f"'{entry.name}' has no install_script in the catalog")
         if entry.name in ('radiod', 'ka9q-web'):
             _info(f"radiod/ka9q-web are built via ka9q-update; use: smd install  (full suite)")
@@ -1105,7 +1133,7 @@ def _install_full_suite(args) -> int:
     # --- 5. wd-rac (frpc tunnel) ---
     if 'wd-rac' in components:
         _heading('wd-rac (Remote Access Channel)')
-        if not _install_wd_rac(topology, dry_run):
+        if not _install_wd_rac(topology, dry_run, yes=yes):
             errors += 1
 
     # --- Summary ---
