@@ -112,8 +112,12 @@ BANNER = r"""
 def _run(cmd: list, *, cwd=None, capture=True, sudo=False) -> subprocess.CompletedProcess:
     if sudo and os.geteuid() != 0:
         cmd = ['sudo'] + cmd
+    # When not capturing output, redirect stdin from /dev/null so interactive
+    # prompts (read -p) in sub-scripts return immediately rather than hanging.
+    stdin_arg = subprocess.DEVNULL if not capture else None
     return subprocess.run(cmd, cwd=cwd,
-                          capture_output=capture, text=True)
+                          capture_output=capture, text=True,
+                          stdin=stdin_arg)
 
 
 def _ok(msg):   print(f'  \033[32m✓\033[0m  {msg}')
@@ -232,13 +236,14 @@ BUILD_STEPS = {
 
 
 def _load_deps_conf(client_dir: Path) -> configparser.ConfigParser:
-    deps_file = client_dir / 'deps.conf'
-    if not deps_file.exists():
-        _err(f'deps.conf not found at {deps_file}')
-        return None
-    cfg = configparser.ConfigParser()
-    cfg.read(deps_file)
-    return cfg
+    candidates = [client_dir / 'deps.conf', Path('/opt/git/wsprdaemon-client/deps.conf')]
+    for deps_file in candidates:
+        if deps_file.exists():
+            cfg = configparser.ConfigParser()
+            cfg.read(deps_file)
+            return cfg
+    _err(f'deps.conf not found at {candidates[0]}')
+    return None
 
 
 def _ensure_venv(venv_dir: Path) -> bool:
@@ -931,6 +936,9 @@ def _install_full_suite(args) -> int:
             catalog_queue.append(entry)
         elif entry.name in ('radiod', 'ka9q-web'):
             ka9q_update_needed = True
+        elif entry.kind in ('library', 'infra') and not entry.install_script:
+            # Handled by sigmond itself (e.g. ka9q-python via venv, wd-rac via _install_frpc).
+            pass
         else:
             unknown.append(comp)
 
@@ -1018,6 +1026,15 @@ def _install_full_suite(args) -> int:
                             if build_fn and not build_fn(Path(install_to)):
                                 errors += 1
                 elif dep_type == 'pypi':
+                    # Skip pypi deps that are catalog-managed (already installed via smd catalog path).
+                    from sigmond.catalog import load_catalog as _lc, get_entry as _ge
+                    try:
+                        _cat = _lc()
+                        if _ge(dep, _cat) is not None:
+                            _ok(f'{dep}: managed by sigmond catalog — skipping deps.conf install')
+                            continue
+                    except Exception:
+                        pass
                     if not _install_pypi_dep(dep, dcfg, venv_dir):
                         errors += 1
                 else:
@@ -1061,8 +1078,8 @@ def _install_via_ka9q_update() -> bool:
         _err('ka9q-update not found — install it to /opt/git/ka9q-update')
         _info('  git clone https://github.com/mijahauan/ka9q-update /opt/git/ka9q-update')
         return False
-    _info(f'running {script} ...')
-    r = _run([str(script)], capture=False, sudo=True)
+    _info(f'running {script} /opt/git ...')
+    r = _run([str(script), '/opt/git'], capture=False, sudo=True)
     if r.returncode != 0:
         _err('ka9q-update install-ka9q.sh failed')
         return False

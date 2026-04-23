@@ -67,7 +67,7 @@ _DEFAULT_COMPONENTS = {
     'wd-rac':             Component('wd-rac',             enabled=False, managed=False, description='Remote access channel (frpc)'),
 }
 
-_DEFAULT_CLIENT_DIR = Path('/home/wsprdaemon/wsprdaemon-client')
+_DEFAULT_CLIENT_DIR = Path('/opt/git/wsprdaemon-client')
 _DEFAULT_SMD_BIN    = Path('/usr/local/sbin/smd')
 
 
