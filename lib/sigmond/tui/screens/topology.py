@@ -40,11 +40,11 @@ class TopologyScreen(Vertical):
 
     def compose(self):
         yield Static("Topology — enabled components", id="topo-title")
-        table = DataTable(id="topo-table")
+        table = DataTable(id="topo-table", cursor_type="row")
         table.add_columns("Component", "Enabled", "Managed", "Description")
         yield table
         yield Button("Save topology.toml", id="topo-save", variant="primary")
-        yield Static("", id="topo-status")
+        yield Static("Click a row to select it, then click again or press Enter to toggle. Save when done.", id="topo-status")
 
     def on_mount(self) -> None:
         # Merge catalog entries not yet in topology so new clients are visible.
@@ -81,13 +81,8 @@ class TopologyScreen(Vertical):
         self.query_one("#topo-status", Static).update("(unsaved changes)")
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Toggle on Enter key."""
+        """Toggle on Enter key or click on the already-highlighted row."""
         self._toggle_row(event.row_key)
-
-    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        """Toggle on mouse click."""
-        if event.row_key is not None:
-            self._toggle_row(event.row_key)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "topo-save":
