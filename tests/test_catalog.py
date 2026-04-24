@@ -14,6 +14,7 @@ from sigmond.catalog import (
     find_client_binary,
     get_entry,
     load_catalog,
+    next_steps,
     resolve_name,
 )
 
@@ -97,6 +98,29 @@ class TestIsInstalled:
         assert entry.is_installed() is True
         entry2 = CatalogEntry(name='nope', kind='server', description='', repo='')
         assert entry2.is_installed() is False
+
+    def test_library_importability_counts_as_installed(self):
+        # `json` is always importable from stdlib; synthesize a library
+        # entry whose derived import name lands on it and confirm
+        # is_installed() returns True without filesystem presence.
+        entry = CatalogEntry(
+            name='json-python', kind='library', description='', repo='',
+        )
+        assert entry.is_installed() is True
+
+    def test_library_without_import_is_not_installed(self, monkeypatch):
+        import sigmond.catalog as cat
+        # Strip all filesystem and which fallbacks so only the importability
+        # branch decides.
+        import os as _os
+        monkeypatch.setattr(_os.path, 'lexists', lambda p: False)
+        monkeypatch.setattr(_os.path, 'exists', lambda p: False)
+        monkeypatch.setattr(cat.shutil, 'which', lambda n: None)
+        entry = CatalogEntry(
+            name='totally-not-a-real-pkg-zzz', kind='library',
+            description='', repo='',
+        )
+        assert entry.is_installed() is False
 
 
 class TestAliasResolution:
@@ -191,3 +215,74 @@ class TestFindCatalogFile:
         paths = DEFAULT_CATALOG_PATHS
         assert paths[0] == Path('/etc/sigmond/catalog.toml')
         assert paths[1].name == 'catalog.toml'
+
+
+class TestNextSteps:
+    """next_steps() must never tell the operator to 'enable X in
+    topology' when X is a Python library (kind='library').  Libraries
+    are pip-installed into the sigmond venv, not topology components."""
+
+    def _catalog(self):
+        return {
+            'ka9q-python': CatalogEntry(
+                name='ka9q-python', kind='library',
+                description='Python interface for ka9q-radio',
+                repo='', requires=(),
+            ),
+            'hf-timestd': CatalogEntry(
+                name='hf-timestd', kind='client', description='',
+                repo='', requires=('ka9q-python', 'radiod'),
+                install_script=str(Path(__file__)),  # always exists
+            ),
+            'radiod': CatalogEntry(
+                name='radiod', kind='server', description='',
+                repo='', requires=(),
+                install_script=str(Path(__file__)),
+            ),
+        }
+
+    def test_importable_library_dep_is_silent(self, monkeypatch):
+        # ka9q-python is aliased to a stdlib name via the derivation
+        # rule; patch find_spec to always resolve so we're not depending
+        # on ka9q being installed in the test env.
+        import sigmond.catalog as cat
+        import importlib.util as _iu
+        monkeypatch.setattr(_iu, 'find_spec',
+                            lambda n: object())  # any non-None spec
+        cat_obj = self._catalog()
+        items = next_steps(['hf-timestd', 'radiod'], cat_obj)
+        # No 'enable_dep' item should mention ka9q-python — it's a
+        # library and it's importable.
+        for kind, subject, action in items:
+            assert 'ka9q-python' not in action, \
+                f'unexpected action mentioning ka9q-python: {items!r}'
+            assert kind != 'enable_dep' or 'ka9q-python' not in subject, \
+                f'library surfaced as enable_dep: {items!r}'
+
+    def test_missing_library_surfaces_install_hint_once(self, monkeypatch):
+        import importlib.util as _iu
+        monkeypatch.setattr(_iu, 'find_spec', lambda n: None)
+        import sigmond.catalog as cat
+        import os as _os
+        monkeypatch.setattr(_os.path, 'lexists', lambda p: False)
+        cat_obj = self._catalog()
+        # hf-timestd AND radiod both transitively require ka9q-python;
+        # we want exactly one install hint for the library even so.
+        items = next_steps(['hf-timestd', 'radiod'], cat_obj)
+        lib_installs = [
+            (k, s, a) for (k, s, a) in items
+            if k == 'install' and s == 'ka9q-python'
+        ]
+        assert len(lib_installs) == 1, items
+        assert 'sudo smd install ka9q-python' in lib_installs[0][2]
+
+    def test_non_library_dep_still_flagged_for_topology(self):
+        # hf-timestd requires radiod (kind=server).  If radiod is not
+        # enabled, we should still say "enable radiod in topology".
+        cat_obj = self._catalog()
+        items = next_steps(['hf-timestd'], cat_obj)
+        enable_actions = [
+            a for (k, s, a) in items if k == 'enable_dep'
+        ]
+        assert any('enable radiod in topology' in a for a in enable_actions), \
+            items

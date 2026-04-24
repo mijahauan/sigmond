@@ -42,7 +42,9 @@ class CatalogEntry:
         """Best-effort check that this entry is installed on the local host.
 
         Primary: repo cloned to /opt/git/<name> (production install path).
-        Library kind: also checks the dev sibling location ~/ka9q-python etc.
+        Library kind: also importability from the current Python (the
+                      authoritative signal for Python deps) and the dev
+                      sibling locations ~/<name> and /opt/<name>.
         Fallback: install_script exists, or binary found in PATH.
         """
         # Use lexists rather than exists so a symlink at /opt/git/<name>
@@ -55,9 +57,19 @@ class CatalogEntry:
         import os
         if os.path.lexists(Path('/opt/git') / self.name):
             return True
-        # Library packages may live as dev siblings of the sigmond repo.
         if self.kind == 'library':
-            import os
+            # Importability from the current Python wins: sigmond runs
+            # inside the venv that clients will actually import from,
+            # so if `find_spec` resolves, the dep is usable regardless
+            # of where its source lives.
+            import importlib.util
+            import_name = self.name.removesuffix('-python').replace('-', '_')
+            try:
+                if importlib.util.find_spec(import_name) is not None:
+                    return True
+            except (ImportError, ValueError):
+                pass
+            # Dev siblings: `git clone` location before packaging.
             home = Path(os.path.expanduser('~'))
             for candidate in (home / self.name, Path('/opt') / self.name):
                 if candidate.exists():
@@ -216,6 +228,7 @@ def next_steps(
     enabled_set = set(enabled_components)
     items: list[tuple[str, str, str]] = []
     seen_dep: set[tuple[str, str]] = set()
+    seen_lib_install: set[str] = set()
 
     for comp in sorted(enabled_set):
         entry = get_entry(comp, catalog)
@@ -230,8 +243,22 @@ def next_steps(
             if key in seen_dep:
                 continue
             seen_dep.add(key)
+
+            dep_entry = catalog.get(dep)
+
+            # Libraries (e.g. ka9q-python) are Python packages installed
+            # into the sigmond venv; they don't belong in topology.toml.
+            # Surface an install hint only if the current Python can't
+            # import them; otherwise the dep is satisfied.
+            if dep_entry is not None and dep_entry.kind == 'library':
+                if (not dep_entry.is_installed()
+                        and dep not in seen_lib_install):
+                    seen_lib_install.add(dep)
+                    items.append(('install', dep,
+                                  f'sudo smd install {dep}'))
+                continue
+
             if dep not in enabled_set:
-                dep_entry = catalog.get(dep)
                 dep_desc = dep_entry.description if dep_entry else dep
                 items.append((
                     'enable_dep',
