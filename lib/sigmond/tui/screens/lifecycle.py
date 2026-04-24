@@ -22,6 +22,7 @@ from textual.widgets import Button, DataTable, Static
 from textual.worker import Worker, WorkerState
 
 from ..mutation import confirm_and_run
+from .overview import _component_status
 
 
 def _smd_binary() -> str:
@@ -103,17 +104,6 @@ def _gather() -> _LifecycleData:
     return data
 
 
-def _state_badge(state: str) -> str:
-    if state == 'active':
-        return '[green]✔ active[/]'
-    if state == 'inactive':
-        return '[dim]○ inactive[/]'
-    if state == 'failed':
-        return '[red]✘ failed[/]'
-    if state in ('activating', 'reloading', 'deactivating'):
-        return f'[yellow]▶ {state}[/]'
-    return f'[yellow]? {state}[/]'
-
 
 class LifecycleScreen(Vertical):
     """Start / stop / restart managed services."""
@@ -170,7 +160,7 @@ class LifecycleScreen(Vertical):
             id="lc-hint")
 
         table = DataTable(id="lc-table", cursor_type="row", zebra_stripes=True)
-        table.add_columns("Component", "Unit", "State")
+        table.add_columns("Component", "Status")
         yield table
 
         yield Static("", id="lc-last")
@@ -238,24 +228,14 @@ class LifecycleScreen(Vertical):
         table.clear()
 
         if not data.components:
-            table.add_row("[dim](none)[/]", "[dim]no enabled components[/]", "")
+            table.add_row("[dim](none)[/]", "[dim]no enabled components[/]")
             self._update_button_labels()
             return
 
         for comp in sorted(data.components):
             units = data.units_by_component.get(comp, [])
-            if not units:
-                table.add_row(comp, "[dim](not yet configured)[/]", "", key=comp)
-                continue
-            for i, u in enumerate(units):
-                state = data.unit_states.get(u.unit, 'unknown')
-                orphan = "  [yellow][orphaned][/]" if u.orphaned else ""
-                table.add_row(
-                    comp,
-                    f"{u.unit}{orphan}",
-                    _state_badge(state),
-                    key=f"{comp}__{i}",
-                )
+            status = _component_status(units, data.unit_states)
+            table.add_row(comp, status, key=comp)
 
         self._update_button_labels()
 
