@@ -45,7 +45,15 @@ class CatalogEntry:
         Library kind: also checks the dev sibling location ~/ka9q-python etc.
         Fallback: install_script exists, or binary found in PATH.
         """
-        if (Path('/opt/git') / self.name).exists():
+        # Use lexists rather than exists so a symlink at /opt/git/<name>
+        # pointing at a target the current user can't traverse (e.g.
+        # /opt/git/wsprdaemon-client -> /home/wsprdaemon/wsprdaemon-client,
+        # where /home/wsprdaemon is mode 700) still registers as
+        # installed. Path.exists() would raise PermissionError from stat()
+        # and abort the whole `smd list --available` before the Infra
+        # section ever prints.
+        import os
+        if os.path.lexists(Path('/opt/git') / self.name):
             return True
         # Library packages may live as dev siblings of the sigmond repo.
         if self.kind == 'library':
