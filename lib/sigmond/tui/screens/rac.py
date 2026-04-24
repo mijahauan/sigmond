@@ -72,12 +72,22 @@ def _service_active() -> bool:
     return r.stdout.strip() == 'active'
 
 
+def _service_enabled() -> bool:
+    r = subprocess.run(
+        ['systemctl', 'is-enabled', 'wd-rac'],
+        capture_output=True, text=True,
+    )
+    return r.stdout.strip() == 'enabled'
+
+
 def _render_status() -> str:
     """Build a Rich-markup status string from live service + admin API data."""
     active = _service_active()
     if not active:
-        if not _FRPC_INI.exists():
+        if not _FRPC_CONFIG.exists() and not _FRPC_INI.exists():
             return "[dim]Not configured — fill in the fields above and press Apply.[/dim]"
+        if not _service_enabled():
+            return "[dim]○ wd-rac disabled (press Apply & enable to re-activate)[/dim]"
         return "[red]● wd-rac.service stopped[/red]"
 
     data = _frpc_admin_status()
@@ -124,8 +134,15 @@ class RacScreen(Vertical):
         width: 16;
         padding-top: 1;
     }
-    RacScreen #rac-apply {
+    RacScreen .button-row {
+        height: 3;
         margin-top: 1;
+    }
+    RacScreen #rac-apply {
+        width: auto;
+        margin-right: 2;
+    }
+    RacScreen #rac-disable {
         width: auto;
     }
     RacScreen #rac-result {
@@ -205,7 +222,9 @@ class RacScreen(Vertical):
                         id="rac-number-input")
 
         yield Static("", id="rac-result")
-        yield Button("Apply & enable", id="rac-apply", variant="primary")
+        with Horizontal(classes="button-row"):
+            yield Button("Apply & enable", id="rac-apply", variant="primary")
+            yield Button("Disable", id="rac-disable", variant="error")
 
         yield Static("Tunnel Status", classes="section-title")
         yield Static("", id="rac-status")
@@ -227,6 +246,8 @@ class RacScreen(Vertical):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == 'rac-apply':
             self._do_apply()
+        elif event.button.id == 'rac-disable':
+            self._do_disable()
 
     def _do_apply(self) -> None:
         rac_id         = self.query_one('#rac-id-input', Input).value.strip()
@@ -266,6 +287,69 @@ class RacScreen(Vertical):
             )
         # Refresh status immediately — service may have just restarted.
         self._refresh_status()
+
+    def _do_disable(self) -> None:
+        result_widget = self.query_one('#rac-result', Static)
+        result_widget.update("[dim]Disabling…[/dim]")
+        r = subprocess.run(
+            ['sudo', 'systemctl', 'disable', '--now', 'wd-rac'],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+        if r.returncode == 0:
+            result_widget.update("[yellow]○ wd-rac disabled and stopped.[/yellow]")
+        else:
+            result_widget.update(
+                f"[red]Disable failed:\n{(r.stderr or r.stdout)[-400:]}[/red]"
+            )
+        try:
+            self._set_topology_enabled(False)
+        except Exception:
+            pass
+        self._refresh_status()
+
+    def _set_topology_enabled(self, enabled: bool) -> None:
+        """Flip the enabled flag in topology.toml for wd-rac."""
+        import tomllib, tempfile
+        from ...paths import TOPOLOGY_PATH
+
+        raw: dict = {}
+        if TOPOLOGY_PATH.exists():
+            with open(TOPOLOGY_PATH, 'rb') as f:
+                raw = tomllib.load(f)
+
+        raw.setdefault('component', {}).setdefault('wd-rac', {})['enabled'] = enabled
+
+        lines = [
+            "# /etc/sigmond/topology.toml",
+            "# Managed by smd tui. Manual edits are fine too.",
+            "",
+        ]
+        for comp_name in sorted(raw.get('component', {})):
+            cfg = raw['component'][comp_name]
+            lines.append(f"[component.{comp_name}]")
+            lines.append(f'enabled = {"true" if cfg.get("enabled", False) else "false"}')
+            if not cfg.get('managed', True):
+                lines.append("managed = false")
+            if cfg.get('description'):
+                lines.append(f'description = "{cfg["description"]}"')
+            if comp_name == 'wd-rac':
+                if cfg.get('rac_id'):
+                    lines.append(f'rac_id = "{cfg["rac_id"]}"')
+                if cfg.get('rac_number') is not None:
+                    lines.append(f'rac_number = {cfg["rac_number"]}')
+            lines.append("")
+
+        content = "\n".join(lines) + "\n"
+        with tempfile.NamedTemporaryFile('w', suffix='.toml', delete=False) as tf:
+            tf.write(content)
+            tf_path = tf.name
+        try:
+            subprocess.run(
+                ['sudo', 'install', '-m', '644', tf_path, str(TOPOLOGY_PATH)],
+                check=True, stdin=subprocess.DEVNULL,
+            )
+        finally:
+            Path(tf_path).unlink(missing_ok=True)
 
     def _write_rac_to_topology(self, rac_id: str, rac_number: int) -> None:
         """Persist rac_id and rac_number into the wd-rac topology component."""
