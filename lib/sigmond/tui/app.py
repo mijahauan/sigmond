@@ -5,13 +5,77 @@ Center: active screen (topology editor, validate, etc.)
 Right:  contextual help and live system state
 """
 
+from pathlib import Path
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Footer, Header
+from textual.worker import WorkerState
 
 from .widgets.component_tree import ComponentTree
 from .widgets.context_panel import ContextPanel
+from .widgets.panel_splitter import PanelSplitter
+
+
+def _sigmond_version_string() -> str:
+    """Return a short version string like 'v0.2.0-dev (#123)' for the header."""
+    import subprocess
+    try:
+        from sigmond import __version__ as _ver
+    except Exception:
+        _ver = "?"
+    repo = Path(__file__).resolve().parent.parent.parent.parent
+    try:
+        r = subprocess.run(
+            ['git', '-C', str(repo), 'rev-list', '--count', 'HEAD'],
+            capture_output=True, text=True, timeout=3)
+        idx = r.stdout.strip()
+        if idx:
+            return f"v{_ver} (#{idx})"
+    except Exception:
+        pass
+    return f"v{_ver}"
+
+
+def _check_sigmond_version() -> dict:
+    """Worker: fetch origin and check how many commits HEAD is behind.
+
+    Returns a dict with keys: current, latest, behind (int), repo.
+    Returns {} on any failure (no .git, no network, etc.).
+    """
+    import os, subprocess
+
+    repo = Path(__file__).resolve().parent.parent.parent.parent
+    if not (repo / '.git').exists():
+        return {}
+
+    env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+    try:
+        idx_r = subprocess.run(
+            ['git', '-C', str(repo), 'rev-list', '--count', 'HEAD'],
+            capture_output=True, text=True, timeout=5)
+        current_idx = idx_r.stdout.strip()
+
+        subprocess.run(
+            ['git', '-C', str(repo), 'fetch', '--quiet', 'origin'],
+            capture_output=True, text=True, timeout=20, env=env)
+
+        behind_r = subprocess.run(
+            ['git', '-C', str(repo), 'rev-list', '--count', 'HEAD..origin/main'],
+            capture_output=True, text=True, timeout=5)
+        s = behind_r.stdout.strip()
+        behind = int(s) if behind_r.returncode == 0 and s.isdigit() else 0
+
+        latest_idx_r = subprocess.run(
+            ['git', '-C', str(repo), 'rev-list', '--count', 'origin/main'],
+            capture_output=True, text=True, timeout=5)
+        latest_idx = latest_idx_r.stdout.strip()
+
+        return {'current': current_idx, 'latest': latest_idx,
+                'behind': behind, 'repo': str(repo)}
+    except Exception:
+        return {}
 
 
 def _discover_radiod_from_config() -> tuple[str, str]:
@@ -47,15 +111,14 @@ class SigmondApp(App):
     """Dr. SigMonD TUI configurator."""
 
     TITLE = "Dr. SigMonD"
-    SUB_TITLE = "Signal Monitor Daemon — Configurator"
+    SUB_TITLE = "Signal Monitor Daemon — Install / Configure / Monitor"
 
     CSS = """
     #main {
         height: 1fr;
     }
     #left {
-        width: 24;
-        border-right: solid $primary-background;
+        width: 30;
         padding: 0 1;
     }
     #center {
@@ -66,8 +129,7 @@ class SigmondApp(App):
         height: auto;
     }
     #right {
-        width: 32;
-        border-left: solid $primary-background;
+        width: 36;
         padding: 0 1;
     }
     """
@@ -88,13 +150,78 @@ class SigmondApp(App):
         yield Header()
         with Horizontal(id="main"):
             yield ComponentTree(id="left")
+            yield PanelSplitter(target_id="left", sign=1, min_width=20)
             yield VerticalScroll(id="center")
+            yield PanelSplitter(target_id="right", sign=-1, min_width=24)
             yield ContextPanel(id="right")
         yield Footer()
 
     def on_mount(self) -> None:
+        self.sub_title = (
+            "Signal Monitor Daemon — Install / Configure / Monitor"
+            f"    {_sigmond_version_string()}"
+        )
         self._load_system_view()
         self.action_show_overview()
+        self.run_worker(_check_sigmond_version, thread=True,
+                        name="sigmond-version-check")
+
+    def on_worker_state_changed(self, event) -> None:
+        if event.worker.name != "sigmond-version-check":
+            return
+        if event.state != WorkerState.SUCCESS:
+            return
+        info = event.worker.result or {}
+        behind = info.get('behind', 0)
+        current = info.get('current', '')
+        ver_tag = f"v{__import__('sigmond').__version__} (#{current})" if current else f"v{__import__('sigmond').__version__}"
+        if behind > 0:
+            self.sub_title = (
+                "Signal Monitor Daemon — Install / Configure / Monitor"
+                f"    {ver_tag}  ⚠ {behind} update(s) available"
+            )
+            self._prompt_sigmond_update(info)
+        elif info:
+            self.sub_title = (
+                "Signal Monitor Daemon — Install / Configure / Monitor"
+                f"    {ver_tag}  ✔ up to date"
+            )
+
+    def _prompt_sigmond_update(self, info: dict) -> None:
+        """Show a modal if sigmond is behind origin/main."""
+        import subprocess as sp
+        from .mutation import ConfirmModal
+
+        behind  = info['behind']
+        current = info.get('current', '?')
+        latest  = info.get('latest', '?')
+        repo    = info.get('repo', '')
+
+        def _on_choice(do_update: bool) -> None:
+            if not do_update:
+                return
+            with self.suspend():
+                sp.run(['git', '-C', repo, 'pull', '--ff-only'], check=False)
+            self.notify(
+                "sigmond updated — please restart `smd tui` to run the new version.",
+                severity="information", timeout=6)
+            self.set_timer(4, self.exit)
+
+        self.push_screen(
+            ConfirmModal(
+                title="sigmond update available",
+                body=(
+                    f"sigmond is [bold]{behind} commit(s)[/] behind origin/main.\n\n"
+                    f"  Running:  [dim]#{current}[/]\n"
+                    f"  Latest:   [bold]#{latest}[/]\n\n"
+                    "Update now? sigmond will exit so you can restart with the new version.\n"
+                    "  [dim](choose Continue to skip and proceed as-is)[/]"
+                ),
+                yes_label="Update & Exit",
+                no_label="Continue",
+            ),
+            _on_choice,
+        )
 
     def _load_system_view(self) -> None:
         """Load topology, catalog, and coordination for all screens."""
@@ -121,6 +248,26 @@ class SigmondApp(App):
         # Populate the component tree.
         tree = self.query_one(ComponentTree)
         tree.populate(self.topology, self.catalog)
+
+    def action_show_components(self) -> None:
+        from .screens.components import ComponentsScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(ComponentsScreen(self.topology.components))
+
+        self.query_one(ContextPanel).show_help(
+            "Software versions",
+            "Every catalog component with its install status, "
+            "current git ref, and version policy.\n\n"
+            "Version policies:\n"
+            "  latest — always pull the newest commit\n"
+            "  ignore — skip during smd update\n"
+            "  <ref>  — pin to a specific commit / branch\n\n"
+            "Select a row to see the recent git history for that "
+            "component, then use the buttons to change its policy.\n\n"
+            "Changes are written to /etc/sigmond/topology.toml "
+            "(requires write permission — run sudo smd tui if needed).",
+        )
 
     def action_show_topology(self) -> None:
         from .screens.topology import TopologyScreen
@@ -365,7 +512,7 @@ class SigmondApp(App):
             "  RAC ID — your site name (defaults to first receiver call)\n"
             "  RAC number — integer assigned by the RAC admin (emailed)\n\n"
             "After pressing 'Apply & enable', sigmond downloads the frpc "
-            "binary, writes /etc/sigmond/frpc.ini, and starts wd-rac.service.\n\n"
+            "binary, writes /etc/sigmond/frpc.ini, and starts the tunnel service.\n\n"
             "Once running, an admin can SSH to this site via:\n"
             "  ssh -p <35800+n> wsprdaemon@vpn.wsprdaemon.org",
         )
@@ -444,12 +591,17 @@ class SigmondApp(App):
         from .screens.update import UpdateScreen
         center = self.query_one("#center")
         center.remove_children()
-        center.mount(UpdateScreen())
+        center.mount(UpdateScreen(self.topology.components))
 
         self.query_one(ContextPanel).show_help(
             "Update",
-            "Pulls the latest wsprdaemon-client and re-runs the "
-            "catalog install pass.\n\n"
-            "Equivalent to `sudo smd update`.  Running services may "
-            "restart as part of the re-apply.",
+            "Pull the latest code for every installed catalog component.\n\n"
+            "Update selected — pull one component by name.\n"
+            "Update all — pull all components whose policy is not 'ignore'.\n"
+            "Dry run — preview what would change without touching anything.\n\n"
+            "Version policies (set under Configure → Software versions):\n"
+            "  latest — always pull newest commit (default)\n"
+            "  ignore — skip this component during updates\n"
+            "  <ref>  — pin to a specific commit / branch / tag\n\n"
+            "Equivalent to `sudo smd update [--components <name>]`.",
         )

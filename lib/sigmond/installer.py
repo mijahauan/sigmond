@@ -16,43 +16,89 @@ from .catalog import CatalogEntry
 GIT_BASE = Path('/opt/git')
 
 
+def _normalize_remote_url(repo_dir: Path, https_url: str) -> None:
+    """Switch the origin remote to HTTPS if it's currently SSH.
+
+    Root typically has no SSH host keys, so HTTPS is safer for automated pulls.
+    """
+    cur = subprocess.run(
+        ['git', '-C', str(repo_dir), 'remote', 'get-url', 'origin'],
+        capture_output=True, text=True,
+    )
+    if cur.stdout.strip().startswith('git@'):
+        normalized = https_url.rstrip('/')
+        if not normalized.endswith('.git'):
+            normalized += '.git'
+        subprocess.run(
+            ['git', '-C', str(repo_dir), 'remote', 'set-url', 'origin', normalized],
+            capture_output=True, text=True,
+        )
+
+
+def git_head_ref(repo_dir: Path) -> str:
+    """Return a short human-readable ref for the current HEAD (e.g. 'main@abc1234')."""
+    branch = subprocess.run(
+        ['git', '-c', f'safe.directory={repo_dir}',
+         '-C', str(repo_dir), 'rev-parse', '--abbrev-ref', 'HEAD'],
+        capture_output=True, text=True,
+    )
+    sha = subprocess.run(
+        ['git', '-c', f'safe.directory={repo_dir}',
+         '-C', str(repo_dir), 'rev-parse', '--short', 'HEAD'],
+        capture_output=True, text=True,
+    )
+    b = branch.stdout.strip()
+    s = sha.stdout.strip()
+    if b and b != 'HEAD' and s:
+        return f'{b}@{s}'
+    return s or '?'
+
+
 def clone_repo(
     entry: CatalogEntry,
     *,
     base: Path = GIT_BASE,
     pull_if_exists: bool = False,
+    ref: Optional[str] = None,
 ) -> Path:
     """Clone or update a client repo.
 
+    If *ref* is given, fetch origin then check out that commit/branch/tag.
+    Otherwise pull --ff-only to advance to the latest upstream HEAD.
     Returns the repo directory path.
-    Raises RuntimeError on clone/pull failure.
+    Raises RuntimeError on clone/pull/checkout failure.
     """
     repo_dir = base / entry.name
     if repo_dir.exists():
-        if pull_if_exists:
-            # If remote is SSH but catalog has HTTPS, normalize — root has no SSH host keys.
+        if pull_if_exists or ref is not None:
             if entry.repo and entry.repo.startswith('https://'):
-                cur = subprocess.run(
-                    ['git', '-C', str(repo_dir), 'remote', 'get-url', 'origin'],
+                _normalize_remote_url(repo_dir, entry.repo)
+            if ref is not None:
+                r = subprocess.run(
+                    ['git', '-C', str(repo_dir), 'fetch', 'origin'],
                     capture_output=True, text=True,
                 )
-                cur_url = cur.stdout.strip()
-                if cur_url.startswith('git@'):
-                    https_url = entry.repo.rstrip('/')
-                    if not https_url.endswith('.git'):
-                        https_url += '.git'
-                    subprocess.run(
-                        ['git', '-C', str(repo_dir), 'remote', 'set-url', 'origin', https_url],
-                        capture_output=True, text=True,
+                if r.returncode != 0:
+                    raise RuntimeError(
+                        f"git fetch failed in {repo_dir}: {r.stderr.strip()}"
                     )
-            r = subprocess.run(
-                ['git', '-C', str(repo_dir), 'pull', '--ff-only'],
-                capture_output=True, text=True,
-            )
-            if r.returncode != 0:
-                raise RuntimeError(
-                    f"git pull failed in {repo_dir}: {r.stderr.strip()}"
+                r = subprocess.run(
+                    ['git', '-C', str(repo_dir), 'checkout', ref],
+                    capture_output=True, text=True,
                 )
+                if r.returncode != 0:
+                    raise RuntimeError(
+                        f"git checkout {ref!r} failed in {repo_dir}: {r.stderr.strip()}"
+                    )
+            else:
+                r = subprocess.run(
+                    ['git', '-C', str(repo_dir), 'pull', '--ff-only'],
+                    capture_output=True, text=True,
+                )
+                if r.returncode != 0:
+                    raise RuntimeError(
+                        f"git pull failed in {repo_dir}: {r.stderr.strip()}"
+                    )
         return repo_dir
 
     if not entry.repo:
@@ -67,6 +113,15 @@ def clone_repo(
         raise RuntimeError(
             f"git clone {entry.repo} failed: {r.stderr.strip()}"
         )
+    if ref is not None:
+        r = subprocess.run(
+            ['git', '-C', str(repo_dir), 'checkout', ref],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"git checkout {ref!r} failed after clone: {r.stderr.strip()}"
+            )
     return repo_dir
 
 

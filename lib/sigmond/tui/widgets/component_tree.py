@@ -35,13 +35,14 @@ class ComponentTree(Tree):
         self.root.add_leaf("\u25a3 Overview", data={"screen": "overview"})
 
         configure = self.root.add("Configure", expand=True)
-        configure.add_leaf("\u2630 Topology",     data={"screen": "topology"})
-        configure.add_leaf("\u2261 Config view",  data={"screen": "config_show"})
-        configure.add_leaf("\u2699 CPU affinity", data={"screen": "cpu_affinity"})
-        configure.add_leaf("\u21f5 CPU frequency", data={"screen": "cpu_freq"})
-        configure.add_leaf("\u21c6 RAC tunnel",    data={"screen": "rac"})
-        configure.add_leaf("\u2193 Backup",        data={"screen": "backup"})
-        configure.add_leaf("\u2191 Restore",       data={"screen": "restore"})
+        configure.add_leaf("\u2630 Topology",          data={"screen": "topology"})
+        configure.add_leaf("\u2691 Software versions", data={"screen": "components"})
+        configure.add_leaf("\u2261 Config view",       data={"screen": "config_show"})
+        configure.add_leaf("\u2699 CPU affinity",      data={"screen": "cpu_affinity"})
+        configure.add_leaf("\u21f5 CPU frequency",     data={"screen": "cpu_freq"})
+        configure.add_leaf("\u21c6 RAC tunnel",        data={"screen": "rac"})
+        configure.add_leaf("\u2193 Backup",            data={"screen": "backup"})
+        configure.add_leaf("\u2191 Restore",           data={"screen": "restore"})
 
         observe = self.root.add("Observe", expand=True)
         observe.add_leaf("\u25c9 Radiod live", data={"screen": "radiod"})
@@ -54,8 +55,8 @@ class ComponentTree(Tree):
         operate = self.root.add("Operate", expand=True)
         operate.add_leaf("\u21bb Lifecycle", data={"screen": "lifecycle"})
         operate.add_leaf("\u21c4 Apply",     data={"screen": "apply"})
-        operate.add_leaf("+ Install",        data={"screen": "install"})
-        operate.add_leaf("\u2191 Update",    data={"screen": "update"})
+        operate.add_leaf("+ Software install", data={"screen": "install"})
+        operate.add_leaf("\u2191 Software update", data={"screen": "update"})
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         data = event.node.data
@@ -66,6 +67,8 @@ class ComponentTree(Tree):
             self.app.action_show_overview()
         elif screen == "topology":
             self.app.action_show_topology()
+        elif screen == "components":
+            self.app.action_show_components()
         elif screen == "cpu_affinity":
             self.app.action_show_cpu_affinity()
         elif screen == "cpu_freq":

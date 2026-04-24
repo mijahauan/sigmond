@@ -44,8 +44,11 @@ def _gather_catalog() -> _CatalogView:
     try:
         from ...catalog import load_catalog
         catalog = load_catalog()
-        view.entries = sorted(catalog.values(),
-                              key=lambda e: (e.kind, e.name))
+        # Exclude entries with no repo URL — those have no git workflow.
+        view.entries = sorted(
+            (e for e in catalog.values() if e.repo),
+            key=lambda e: (e.kind, e.name),
+        )
     except FileNotFoundError as exc:
         view.error = f"catalog not found: {exc}"
     except Exception as exc:
@@ -69,7 +72,7 @@ class InstallScreen(Vertical):
         margin-bottom: 1;
     }
     InstallScreen #is-table {
-        height: 1fr;
+        height: 14;
     }
     InstallScreen #is-actions {
         height: 3;
@@ -85,7 +88,7 @@ class InstallScreen(Vertical):
     """
 
     def compose(self):
-        yield Static("Install — catalog of known clients",
+        yield Static("Software Install — catalog of known clients",
                      classes="is-title")
         yield Static("[dim]loading\u2026[/]", id="is-status")
         table = DataTable(id="is-table", cursor_type="row", zebra_stripes=True)

@@ -24,9 +24,54 @@ class _OverviewData:
     units_by_component: dict = field(default_factory=dict)   # comp -> list[UnitRef]
     unit_states: dict = field(default_factory=dict)          # unit -> state string
     action_items: list = field(default_factory=list)         # (kind, subject, action) tuples
+    topology_enabled: set = field(default_factory=set)       # components enabled in topology
     view: object = None                                       # SystemView | None
     affinity: object = None                                   # AffinityReport | None
     error: Optional[str] = None
+
+
+# Per-component well-known systemd unit patterns for components that
+# don't ship a deploy.toml.  None means "library / no systemd presence".
+_UNIT_PATTERNS: dict = {
+    'ka9q-radio':    'radiod@*.service',
+    'igmp-querier':  'igmp-querier.service',
+    'ka9q-python':   None,
+    'ka9q-web':      'ka9q-web.service',
+    'gpsdo-monitor': 'gpsdo-monitor.service',
+}
+
+
+def _discover_service_units(comp: str) -> list:
+    """Query systemctl for units belonging to a component without deploy.toml.
+
+    Returns a list of UnitRef-compatible objects (uses lifecycle.UnitRef).
+    Returns an empty list if the component has no systemd presence.
+    """
+    import json
+    from ...lifecycle import UnitRef
+
+    pattern = _UNIT_PATTERNS.get(comp, f'{comp}@*.service')
+    if pattern is None:
+        return []  # library — no units expected
+
+    try:
+        r = subprocess.run(
+            ['systemctl', 'list-units', pattern, '--all', '--output=json'],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            items = json.loads(r.stdout)
+            refs = []
+            for it in items:
+                unit = it.get('unit') or it.get('name', '')
+                if unit:
+                    kind = unit.rsplit('.', 1)[-1] if '.' in unit else 'service'
+                    refs.append(UnitRef(component=comp, unit=unit,
+                                        template=None, instance=None,
+                                        kind=kind, source='systemctl'))
+            return refs
+    except Exception:
+        pass
+    return []
 
 
 def _batch_is_active(unit_names: list) -> dict:
@@ -58,22 +103,44 @@ def _gather_overview() -> _OverviewData:
     try:
         from ...topology import load_topology
         from ...lifecycle import resolve_units
+        from ...catalog import load_catalog, next_steps
         from ...sysview import build_system_view
         from ...cpu import build_affinity_report
 
         topology = load_topology()
         enabled = topology.enabled_components()
+        data.topology_enabled = set(enabled)
 
+        catalog = load_catalog()
+
+        # Step 1: resolve lifecycle-tracked units for topology-enabled components.
         try:
-            units = resolve_units(enabled, enabled)
+            lc_units = resolve_units(enabled, enabled)
         except ValueError as exc:
             data.error = f"unit resolution: {exc}"
-            return data
+            lc_units = []
 
-        for u in units:
+        for u in lc_units:
             data.units_by_component.setdefault(u.component, []).append(u)
 
-        data.unit_states = _batch_is_active([u.unit for u in units])
+        # Step 2: expand to ALL installed catalog components so the overview
+        # shows the complete picture regardless of topology enable state.
+        installed_comps = {
+            name for name, entry in catalog.items() if entry.is_installed()
+        }
+        all_comps = installed_comps | set(enabled)
+
+        for comp in sorted(all_comps):
+            if comp in data.units_by_component:
+                continue  # already has lifecycle-tracked units
+            fallback = _discover_service_units(comp)
+            # Always register the component (even empty) so it appears in the table.
+            data.units_by_component.setdefault(comp, []).extend(fallback)
+
+        # Step 3: batch is-active for all units discovered.
+        all_unit_names = [u.unit for units in data.units_by_component.values()
+                          for u in units]
+        data.unit_states = _batch_is_active(all_unit_names)
 
         try:
             data.view = build_system_view(topology=topology)
@@ -87,8 +154,6 @@ def _gather_overview() -> _OverviewData:
             data.affinity = None
 
         try:
-            from ...catalog import load_catalog, next_steps
-            catalog = load_catalog()
             data.action_items = next_steps(enabled, catalog)
         except Exception:
             data.action_items = []
@@ -98,16 +163,27 @@ def _gather_overview() -> _OverviewData:
     return data
 
 
-def _state_badge(state: str) -> str:
-    if state == 'active':
-        return '[green]✔ active[/]'
-    if state == 'inactive':
-        return '[dim]○ inactive[/]'
-    if state == 'failed':
-        return '[red]✘ failed[/]'
-    if state == 'activating' or state == 'reloading':
-        return f'[yellow]▶ {state}[/]'
-    return f'[yellow]? {state}[/]'
+def _component_status(units: list, unit_states: dict) -> str:
+    """Summarise all units of a component into one status string."""
+    if not units:
+        return "[dim]— no units[/]"
+    states = [unit_states.get(u.unit, 'unknown') for u in units]
+    n = len(states)
+    n_active   = sum(1 for s in states if s == 'active')
+    n_failed   = sum(1 for s in states if s == 'failed')
+    n_inactive = sum(1 for s in states if s == 'inactive')
+    n_trans    = sum(1 for s in states
+                     if s in ('activating', 'reloading', 'deactivating'))
+    if n_failed:
+        return f"[red]✘ {n_failed} failed[/]" + (
+            f"  ({n_active} active)" if n_active else "")
+    if n_trans:
+        return f"[yellow]▶ transitioning[/] ({n_active}/{n} active)"
+    if n_active == n:
+        return "[green]✔ running[/]" + (f" ({n} units)" if n > 1 else "")
+    if n_active > 0:
+        return f"[yellow]▶ partial[/] ({n_active}/{n} active)"
+    return "[dim]○ stopped[/]" + (f" ({n} units)" if n > 1 else "")
 
 
 class OverviewScreen(Vertical):
@@ -152,7 +228,7 @@ class OverviewScreen(Vertical):
         yield Static("", id="ov-actions")
         yield Static("Service health", classes="ov-section")
         table = DataTable(id="ov-services")
-        table.add_columns("Component", "Unit", "State")
+        table.add_columns("Component", "Status")
         yield table
         yield Static("Client inventory", classes="ov-section")
         yield Static("", id="ov-inventory")
@@ -185,7 +261,8 @@ class OverviewScreen(Vertical):
         active = sum(1 for s in data.unit_states.values() if s == 'active')
         failed = sum(1 for s in data.unit_states.values() if s == 'failed')
 
-        summary = f"{len(data.units_by_component)} component(s), {active}/{total_units} services active"
+        enabled_count = len(data.topology_enabled)
+        summary = f"{len(data.units_by_component)} components ({enabled_count} enabled in topology), {active}/{total_units} services active"
         if failed:
             summary += f", [red]{failed} failed[/]"
         if data.error:
@@ -216,18 +293,15 @@ class OverviewScreen(Vertical):
         table = self.query_one("#ov-services", DataTable)
         table.clear()
         if not data.units_by_component:
-            table.add_row("[dim](none)[/]", "[dim]no managed services[/]", "")
+            table.add_row("[dim](none)[/]", "[dim]no managed services[/]")
             return
         for comp in sorted(data.units_by_component):
             units = data.units_by_component[comp]
-            for i, u in enumerate(units):
-                state = data.unit_states.get(u.unit, 'unknown')
-                orphan = "  [yellow][orphaned][/]" if u.orphaned else ""
-                table.add_row(
-                    comp if i == 0 else "",
-                    f"{u.unit}{orphan}",
-                    _state_badge(state),
-                )
+            in_topo = comp in data.topology_enabled
+            # "unmanaged" = installed/active but not under sigmond topology control
+            comp_label = comp if in_topo else f"[dim]{comp} (unmanaged)[/]"
+            status = _component_status(units, data.unit_states)
+            table.add_row(comp_label, status)
 
     def _render_inventory(self, data: _OverviewData) -> None:
         widget = self.query_one("#ov-inventory", Static)
@@ -259,10 +333,15 @@ class OverviewScreen(Vertical):
         widget.update("\n".join(lines) if lines else "[dim](no installed clients)[/]")
 
     def _render_cpu(self, data: _OverviewData) -> None:
+        from pathlib import Path
         widget = self.query_one("#ov-cpu", Static)
         r = data.affinity
         if r is None or not r.radiod_cpus:
-            widget.update("[dim](no local radiod)[/]")
+            ka9q_installed = Path('/opt/git/ka9q-radio').exists()
+            if ka9q_installed:
+                widget.update("[dim](ka9q-radio installed — no active radiod@ service; start it to see affinity)[/]")
+            else:
+                widget.update("[dim](ka9q-radio not installed)[/]")
             return
 
         lines = [f"radiod cores: {sorted(r.radiod_cpus)}  "

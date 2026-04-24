@@ -20,8 +20,12 @@ class Component:
     enabled: bool = False
     managed: bool = True
     description: str = ""
-    # wd-rac specific fields (only meaningful for component 'wd-rac')
-    rac_id: str = ""        # frpc proxy name, e.g. "AI6VN-0"
+    # Version policy for `smd update`:
+    #   "latest"  — always pull the newest commit (default)
+    #   "ignore"  — skip this component during updates
+    #   any other — a specific git ref (commit sha, branch, or tag) to pin to
+    version: str = "latest"
+    rac_id: str = ""        # frpc proxy name, e.g. "AI6VN-0" (RAC tunnel)
     rac_number: int = -1    # integer assigned by RAC administrator
 
 
@@ -61,13 +65,12 @@ class Topology:
 
 
 _DEFAULT_COMPONENTS = {
-    'radiod':             Component('radiod',             enabled=False, managed=True,  description='ka9q-radio SDR daemon'),
+    'ka9q-radio':         Component('ka9q-radio',         enabled=False, managed=True,  description='ka9q-radio SDR daemon'),
     'hf-timestd':         Component('hf-timestd',         enabled=False, managed=True,  description='HF time-standard analyzer (WWV/WWVH/CHU/BPM)'),
     'psk-recorder':       Component('psk-recorder',       enabled=False, managed=True,  description='FT4/FT8 spot recorder for PSKReporter'),
     'wspr-recorder':      Component('wspr-recorder',      enabled=False, managed=True,  description='WSPR/FST4W audio recorder (period-aligned WAVs)'),
     'wsprdaemon-client':  Component('wsprdaemon-client',  enabled=False, managed=True,  description='WSPR decoder + poster + uploader'),
     'ka9q-web':           Component('ka9q-web',           enabled=False, managed=True,  description='ka9q-web radiod status UI'),
-    'wd-rac':             Component('wd-rac',             enabled=False, managed=False, description='Remote access channel (frpc)'),
 }
 
 _DEFAULT_CLIENT_DIR = Path('/opt/git/wsprdaemon-client')
@@ -101,17 +104,23 @@ def load_topology(path: Path = TOPOLOGY_PATH,
     if 'smd_bin' in sig:
         smd_bin = Path(sig['smd_bin'])
 
+    # Legacy topology name → canonical catalog name (mirrors catalog topology_alias).
+    _RENAMES = {'radiod': 'ka9q-radio'}
+
     for name, cfg in raw.get('component', {}).items():
+        canonical = _RENAMES.get(name, name)
         rac_number = -1
         try:
             rac_number = int(cfg.get('rac_number', -1))
         except (TypeError, ValueError):
             pass
-        components[name] = Component(
-            name=name,
+        raw_ver = str(cfg.get('version', 'latest') or 'latest').strip()
+        components[canonical] = Component(
+            name=canonical,
             enabled=cfg.get('enabled', False),
             managed=cfg.get('managed', True),
             description=cfg.get('description', ''),
+            version=raw_ver,
             rac_id=str(cfg.get('rac_id', '') or '').strip(),
             rac_number=rac_number,
         )

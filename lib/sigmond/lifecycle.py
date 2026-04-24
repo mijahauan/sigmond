@@ -355,9 +355,9 @@ def order_units(
     # Build the component ordering.
     ordered_names: list[str] = []
 
-    # radiod always first (if present).
-    if 'radiod' in buckets:
-        ordered_names.append('radiod')
+    # ka9q-radio always first (if present).
+    if 'ka9q-radio' in buckets:
+        ordered_names.append('ka9q-radio')
 
     # Clients in coordination.toml declaration order.
     if coordination is not None and hasattr(coordination, 'clients'):

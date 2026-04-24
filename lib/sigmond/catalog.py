@@ -236,7 +236,12 @@ def next_steps(
             continue
 
         if not entry.is_installed():
-            items.append(('install', comp, f'sudo smd install {comp}'))
+            # Only suggest installation when there is something sigmond can
+            # actually do: a repo to clone or an install_script to run.
+            # Internally-managed infra has neither and is handled by smd
+            # outside the normal catalog install path.
+            if entry.repo or entry.install_script:
+                items.append(('install', comp, f'sudo smd install {comp}'))
 
         for dep in transitive_requires(comp, catalog):
             key = (comp, dep)

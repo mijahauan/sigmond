@@ -112,7 +112,7 @@ class LogsScreen(Vertical):
         margin-bottom: 1;
     }
     LogsScreen #lg-output {
-        height: 1fr;
+        height: 22;
         border: solid $primary-background;
     }
     """

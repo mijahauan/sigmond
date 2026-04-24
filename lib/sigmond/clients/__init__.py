@@ -14,9 +14,10 @@ from .wspr import WsprAdapter
 # Registry: topology component name → adapter class.
 # Note: "grape" is the legacy topology key for hf-timestd.
 REGISTRY = {
-    'radiod':    RadiodAdapter,
-    'wspr':      WsprAdapter,
-    'grape':     HfTimestdAdapter,
+    'ka9q-radio': RadiodAdapter,
+    'radiod':     RadiodAdapter,    # legacy topology alias
+    'wspr':       WsprAdapter,
+    'grape':      HfTimestdAdapter,
     'hf-timestd': HfTimestdAdapter,
 }
 

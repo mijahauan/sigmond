@@ -18,20 +18,21 @@ requires        = []
 contract        = ""
 install_script  = ""                                  # sigmond installs via editable pip into /opt/sigmond/venv
 
-[client.radiod]
+[client.ka9q-radio]
 kind            = "server"
 description     = "ka9q-radio SDR daemon — receives and multicasts RF channels"
 repo            = "https://github.com/ka9q/ka9q-radio"
-uses            = []                                  # radiod is the thing others use
+uses            = []                                  # ka9q-radio is the thing others use
 contract        = ""                                  # not a contract-conformant client
 install_script  = ""                                  # built from source via deps.conf
+topology_alias  = "radiod"                            # legacy topology.toml name
 
 [client.wspr-recorder]
 kind            = "client"
 description     = "WSPR/FST4W audio recorder (period-aligned WAVs)"
 repo            = "https://github.com/mijahauan/wspr-recorder"
 uses            = []
-requires        = ["ka9q-python", "radiod"]
+requires        = ["ka9q-python", "ka9q-radio"]
 contract        = "0.4"
 install_script  = "/opt/git/wspr-recorder/install.sh"
 
@@ -40,7 +41,7 @@ kind            = "client"
 description     = "FT4/FT8 spot recorder for PSKReporter"
 repo            = "https://github.com/mijahauan/psk-recorder"
 uses            = []
-requires        = ["ka9q-python", "radiod"]
+requires        = ["ka9q-python", "ka9q-radio"]
 contract        = "0.4"
 install_script  = "/opt/git/psk-recorder/scripts/install.sh"
 
@@ -49,7 +50,7 @@ kind            = "client"
 description     = "HF time-standard analyzer (WWV/WWVH/CHU/BPM)"
 repo            = "https://github.com/mijahauan/hf-timestd"
 uses            = []
-requires        = ["ka9q-python", "radiod"]
+requires        = ["ka9q-python", "ka9q-radio"]
 contract        = "0.4"
 install_script  = "/opt/git/hf-timestd/scripts/install.sh"
 topology_alias  = "grape"
@@ -59,7 +60,7 @@ kind            = "client"
 description     = "WSPR decoder + poster + uploader (wsprd + jt9 --fst4w)"
 repo            = "https://github.com/rrobinett/wsprdaemon-client"
 uses            = []
-requires        = ["ka9q-python", "radiod", "wspr-recorder"]
+requires        = ["ka9q-python", "ka9q-radio", "wspr-recorder"]
 contract        = "0.4"
 install_script  = "/opt/git/wsprdaemon-client/install.sh"
 topology_alias  = "wspr"
@@ -71,14 +72,6 @@ repo            = "https://github.com/mijahauan/igmp-querier"
 uses            = []
 contract        = ""                                  # not a contract-conformant client
 install_script  = "/opt/git/igmp-querier/install.sh"
-
-[client.wd-rac]
-kind            = "infra"
-description     = "WsprDaemon Remote Access Channel — frpc reverse-tunnel for remote SSH access"
-repo            = ""                                  # frpc binary downloaded from github.com/fatedier/frp releases
-uses            = []
-contract        = ""                                  # managed natively by sigmond
-install_script  = ""                                  # sigmond handles install directly (_install_frpc)
 
 [client.gpsdo-monitor]
 kind            = "infra"

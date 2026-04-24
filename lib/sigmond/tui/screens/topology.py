@@ -42,7 +42,7 @@ class TopologyScreen(Vertical):
     def compose(self):
         yield Static("Topology — enabled components", id="topo-title")
         yield DataTable(id="topo-table", cursor_type="row")
-        yield Button("Save topology.toml", id="topo-save", variant="primary")
+        yield Button("Save topology.toml", id="topo-save", variant="success")
         yield Static(
             "Click a row to select it, then click again or press Enter to toggle. Save when done.",
             id="topo-status",
@@ -154,10 +154,19 @@ class TopologyScreen(Vertical):
     def _save_topology(self) -> None:
         """Write the current topology state to topology.toml."""
         from ...paths import TOPOLOGY_PATH
-        self._write_topology_toml(TOPOLOGY_PATH)
-        self.query_one("#topo-status", Static).update(
-            f"Saved to {TOPOLOGY_PATH}"
-        )
+        status = self.query_one("#topo-status", Static)
+        try:
+            self._write_topology_toml(TOPOLOGY_PATH)
+            status.update(f"Saved to {TOPOLOGY_PATH}")
+        except PermissionError:
+            if self._sudo_write_topology_toml(TOPOLOGY_PATH):
+                status.update(f"Saved via sudo to {TOPOLOGY_PATH}")
+            else:
+                status.update(
+                    f"[red]Permission denied.[/]  "
+                    f"Fix with: [bold]sudo chown $(whoami) {TOPOLOGY_PATH}[/]"
+                )
+            return
         # Refresh the component tree in the app.
         from ..widgets.component_tree import ComponentTree
         tree = self.app.query_one(ComponentTree)
@@ -165,6 +174,29 @@ class TopologyScreen(Vertical):
 
     def _write_topology_toml(self, path: Path) -> None:
         """Render topology as TOML and write to disk."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self._topology_toml_content())
+
+    def _sudo_write_topology_toml(self, path: Path) -> bool:
+        """Fall back to writing topology.toml via sudo cp (no TUI suspend)."""
+        import os, tempfile, subprocess as sp
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(suffix='.toml')
+            os.write(fd, self._topology_toml_content().encode())
+            os.close(fd)
+            r = sp.run(['sudo', 'cp', tmp, str(path)], capture_output=True)
+            return r.returncode == 0
+        except Exception:
+            return False
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    def _topology_toml_content(self) -> str:
         lines = [
             "# /etc/sigmond/topology.toml",
             "# Managed by smd tui. Manual edits are fine too.",
@@ -176,14 +208,13 @@ class TopologyScreen(Vertical):
             lines.append(f'enabled = {"true" if comp.enabled else "false"}')
             if not comp.managed:
                 lines.append("managed = false")
+            if comp.version and comp.version != "latest":
+                lines.append(f'version = "{comp.version}"')
             if comp.description:
                 lines.append(f'description = "{comp.description}"')
-            if name == 'wd-rac':
-                if comp.rac_id:
-                    lines.append(f'rac_id = "{comp.rac_id}"')
-                if comp.rac_number >= 0:
-                    lines.append(f'rac_number = {comp.rac_number}')
+            if comp.rac_id:
+                lines.append(f'rac_id = "{comp.rac_id}"')
+            if comp.rac_number >= 0:
+                lines.append(f'rac_number = {comp.rac_number}')
             lines.append("")
-
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines) + "\n")
+        return "\n".join(lines) + "\n"

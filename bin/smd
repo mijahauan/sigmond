@@ -57,7 +57,7 @@ try:
     from sigmond.lifecycle         import resolve_units, UnitRef, lifecycle_lock, order_units
     from sigmond.coordination      import load_coordination
     from sigmond.catalog           import load_catalog, CatalogEntry, get_entry, resolve_name, find_client_binary
-    from sigmond.installer         import install_client as _do_install_client
+    from sigmond.installer         import install_client as _do_install_client, clone_repo as _clone_repo, git_head_ref as _git_head_ref
     from sigmond.paths             import SIGMOND_VENV
     from sigmond.log_cmd           import (
         follow_journal, follow_files, flatten_log_paths,
@@ -225,7 +225,8 @@ def _enabled_components(topology: dict, only: list = None) -> list:
 
 # Map each component to the deps.conf sections it needs
 COMPONENT_DEPS = {
-    'radiod':              ['ka9q-radio'],
+    'ka9q-radio':          ['ka9q-radio'],
+    'radiod':              ['ka9q-radio'],    # legacy alias
     'wspr':                ['ka9q-python', 'wspr-recorder', 'kiwiclient', 'ftlib-pskreporter'],
     'wsprdaemon-client':   ['ka9q-python', 'wspr-recorder', 'kiwiclient', 'ftlib-pskreporter'],
     'ka9q-web':            ['ka9q-web'],
@@ -1212,8 +1213,8 @@ def _install_single_client(args) -> int:
             topology = _load_topology(TOPOLOGY_PATH)
             return 0 if _install_wd_rac(topology, dry_run, yes=yes) else 1
         _err(f"'{entry.name}' has no install_script in the catalog")
-        if entry.name in ('radiod', 'ka9q-web'):
-            _info(f"radiod/ka9q-web are built via ka9q-update; use: smd install  (full suite)")
+        if entry.name in ('ka9q-radio', 'ka9q-web'):
+            _info(f"ka9q-radio/ka9q-web are built via ka9q-update; use: smd install  (full suite)")
         return 1
 
     _heading(f'install {entry.name}')
@@ -1297,7 +1298,7 @@ def _install_full_suite(args) -> int:
             continue
         if entry.install_script:
             catalog_queue.append(entry)
-        elif entry.name in ('radiod', 'ka9q-web'):
+        elif entry.name in ('ka9q-radio', 'ka9q-web'):
             ka9q_update_needed = True
         elif entry.kind in ('library', 'infra') and not entry.install_script:
             # Handled by sigmond itself (e.g. ka9q-python via venv, wd-rac via _install_frpc).
@@ -1309,12 +1310,12 @@ def _install_full_suite(args) -> int:
     _heading('install plan')
     if ka9q_update_needed:
         c_names = [e.name for e in sorted(catalog.values(), key=lambda e: e.name)
-                   if e.name in ('radiod', 'ka9q-web')
+                   if e.name in ('ka9q-radio', 'ka9q-web')
                    and e.name in [get_entry(c, catalog).name
                                   for c in components
                                   if get_entry(c, catalog) and not get_entry(c, catalog).install_script
-                                  and get_entry(c, catalog).name in ('radiod', 'ka9q-web')]]
-        _info(f'ka9q-update:  {", ".join(c_names) or "radiod + ka9q-web"}')
+                                  and get_entry(c, catalog).name in ('ka9q-radio', 'ka9q-web')]]
+        _info(f'ka9q-update:  {", ".join(c_names) or "ka9q-radio + ka9q-web"}')
     for entry in catalog_queue:
         _info(f'catalog:      {entry.name:22s} → {entry.install_script}')
     for comp in unknown:
@@ -2352,24 +2353,117 @@ def cmd_log(args) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_update(args) -> int:
+    """Pull the latest commit for every installed catalog component.
+
+    For each catalog entry that has a repo URL and a clone under /opt/git/,
+    runs `git pull --ff-only` (or `git fetch + checkout <ref>` when --ref is
+    given).  radiod is source-only and requires a ka9q-update rebuild to
+    produce a new binary; smd warns rather than silently skipping it.
+    After all pulls, `smd apply` is run to reload any changed systemd units.
+    """
     if _need_root('update'):
         return 1
-    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-    client_dir = topology['client_dir']
 
-    _heading('update')
-    _info(f'Pulling wsprdaemon-client ({client_dir}) ...')
-    r = _run(['git', '-C', str(client_dir), 'pull'], capture=False)
-    if r.returncode != 0:
-        _err('git pull failed')
+    dry_run  = getattr(args, 'dry_run', False)
+    ref      = getattr(args, 'ref', None)
+
+    components_filter: set[str] | None = None
+    if getattr(args, 'components', None):
+        components_filter = {c.strip() for c in args.components.split(',')}
+
+    try:
+        catalog = load_catalog()
+    except FileNotFoundError as exc:
+        _err(str(exc))
         return 1
 
-    # Re-run install to pick up any changed deps / units / scripts
-    args.client_dir  = None
-    args.components  = None
-    args.dry_run     = False
-    args.topology    = getattr(args, 'topology', None)
-    return cmd_install(args)
+    _heading('update')
+    errors   = 0
+    opt_git  = Path('/opt/git')
+
+    # --- sigmond self-update (only on full update, not component-targeted) ---
+    if not components_filter:
+        sigmond_dir = Path(__file__).resolve().parent.parent
+        if (sigmond_dir / '.git').exists():
+            _info(f'sigmond: pulling ({sigmond_dir}) ...')
+            if not dry_run:
+                r = _run(['git', '-C', str(sigmond_dir), 'pull', '--ff-only'],
+                         capture=False)
+                if r.returncode != 0:
+                    _warn('sigmond: self-update failed — continuing')
+                    errors += 1
+                else:
+                    _ok('sigmond: up to date')
+            else:
+                _info('sigmond: (dry-run) would pull')
+
+    # --- pull each installed catalog repo ---
+    for name in sorted(catalog):
+        entry = catalog[name]
+        if components_filter and name not in components_filter:
+            continue
+        if not entry.repo:
+            continue
+
+        repo_dir = opt_git / name
+        if not repo_dir.exists():
+            # Not installed; skip silently unless explicitly requested.
+            if components_filter:
+                _warn(f'{name}: not found at {repo_dir} — install first with: smd install {name}')
+            continue
+
+        # Respect the per-component version policy from topology.toml.
+        topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+        comp = topology.components.get(name)
+        comp_version = (comp.version if comp else 'latest') or 'latest'
+        effective_ref = ref  # --ref flag overrides topology setting
+        if effective_ref is None:
+            if comp_version == 'ignore':
+                _info(f'{name}: version = ignore — skipping')
+                continue
+            elif comp_version != 'latest':
+                effective_ref = comp_version  # pinned ref from topology
+
+        before = _git_head_ref(repo_dir) if not dry_run else '?'
+        if dry_run:
+            if comp_version == 'ignore' and ref is None:
+                _info(f'{name}: (dry-run) would skip (version = ignore)')
+            else:
+                action = (f'checkout {effective_ref}'
+                          if effective_ref else 'pull latest')
+                _info(f'{name}: (dry-run) would {action}')
+            continue
+
+        _info(f'{name}: pulling ...')
+        try:
+            _clone_repo(entry, pull_if_exists=True, ref=effective_ref)
+            after = _git_head_ref(repo_dir)
+            if after == before:
+                _ok(f'{name}: already at {after}')
+            else:
+                _ok(f'{name}: {before} → {after}')
+                if name == 'ka9q-radio' and after != before:
+                    _warn('ka9q-radio: source updated — rebuild binaries: smd install --components ka9q-radio')
+        except RuntimeError as exc:
+            _err(f'{name}: {exc}')
+            errors += 1
+
+    if dry_run:
+        _info('(dry-run) no changes made')
+        return 0
+
+    # --- apply: reload any changed systemd units ---
+    _heading('apply')
+    args.dry_run = False
+    apply_rc = cmd_apply(args)
+    if apply_rc != 0:
+        errors += 1
+
+    if errors:
+        _warn(f'update finished with {errors} error(s)')
+        return 1
+    _ok('all components up to date')
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -2673,15 +2767,26 @@ _smd_complete() {
     }
 
     local top_cmds="install apply start stop status restart reload list log update diag validate config tui completion"
-    local components="radiod wspr ka9q-web grape rac"
+    local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
+    local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
     if [[ "$prev" == "--components" ]]; then
         COMPREPLY=($(compgen -W "$components" -- "$cur"))
         return
     fi
 
-    if [[ "$prev" =~ ^(--topology|--from|--to|--client-dir)$ ]]; then
+    if [[ "$prev" =~ ^(--topology|--from|--to|--client-dir|--input|--output)$ ]]; then
         COMPREPLY=($(compgen -f -- "$cur"))
+        return
+    fi
+
+    if [[ "$prev" == "--level" ]]; then
+        COMPREPLY=($(compgen -W "DEBUG INFO WARNING ERROR CRITICAL" -- "$cur"))
+        return
+    fi
+
+    if [[ "$prev" == "--via" ]]; then
+        COMPREPLY=($(compgen -W "auto systemd socket" -- "$cur"))
         return
     fi
 
@@ -2692,13 +2797,25 @@ _smd_complete() {
         2)
             case "${words[1]}" in
                 install)
-                    COMPREPLY=($(compgen -W "--components --client-dir --dry-run --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "$components --components --client-dir --dry-run --yes --topology" -- "$cur"))
                     ;;
                 apply)
                     COMPREPLY=($(compgen -W "--dry-run --topology" -- "$cur"))
                     ;;
-                start|stop|status|restart|reload)
-                    COMPREPLY=($(compgen -W "--components --topology" -- "$cur"))
+                start|stop|status|restart)
+                    COMPREPLY=($(compgen -W "$components --components --topology" -- "$cur"))
+                    ;;
+                reload)
+                    COMPREPLY=($(compgen -W "$components --components --via --topology" -- "$cur"))
+                    ;;
+                list)
+                    COMPREPLY=($(compgen -W "--json --available --all --components --topology" -- "$cur"))
+                    ;;
+                log)
+                    COMPREPLY=($(compgen -W "$log_clients --files --level --topology" -- "$cur"))
+                    ;;
+                update)
+                    COMPREPLY=($(compgen -W "$components --components --ref --dry-run --topology" -- "$cur"))
                     ;;
                 diag)
                     COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
@@ -2707,23 +2824,38 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
                     ;;
                 config)
-                    COMPREPLY=($(compgen -W "show migrate edit" -- "$cur"))
+                    COMPREPLY=($(compgen -W "show migrate backup restore edit" -- "$cur"))
                     ;;
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
+                    ;;
+                tui)
+                    COMPREPLY=()
                     ;;
             esac
             ;;
         *)
             case "${words[1]}" in
                 install)
-                    COMPREPLY=($(compgen -W "--components --client-dir --dry-run --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "$components --components --client-dir --dry-run --yes --topology" -- "$cur"))
                     ;;
                 apply)
                     COMPREPLY=($(compgen -W "--dry-run --topology" -- "$cur"))
                     ;;
-                start|stop|status|restart|reload)
-                    COMPREPLY=($(compgen -W "--components --topology" -- "$cur"))
+                start|stop|status|restart)
+                    COMPREPLY=($(compgen -W "$components --components --topology" -- "$cur"))
+                    ;;
+                reload)
+                    COMPREPLY=($(compgen -W "$components --components --via --topology" -- "$cur"))
+                    ;;
+                list)
+                    COMPREPLY=($(compgen -W "--json --available --all --components --topology" -- "$cur"))
+                    ;;
+                log)
+                    COMPREPLY=($(compgen -W "$log_clients --files --level --topology" -- "$cur"))
+                    ;;
+                update)
+                    COMPREPLY=($(compgen -W "$components --components --ref --dry-run --topology" -- "$cur"))
                     ;;
                 diag)
                     case "${words[2]}" in
@@ -2752,13 +2884,26 @@ _smd_complete() {
                         migrate)
                             COMPREPLY=($(compgen -W "--from --to --write --force --topology" -- "$cur"))
                             ;;
+                        backup)
+                            COMPREPLY=($(compgen -W "--output" -- "$cur"))
+                            ;;
+                        restore)
+                            COMPREPLY=($(compgen -W "--input" -- "$cur"))
+                            ;;
                         *)
-                            COMPREPLY=($(compgen -W "show migrate edit" -- "$cur"))
+                            COMPREPLY=($(compgen -W "show migrate backup restore edit" -- "$cur"))
                             ;;
                     esac
                     ;;
                 completion)
-                    COMPREPLY=($(compgen -W "bash" -- "$cur"))
+                    case "${words[2]}" in
+                        bash)
+                            COMPREPLY=($(compgen -W "--install" -- "$cur"))
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "bash" -- "$cur"))
+                            ;;
+                    esac
                     ;;
             esac
             ;;
@@ -2766,25 +2911,51 @@ _smd_complete() {
 }
 
 complete -F _smd_complete smd
+
+# Short aliases for common smd subcommands.
+# Add to your shell with: source <(smd completion bash)
+smdt()   { smd tui "$@"; }
+smdtui() { smd tui "$@"; }
+
+# smdt / smdtui take no subcommands; just complete --topology via file completion.
+_smdt_complete() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    COMPREPLY=($(compgen -W "--topology" -- "$cur"))
+    if [[ "$cur" == --topology* || "${COMP_WORDS[COMP_CWORD-1]}" == "--topology" ]]; then
+        COMPREPLY=($(compgen -f -- "$cur"))
+    fi
+}
+complete -F _smdt_complete smdt smdtui
 """
 
 
 def cmd_completion(args) -> int:
     sub = getattr(args, 'completion_command', None)
     if sub == 'bash':
+        if getattr(args, 'install', False):
+            dest = Path.home() / '.local' / 'share' / 'bash-completion' / 'completions' / 'smd'
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(_BASH_COMPLETION.strip() + '\n')
+            print(f'Installed to {dest}')
+            print('Activate in your current session with:')
+            print('  source <(smd completion bash)')
+            return 0
         print(_BASH_COMPLETION.strip())
         return 0
-    print('Usage: smd completion bash')
+    print('Usage: smd completion bash [--install]')
     print()
-    print('To enable tab completion for the current session:')
+    print('To activate in the current session:')
     print('  source <(smd completion bash)')
     print()
-    print('To install permanently (system-wide):')
+    print('To install for your user (creates the directory automatically):')
+    print('  smd completion bash --install')
+    print()
+    print('To install system-wide:')
     print('  sudo smd completion bash > /etc/bash_completion.d/smd')
     print()
-    print('To install for your user only:')
-    print('  mkdir -p ~/.local/share/bash-completion/completions')
-    print('  smd completion bash > ~/.local/share/bash-completion/completions/smd')
+    print('The completion script also defines short aliases:')
+    print('  smdt   →  smd tui')
+    print('  smdtui →  smd tui')
     return 0
 
 
@@ -3111,7 +3282,13 @@ def main() -> int:
                    help='set log level (DEBUG/INFO/WARNING/ERROR/CRITICAL) in coordination.env + SIGHUP')
 
     # update
-    sub.add_parser('update', help='pull latest code and re-apply')
+    p = sub.add_parser('update', help='pull latest code for all installed components and re-apply')
+    p.add_argument('--components', metavar='C1,C2',
+                   help='comma-separated subset of components to update (default: all installed)')
+    p.add_argument('--ref', metavar='COMMIT_OR_BRANCH',
+                   help='git ref to check out (default: latest on current branch)')
+    p.add_argument('--dry-run', action='store_true',
+                   help='show what would be updated without making changes')
 
     # diag  (with its own sub-commands)
     p_diag = sub.add_parser('diag', help='run cross-component diagnostics')
@@ -3149,7 +3326,9 @@ def main() -> int:
     # completion
     p_completion = sub.add_parser('completion', help='emit shell tab-completion script')
     completion_sub = p_completion.add_subparsers(dest='completion_command')
-    completion_sub.add_parser('bash', help='emit bash completion script (source or install)')
+    p_bash = completion_sub.add_parser('bash', help='emit bash completion script (source or install)')
+    p_bash.add_argument('--install', action='store_true',
+                        help='install to ~/.local/share/bash-completion/completions/smd (creates dir)')
 
     # validate (Phase 1)
     p = sub.add_parser('validate',

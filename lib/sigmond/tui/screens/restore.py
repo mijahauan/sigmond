@@ -45,7 +45,7 @@ class RestoreScreen(Vertical):
     RestoreScreen { padding: 1; }
     RestoreScreen .rs-title { text-style: bold; margin-bottom: 1; }
     RestoreScreen #rs-hint  { color: $text-muted; margin-bottom: 1; }
-    RestoreScreen #rs-list  { height: 1fr; border: solid $primary-background; }
+    RestoreScreen #rs-list  { height: 14; border: solid $primary-background; }
     RestoreScreen #rs-selected { margin-top: 1; color: $text-muted; }
     RestoreScreen #rs-actions  { height: 3; margin-top: 1; }
     RestoreScreen #rs-actions Button { margin-right: 1; }
