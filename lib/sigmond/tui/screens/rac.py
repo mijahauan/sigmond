@@ -224,7 +224,7 @@ class RacScreen(Vertical):
 
         yield Static("", id="rac-result")
         with Horizontal(classes="button-row"):
-            yield Button("Apply & enable", id="rac-apply", variant="primary")
+            yield Button("Apply & enable", id="rac-apply", variant="success")
             yield Button("Disable", id="rac-disable", variant="error")
 
         yield Static("Tunnel Status", classes="section-title")
