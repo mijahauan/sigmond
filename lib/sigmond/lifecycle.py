@@ -219,10 +219,18 @@ def _find_deploy_toml(component: str) -> Optional[Path]:
     except (json.JSONDecodeError, subprocess.SubprocessError, OSError):
         pass
 
-    # Try canonical location
+    # Try canonical location. Catch PermissionError so a component
+    # whose /opt/git/<name>/ is behind a restrictive permission mask
+    # (e.g. wsprdaemon-client -> /home/wsprdaemon/... at mode 700)
+    # doesn't abort the whole `smd list` for every other component.
+    # Returning None falls through to the shim fallback, which is the
+    # right answer when we can't read the install tree ourselves.
     canonical = Path(f"/opt/git/{component}/deploy.toml")
-    if canonical.exists():
-        return canonical
+    try:
+        if canonical.exists():
+            return canonical
+    except PermissionError:
+        pass
 
     return None
 
