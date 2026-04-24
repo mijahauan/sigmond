@@ -7,12 +7,17 @@ full deep-dive, launches ka9q-python's own TUI.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+from pathlib import Path
+from typing import Optional
 
 from textual.containers import Vertical
 from textual.widgets import Button, DataTable, Static
 from textual.worker import Worker, WorkerState
+
+GPSDO_RUN_DIR = Path("/run/gpsdo")
 
 
 class RadiodScreen(Vertical):
@@ -60,6 +65,7 @@ class RadiodScreen(Vertical):
 
         yield Static("", id="radiod-status")
         yield Button("Deep dive (ka9q tui)", id="radiod-deep-dive", variant="primary")
+        yield Button("Deep dive (gpsdo tui)", id="radiod-gpsdo-dive", variant="primary")
         yield Button("Refresh", id="radiod-refresh", variant="default")
 
     def on_mount(self) -> None:
@@ -68,6 +74,8 @@ class RadiodScreen(Vertical):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "radiod-deep-dive":
             self._launch_ka9q_tui()
+        elif event.button.id == "radiod-gpsdo-dive":
+            self._launch_gpsdo_tui()
         elif event.button.id == "radiod-refresh":
             self._poll_radiod()
 
@@ -218,3 +226,63 @@ class RadiodScreen(Vertical):
             status_widget.update(
                 f"[red]ka9q tui exited {result.returncode} — cmd: {' '.join(cmd)}[/]"
             )
+
+    def _launch_gpsdo_tui(self) -> None:
+        """Suspend sigmond's TUI and launch gpsdo-monitor's TUI.
+
+        When a gpsdo-monitor report declares this radiod in its
+        ``governs`` list we pass that device's serial via ``--serial``
+        so the TUI opens focused on the governor.  Without a match
+        (no reports published yet, or this radiod has no governor)
+        we launch the unfiltered view.
+        """
+        status_widget = self.query_one("#radiod-status", Static)
+
+        gpsdo_bin = shutil.which("gpsdo-monitor")
+        if not gpsdo_bin:
+            status_widget.update(
+                "[red]gpsdo-monitor binary not found on PATH — "
+                "install gpsdo-monitor[tui] in this venv[/]"
+            )
+            return
+
+        cmd = [gpsdo_bin, "tui"]
+        serial = self._governor_serial_for_radiod()
+        if serial:
+            cmd.extend(["--serial", serial])
+
+        with self.app.suspend():
+            result = subprocess.run(cmd)
+
+        if result.returncode != 0:
+            status_widget.update(
+                f"[red]gpsdo tui exited {result.returncode} — cmd: {' '.join(cmd)}[/]"
+            )
+
+    def _governor_serial_for_radiod(self) -> Optional[str]:
+        """Find the first device in /run/gpsdo/*.json whose ``governs``
+        list names this radiod.  Returns None when gpsdo-monitor hasn't
+        published anything yet, when no device claims this radiod, or
+        on any file read error (we want the TUI to launch unfiltered
+        rather than fail).
+        """
+        if not GPSDO_RUN_DIR.is_dir():
+            return None
+        target_tokens = {f"radiod:{self._radiod_id}", self._radiod_id}
+        for path in sorted(GPSDO_RUN_DIR.glob("*.json")):
+            if path.name == "index.json":
+                continue
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict) or data.get("schema") != "v1":
+                continue
+            governs = data.get("governs") or []
+            if not isinstance(governs, list):
+                continue
+            if any(g in target_tokens for g in governs if isinstance(g, str)):
+                device = data.get("device")
+                if isinstance(device, dict) and device.get("serial"):
+                    return str(device["serial"])
+        return None
