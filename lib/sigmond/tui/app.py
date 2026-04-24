@@ -419,6 +419,27 @@ class SigmondApp(App):
             "if so.",
         )
 
+    def action_show_environment(self) -> None:
+        from .screens.environment import EnvironmentScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(EnvironmentScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Environment",
+            "Situational awareness — declared peers vs observed.\n\n"
+            "Reads /etc/sigmond/environment.toml (the operator-declared "
+            "site baseline) and reconciles it against live discovery:\n"
+            "  • mDNS browse (passive)\n"
+            "  • ka9q-radio multicast status (passive)\n"
+            "  • local gpsdo-monitor authority.json (passive)\n"
+            "  • NTP SNTPv4 query (active)\n"
+            "  • KiwiSDR /status + /gps (active)\n\n"
+            "Active probes are rate-limited and skipped entirely when "
+            "discovery.passive_only = true in the manifest.\n\n"
+            "Keys: p probe all · m/n/k source-only · r reload manifest",
+        )
+
     def action_show_update(self) -> None:
         from .screens.update import UpdateScreen
         center = self.query_one("#center")

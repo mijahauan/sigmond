@@ -15,6 +15,7 @@ Usage:
     smd status     [<component>]
     smd update
     smd diag
+    smd environment list|probe|describe    (situational awareness)
 
 Topology file (default: /etc/sigmond/topology.toml) controls which
 components are enabled on this host.  All commands respect the topology.
@@ -46,8 +47,13 @@ for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
         break
 
 try:
-    from sigmond.commands.validate import cmd_validate
-    from sigmond.commands.config   import cmd_config_show, cmd_config_migrate
+    from sigmond.commands.validate    import cmd_validate
+    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate
+    from sigmond.commands.environment import (
+        cmd_environment_list,
+        cmd_environment_probe,
+        cmd_environment_describe,
+    )
     from sigmond.lifecycle         import resolve_units, UnitRef, lifecycle_lock, order_units
     from sigmond.coordination      import load_coordination
     from sigmond.catalog           import load_catalog, CatalogEntry, get_entry, resolve_name, find_client_binary
@@ -3181,6 +3187,35 @@ def main() -> int:
 
     config_sub.add_parser('edit', help='[deprecated] use `smd tui` instead')
 
+    # environment — situational awareness (site inventory + reconciliation).
+    p_env = sub.add_parser('environment',
+                           help='inventory peers declared in environment.toml vs what is observed')
+    env_sub = p_env.add_subparsers(dest='env_command')
+
+    p = env_sub.add_parser('list',
+                           help='show declared peers + latest cached delta status')
+    p.add_argument('--json', action='store_true')
+    p.add_argument('--kind', choices=['radiod', 'kiwisdr', 'gpsdo', 'time_source'],
+                   help='restrict output to one kind')
+
+    p = env_sub.add_parser('probe',
+                           help='run discovery, reconcile, write cache')
+    p.add_argument('--source',
+                   choices=['mdns', 'multicast', 'ntp', 'http_kiwisdr', 'gpsdo', 'all'],
+                   default='all')
+    p.add_argument('--kind', choices=['radiod', 'kiwisdr', 'gpsdo', 'time_source'])
+    p.add_argument('--force', action='store_true',
+                   help='ignore per-source cadence (still honours 5s hard floor)')
+    p.add_argument('--timeout', type=float, default=3.0,
+                   help='per-probe timeout in seconds (default 3.0)')
+    p.add_argument('--json', action='store_true',
+                   help='also emit machine-readable summary on stdout')
+
+    p = env_sub.add_parser('describe',
+                           help='show declared + observed details for one peer')
+    p.add_argument('peer', help='declared id or observed endpoint/hostname')
+    p.add_argument('--json', action='store_true')
+
     # tui — primary entry point (replaces `smd config edit`).
     sub.add_parser('tui', help='launch the sigmond TUI')
 
@@ -3223,13 +3258,23 @@ def main() -> int:
             return cmd_diag_net(args)
         return cmd_diag(args)
 
-    if args.command in ('validate', 'config'):
+    if args.command in ('validate', 'config', 'environment'):
         if not _HAS_SIGMOND_LIB:
             print('smd: sigmond library not found; install lib/sigmond alongside bin/smd',
                   file=sys.stderr)
             return 1
         if args.command == 'validate':
             return cmd_validate(args)
+        if args.command == 'environment':
+            env_cmd = getattr(args, 'env_command', None)
+            if env_cmd == 'list':
+                return cmd_environment_list(args)
+            if env_cmd == 'probe':
+                return cmd_environment_probe(args)
+            if env_cmd == 'describe':
+                return cmd_environment_describe(args)
+            p_env.print_help()
+            return 0
         # config
         sub_cmd = getattr(args, 'config_command', None)
         if sub_cmd == 'show':

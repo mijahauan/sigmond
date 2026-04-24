@@ -16,6 +16,7 @@ from typing import Optional
 from .clients import REGISTRY, load_adapter
 from .clients.base import ClientView
 from .coordination import Coordination, load_coordination
+from .environment import EnvironmentView
 from .paths import COORDINATION_PATH
 from .topology import Topology, load_topology
 
@@ -25,6 +26,7 @@ class SystemView:
     coordination: Coordination
     topology: Topology
     client_views: dict = field(default_factory=dict)    # component name -> ClientView
+    environment: Optional[EnvironmentView] = None       # populated only by `smd environment`
 
     def is_enabled(self, component: str) -> bool:
         return self.topology.is_enabled(component)

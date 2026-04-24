@@ -46,6 +46,7 @@ class ComponentTree(Tree):
         observe = self.root.add("Observe", expand=True)
         observe.add_leaf("\u25c9 Radiod live", data={"screen": "radiod"})
         observe.add_leaf("\u25d0 GPSDO live",  data={"screen": "gpsdo"})
+        observe.add_leaf("\u2316 Environment", data={"screen": "environment"})
         observe.add_leaf("\u2261 Logs",        data={"screen": "logs"})
         observe.add_leaf("\u2714 Validate",    data={"screen": "validate"})
         observe.add_leaf("\u2726 Diag: net",   data={"screen": "diag_net"})
@@ -95,3 +96,5 @@ class ComponentTree(Tree):
             self.app.action_show_config()
         elif screen == "diag_net":
             self.app.action_show_diag_net()
+        elif screen == "environment":
+            self.app.action_show_environment()
