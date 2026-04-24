@@ -2323,8 +2323,18 @@ def cmd_log(args) -> int:
         unit_names = []
 
     if not unit_names:
-        _warn(f'no units resolved for {client} — trying journalctl with pattern')
-        unit_names = [f'{client}*']
+        try:
+            from sigmond.catalog import load_catalog
+            entry = load_catalog().get(client)
+        except Exception:
+            entry = None
+        if entry is not None and not entry.is_installed():
+            _err(f'{client}: enabled in topology but not installed. '
+                 f'Install first:  sudo smd install {client}')
+        else:
+            _err(f'{client}: no systemd units resolved (no deploy.toml or '
+                 f'fallback shim).  Is it fully installed?')
+        return 1
 
     _info(f'following journal for: {", ".join(unit_names)}')
     follow_journal(unit_names)

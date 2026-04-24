@@ -1,34 +1,69 @@
-"""Logs screen — TUI counterpart to `smd log <client>` (read-only modes).
+"""Logs screen — TUI counterpart to `smd log <client>`.
 
-Per-component `journalctl --follow` or `tail -f` of inventory file-logs.
-Streams output live into a RichLog widget via a background worker that
-shells out to the same commands `smd log` uses.
-
-The log-level mutation mode of `smd log --level` lives on the CLI for now;
-it's a mutation and belongs on the Lifecycle/Operate side of the IA.
+Read-only modes: per-component `journalctl --follow` or `tail -f` of
+inventory file-logs.  Streams subprocess output live into a RichLog
+widget.  Mutation mode: set CLIENT_LOG_LEVEL via `sudo smd log
+<client> --level <LEVEL>`, gated by a confirm modal.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import sys
 from typing import Optional
 
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, RichLog, Select, Static
 from textual.worker import get_current_worker
 
+from ..mutation import confirm_and_run
 
-def _enabled_components() -> list:
+
+def _smd_binary() -> str:
+    argv0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
+        return argv0
+    found = shutil.which('smd')
+    return found or '/usr/local/sbin/smd'
+
+
+def _installed_components() -> dict:
+    """Map enabled component name -> bool (installed on this host).
+
+    Components enabled in topology but absent from the catalog default
+    to ``True`` so we don't accidentally hide something the catalog
+    hasn't been taught about.
+    """
     try:
         from ...topology import load_topology
-        return load_topology().enabled_components()
+        from ...catalog import load_catalog
     except Exception:
-        return []
+        return {}
+    try:
+        enabled = load_topology().enabled_components()
+    except Exception:
+        return {}
+    try:
+        catalog = load_catalog()
+    except Exception:
+        catalog = {}
+    result: dict = {}
+    for comp in enabled:
+        entry = catalog.get(comp)
+        result[comp] = entry.is_installed() if entry is not None else True
+    return result
 
 
 def _resolve_unit_names(component: str) -> list:
-    """Best-effort: resolve systemd units for a component, else fall back
-    to a wildcard.  Mirrors how bin/smd.cmd_log picks units."""
+    """Resolve systemd units for a component.
+
+    Returns the list of resolved unit names (empty list if the component
+    is enabled in topology but not yet installed, i.e. no deploy.toml
+    and no fallback shim).  Never returns a wildcard — callers must
+    handle the empty case with an actionable message to the operator.
+    """
     try:
         from ...topology import load_topology
         from ...lifecycle import resolve_units
@@ -36,12 +71,9 @@ def _resolve_unit_names(component: str) -> list:
         topology = load_topology()
         all_enabled = topology.enabled_components()
         units = resolve_units([component], all_enabled)
-        names = [u.unit for u in units if not u.orphaned]
-        if names:
-            return names
+        return [u.unit for u in units if not u.orphaned]
     except Exception:
-        pass
-    return [f"{component}*"]
+        return []
 
 
 def _resolve_log_paths(component: str) -> list:
@@ -88,16 +120,28 @@ class LogsScreen(Vertical):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._proc: Optional[subprocess.Popen] = None
+        self._install_state: dict = {}
 
     def compose(self):
         yield Static("Logs — live tail per component", classes="lg-title")
         with Horizontal(id="lg-controls"):
-            options = [(c, c) for c in _enabled_components()]
+            self._install_state = _installed_components()
+            options = [
+                (c if installed else f"{c}  (not installed)", c)
+                for c, installed in sorted(self._install_state.items())
+            ]
             yield Select(options=options, id="lg-picker",
                          prompt="Component\u2026", allow_blank=True)
             yield Button("Follow journal", id="lg-journal", variant="primary")
             yield Button("Tail files",     id="lg-files",   variant="default")
             yield Button("Stop",           id="lg-stop",    variant="warning")
+        with Horizontal(id="lg-level-row"):
+            level_opts = [(lvl, lvl) for lvl in
+                          ("DEBUG", "INFO", "WARN", "ERROR")]
+            yield Select(options=level_opts, id="lg-level",
+                         prompt="Log level\u2026", allow_blank=True)
+            yield Button("Set level", id="lg-set-level",
+                         variant="warning")
         yield Static("", id="lg-status")
         yield RichLog(id="lg-output", highlight=False, markup=False,
                       max_lines=2000, wrap=False)
@@ -110,6 +154,42 @@ class LogsScreen(Vertical):
             self._start('files')
         elif bid == "lg-stop":
             self._stop(user_requested=True)
+        elif bid == "lg-set-level":
+            self._set_level()
+
+    def _set_level(self) -> None:
+        comp = self._current_component()
+        if not comp:
+            self._set_status("[yellow]Pick a component first[/]")
+            return
+        if self._install_state.get(comp, True) is False:
+            self._set_status(
+                f"[yellow]{comp} is not installed — "
+                f"install before changing log level[/]")
+            return
+        picker = self.query_one("#lg-level", Select)
+        level = picker.value
+        if level is None or level is Select.NULL:
+            self._set_status("[yellow]Pick a log level first[/]")
+            return
+        level = str(level)
+        cmd = [_smd_binary(), 'log', comp, '--level', level]
+        confirm_and_run(
+            self.app,
+            title=f"Set {comp} log level to {level}?",
+            body=(f"Writes CLIENT_LOG_LEVEL_{comp.upper().replace('-', '_')}"
+                  f"={level} to coordination.env and sends SIGHUP to the "
+                  f"unit(s) so the new level takes effect immediately."),
+            cmd=cmd, sudo=True,
+            on_complete=self._after_set_level,
+        )
+
+    def _after_set_level(self, result: subprocess.CompletedProcess) -> None:
+        argv = ' '.join(result.args) if result.args else ''
+        if result.returncode == 0:
+            self._set_status(f"[green]✔ exit 0[/]  {argv}")
+        else:
+            self._set_status(f"[red]✘ exit {result.returncode}[/]  {argv}")
 
     def on_unmount(self) -> None:
         # Prevent zombie tails when the screen swaps out.
@@ -136,8 +216,21 @@ class LogsScreen(Vertical):
             self._set_status("[yellow]Pick a component first[/]")
             return
 
+        if self._install_state.get(comp, True) is False:
+            self._set_status(
+                f"[yellow]{comp}: enabled in topology but not installed. "
+                f"Install first:  [cyan]sudo smd install {comp}[/][/]"
+            )
+            return
+
         if mode == 'journal':
             units = _resolve_unit_names(comp)
+            if not units:
+                self._set_status(
+                    f"[yellow]{comp}: no systemd units resolved "
+                    f"(no deploy.toml or shim). Is it fully installed?[/]"
+                )
+                return
             cmd = ['journalctl', '--follow', '--no-hostname', '-n', '50']
             for u in units:
                 cmd.extend(['-u', u])

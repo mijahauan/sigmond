@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +19,20 @@ from textual.widgets import Button, DataTable, Static
 from textual.worker import Worker, WorkerState
 
 GPSDO_RUN_DIR = Path("/run/gpsdo")
+
+
+def _find_tool(name: str) -> Optional[str]:
+    """Locate a venv-installed CLI tool.
+
+    TUI users typically launch ``smd tui`` without activating the venv,
+    so ``shutil.which`` can't see siblings of the running Python.  We
+    check the venv's ``bin/`` first (via ``sys.executable``), then fall
+    back to ``$PATH``.  Returns ``None`` when the tool isn't anywhere.
+    """
+    venv_bin = Path(sys.executable).parent / name
+    if venv_bin.is_file():
+        return str(venv_bin)
+    return shutil.which(name)
 
 
 class RadiodScreen(Vertical):
@@ -207,10 +222,10 @@ class RadiodScreen(Vertical):
             status_widget.update("[yellow]Cannot launch — no status_dns configured[/]")
             return
 
-        ka9q_bin = shutil.which("ka9q")
+        ka9q_bin = _find_tool("ka9q")
         if not ka9q_bin:
             status_widget.update(
-                "[red]ka9q binary not found on PATH — install ka9q-python in this venv[/]"
+                "[red]ka9q binary not found — install ka9q-python in this venv[/]"
             )
             return
 
@@ -238,10 +253,10 @@ class RadiodScreen(Vertical):
         """
         status_widget = self.query_one("#radiod-status", Static)
 
-        gpsdo_bin = shutil.which("gpsdo-monitor")
+        gpsdo_bin = _find_tool("gpsdo-monitor")
         if not gpsdo_bin:
             status_widget.update(
-                "[red]gpsdo-monitor binary not found on PATH — "
+                "[red]gpsdo-monitor binary not found — "
                 "install gpsdo-monitor[tui] in this venv[/]"
             )
             return

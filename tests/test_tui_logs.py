@@ -15,19 +15,23 @@ except ImportError:
 
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
 class LogsResolutionTests(unittest.TestCase):
-    def test_enabled_components_returns_list(self):
-        from sigmond.tui.screens.logs import _enabled_components
-        result = _enabled_components()
-        self.assertIsInstance(result, list)
+    def test_installed_components_returns_mapping(self):
+        from sigmond.tui.screens.logs import _installed_components
+        result = _installed_components()
+        self.assertIsInstance(result, dict)
+        # Every value is a bool when non-empty.
+        for comp, installed in result.items():
+            self.assertIsInstance(comp, str)
+            self.assertIsInstance(installed, bool)
 
-    def test_resolve_unit_names_falls_back_to_wildcard(self):
+    def test_resolve_unit_names_returns_empty_when_not_installed(self):
         from sigmond.tui.screens.logs import _resolve_unit_names
         # For a component that almost certainly has no deploy.toml on
-        # this host, the wildcard fallback is the contract.
+        # this host, resolution returns an empty list — the wildcard
+        # fallback was removed because it generates cryptic
+        # "No data available" errors from journalctl.
         result = _resolve_unit_names("definitely-not-a-component-zzz")
-        self.assertIsInstance(result, list)
-        self.assertTrue(len(result) >= 1)
-        self.assertIn("definitely-not-a-component-zzz", result[0])
+        self.assertEqual(result, [])
 
 
 @unittest.skipUnless(_HAS_TEXTUAL, "textual not installed")
