@@ -675,6 +675,80 @@ def _frpc_user_field() -> str:
     return hashlib.sha256(pub.read_bytes()).hexdigest()[:16]
 
 
+def _bootstrap_rac_registration(rac_id: str, dry_run: bool = False) -> bool:
+    """Upload a spots-free .tbz to the gateway FTP so the server auto-provisions
+    the station's SFTP/frpc account before any spots have been sent.
+
+    The tar contains only:
+      wsprdaemon/uploads_config.txt       — version metadata
+      wsprdaemon/client_upload_info.txt   — reporter_id + ssh_public_key
+
+    The server (wsprdaemon_server.py) processes this, creates a Linux user for
+    the reporter, and adds the public key to authorized_keys — making the frps
+    auth plugin accept the frpc connection on the next attempt.
+
+    FTP is used here because SFTP requires the account to already exist.
+    FTP accepts anonymous uploads (noisegraphs:xahFie6g) on gw2 only.
+    """
+    import ftplib, io, tarfile, time as _time
+
+    pub_path = _find_wd_pubkey() or Path(str(_FRPC_KEY) + '.pub')
+    if not pub_path.exists():
+        _warn('bootstrap: no SSH public key found — skipping FTP registration')
+        return False
+
+    pubkey   = pub_path.read_text().strip()
+    upload_id = rac_id.replace('/', '_')
+    ts        = _time.strftime('%y%m%d_%H%M_%S', _time.gmtime())
+    tar_name  = f'{upload_id}_{ts}.tbz'
+
+    config_txt = (
+        'CLIENT_VERSION=4.0\n'
+        'UPLOADS_WSPRNET_LINE_FORMAT_VERSION=1\n'
+        'UPLOADS_WSPRDAEMON_SPOT_LINE_FORMAT_VERSION=3\n'
+        'SIGNAL_LEVEL_UPLOAD=yes\n'
+    ).encode()
+    info_txt = f'reporter_id={rac_id}\nssh_public_key={pubkey}\n'.encode()
+
+    # Build the tar in memory.
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode='w:bz2') as tf:
+        for arcname, data in [
+            ('wsprdaemon/uploads_config.txt',    config_txt),
+            ('wsprdaemon/client_upload_info.txt', info_txt),
+        ]:
+            ti = tarfile.TarInfo(name=arcname)
+            ti.size = len(data)
+            ti.mtime = int(_time.time())
+            tf.addfile(ti, io.BytesIO(data))
+    tbz_bytes = buf.getvalue()
+
+    _info(f'bootstrap: uploading registration tar {tar_name} ({len(tbz_bytes)} B) ...')
+
+    if dry_run:
+        _info(f'dry-run: would FTP {tar_name} to gw2.wsprdaemon.org/upload/')
+        return True
+
+    ftp_server  = 'gw2.wsprdaemon.org'
+    ftp_user    = 'noisegraphs'
+    ftp_passwd  = 'xahFie6g'
+    ftp_path    = 'upload'
+    try:
+        with ftplib.FTP(timeout=30) as ftp:
+            ftp.connect(ftp_server)
+            ftp.login(user=ftp_user, passwd=ftp_passwd)
+            ftp.set_pasv(True)
+            ftp.storbinary(f'STOR {ftp_path}/{tar_name}', io.BytesIO(tbz_bytes))
+        _ok(f'bootstrap: registration uploaded  →  {ftp_server}/upload/{tar_name}')
+        _info('  Server will create the gateway account and authorize the SSH key.')
+        _info('  The frpc tunnel will connect on its next retry (≤30 s).')
+        return True
+    except Exception as exc:
+        _warn(f'bootstrap: FTP upload failed: {exc}')
+        _warn('  Tunnel will retry — registration will complete after the first spot upload.')
+        return False   # non-fatal: frpc retries; registration completes via spot upload
+
+
 def _fetch_frps_ca_cert(dry_run: bool = False) -> bool:
     """Fetch the frps server's TLS cert and save to _FRPS_CA_CERT."""
     if _FRPS_CA_CERT.exists():
@@ -930,6 +1004,8 @@ def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False) ->
     ok = _install_frpc(dry_run) and ok
     ok = _ensure_frpc_keypair(dry_run) and ok
     ok = _fetch_frps_ca_cert(dry_run) and ok
+    if rac_id:
+        _bootstrap_rac_registration(rac_id, dry_run)   # non-fatal; ignore return value
     if rac_id and rac_number >= 0:
         ok = _write_frpc_config(rac_id, rac_number, dry_run) and ok
         ok = _install_rac_service(dry_run) and ok
