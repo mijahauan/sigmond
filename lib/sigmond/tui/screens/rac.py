@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import configparser
 import json
 import subprocess
@@ -243,13 +244,13 @@ class RacScreen(Vertical):
             pass
 
     # ------------------------------------------------------------------
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == 'rac-apply':
-            self._do_apply()
+            await self._do_apply()
         elif event.button.id == 'rac-disable':
             self._do_disable()
 
-    def _do_apply(self) -> None:
+    async def _do_apply(self) -> None:
         rac_id         = self.query_one('#rac-id-input', Input).value.strip()
         rac_number_str = self.query_one('#rac-number-input', Input).value.strip()
         result_widget  = self.query_one('#rac-result', Static)
@@ -273,10 +274,11 @@ class RacScreen(Vertical):
 
         result_widget.update("[dim]Applying…[/dim]")
         smd_bin = str(Path(__file__).resolve().parents[4] / 'bin' / 'smd')
-        r = subprocess.run(
+        loop = asyncio.get_event_loop()
+        r = await loop.run_in_executor(None, lambda: subprocess.run(
             ['sudo', 'python3', smd_bin, 'install', '--components', 'wd-rac', '--yes'],
             capture_output=True, text=True, stdin=subprocess.DEVNULL,
-        )
+        ))
         if r.returncode == 0:
             result_widget.update(
                 f"[green]✓ configured: {rac_id}, channel {rac_number}[/green]"
