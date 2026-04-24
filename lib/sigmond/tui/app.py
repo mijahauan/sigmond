@@ -62,6 +62,9 @@ class SigmondApp(App):
         width: 1fr;
         padding: 0 1;
     }
+    #center > * {
+        height: auto;
+    }
     #right {
         width: 32;
         border-left: solid $primary-background;
@@ -170,6 +173,22 @@ class SigmondApp(App):
             "calibration), and per-channel SNR.\n\n"
             "Press 'Deep dive' to launch ka9q-python's full "
             "TUI for detailed radiod control.",
+        )
+
+    def action_show_gpsdo(self) -> None:
+        from .screens.gpsdo import GpsdoScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(GpsdoScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "GPSDO live",
+            "Live status from gpsdo-monitor reports in /run/gpsdo/.\n\n"
+            "Shows each attached Leo Bodnar GPSDO: PLL lock, GPS fix, "
+            "antenna health, A-level hint, output frequencies, and the "
+            "radiod(s) it governs.\n\n"
+            "Select a device row, then 'Deep dive' to launch "
+            "gpsdo-monitor's full TUI focused on that device.",
         )
 
     def action_show_validate(self) -> None:
@@ -349,6 +368,55 @@ class SigmondApp(App):
             "binary, writes /etc/sigmond/frpc.ini, and starts wd-rac.service.\n\n"
             "Once running, an admin can SSH to this site via:\n"
             "  ssh -p <35800+n> wsprdaemon@vpn.wsprdaemon.org",
+        )
+
+    def action_show_apply(self) -> None:
+        from .screens.apply import ApplyScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(ApplyScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Apply",
+            "Reconciles running services with the current topology + "
+            "coordination config.\n\n"
+            "Dry-run prints the plan without touching the system.  "
+            "Apply performs it via `sudo smd apply` — services may "
+            "restart.\n\n"
+            "Safe to re-run — the CLI is idempotent.",
+        )
+
+    def action_show_config(self) -> None:
+        from .screens.config_show import ConfigShowScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(ConfigShowScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Config view",
+            "Read-only snapshot of coordination + client config.\n\n"
+            "Equivalent to `smd config show`.  Shows radiod instances, "
+            "their scope (local/remote), and which clients have "
+            "declared contract-compliant inventory.\n\n"
+            "'Migrate config' upgrades coordination to the latest "
+            "schema (`sudo smd config migrate`).",
+        )
+
+    def action_show_diag_net(self) -> None:
+        from .screens.diag_net import DiagNetScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(DiagNetScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Diag: network",
+            "Classifies IGMP behavior so radiod multicast stays safe.\n\n"
+            "Fast scan: unprivileged enumeration of interfaces + "
+            "/proc/net/igmp (no wait).\n\n"
+            "Full listen: runs `sudo smd diag net --listen <s>` to "
+            "observe IGMP queries on the wire.  Requires passwordless "
+            "sudo or you'll see an error here — fall back to a terminal "
+            "if so.",
         )
 
     def action_show_update(self) -> None:

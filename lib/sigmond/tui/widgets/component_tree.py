@@ -36,6 +36,7 @@ class ComponentTree(Tree):
 
         configure = self.root.add("Configure", expand=True)
         configure.add_leaf("\u2630 Topology",     data={"screen": "topology"})
+        configure.add_leaf("\u2261 Config view",  data={"screen": "config_show"})
         configure.add_leaf("\u2699 CPU affinity", data={"screen": "cpu_affinity"})
         configure.add_leaf("\u21f5 CPU frequency", data={"screen": "cpu_freq"})
         configure.add_leaf("\u21c6 RAC tunnel",    data={"screen": "rac"})
@@ -44,11 +45,14 @@ class ComponentTree(Tree):
 
         observe = self.root.add("Observe", expand=True)
         observe.add_leaf("\u25c9 Radiod live", data={"screen": "radiod"})
+        observe.add_leaf("\u25d0 GPSDO live",  data={"screen": "gpsdo"})
         observe.add_leaf("\u2261 Logs",        data={"screen": "logs"})
         observe.add_leaf("\u2714 Validate",    data={"screen": "validate"})
+        observe.add_leaf("\u2726 Diag: net",   data={"screen": "diag_net"})
 
         operate = self.root.add("Operate", expand=True)
         operate.add_leaf("\u21bb Lifecycle", data={"screen": "lifecycle"})
+        operate.add_leaf("\u21c4 Apply",     data={"screen": "apply"})
         operate.add_leaf("+ Install",        data={"screen": "install"})
         operate.add_leaf("\u2191 Update",    data={"screen": "update"})
 
@@ -67,6 +71,8 @@ class ComponentTree(Tree):
             self.app.action_show_cpu_freq()
         elif screen == "radiod":
             self.app.action_show_radiod()
+        elif screen == "gpsdo":
+            self.app.action_show_gpsdo()
         elif screen == "logs":
             self.app.action_show_logs()
         elif screen == "validate":
@@ -83,3 +89,9 @@ class ComponentTree(Tree):
             self.app.action_show_backup()
         elif screen == "restore":
             self.app.action_show_restore()
+        elif screen == "apply":
+            self.app.action_show_apply()
+        elif screen == "config_show":
+            self.app.action_show_config()
+        elif screen == "diag_net":
+            self.app.action_show_diag_net()

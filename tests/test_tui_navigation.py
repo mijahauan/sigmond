@@ -42,8 +42,10 @@ class TreeNavigationTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(120, 60)) as pilot:
             for action in ("show_overview", "show_topology",
                            "show_cpu_affinity", "show_cpu_freq",
-                           "show_radiod", "show_logs", "show_validate",
-                           "show_lifecycle", "show_install", "show_update"):
+                           "show_radiod", "show_gpsdo", "show_logs",
+                           "show_validate", "show_diag_net",
+                           "show_lifecycle", "show_apply",
+                           "show_config", "show_install", "show_update"):
                 getattr(app, f"action_{action}")()
                 await pilot.pause()
                 center = app.query_one("#center")
