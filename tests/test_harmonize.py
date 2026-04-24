@@ -4,6 +4,7 @@ These build SystemView objects by hand so they're independent of any
 real /etc state on the host.
 """
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -14,10 +15,12 @@ from sigmond.clients.base import ClientView, InstanceView
 from sigmond.coordination import (
     ClientInstance, Coordination, Cpu, DiskBudget, Host, Radiod,
 )
+from sigmond import harmonize
 from sigmond.harmonize import (
     ALL_RULES, ALL_RUNTIME_RULES, _parse_cores,
     rule_cpu_isolation, rule_cpu_isolation_runtime,
-    rule_frequency_coverage, rule_radiod_resolution, rule_timing_chain,
+    rule_frequency_coverage, rule_gpsdo_governor_coverage,
+    rule_radiod_resolution, rule_timing_chain,
     run_all, worst_severity,
 )
 from sigmond.sysview import SystemView
@@ -241,8 +244,168 @@ class TestRuleCpuIsolationRuntime(unittest.TestCase):
     def test_runtime_rule_catalog_stable(self):
         # Catches accidental addition/removal of runtime rules — update
         # this test along with ALL_RUNTIME_RULES if you change the set.
-        self.assertEqual([r.__name__ for r in ALL_RUNTIME_RULES],
-                         ["rule_cpu_isolation_runtime"])
+        self.assertEqual(
+            [r.__name__ for r in ALL_RUNTIME_RULES],
+            ["rule_cpu_isolation_runtime", "rule_gpsdo_governor_coverage"],
+        )
+
+
+class TestRuleGpsdoGovernorCoverage(unittest.TestCase):
+    """gpsdo-monitor declares `governs = ["radiod:<id>"]` in each
+    /run/gpsdo/<serial>.json it writes. The rule enforces that every
+    local radiod has exactly one device claiming to govern it."""
+
+    def _redirect_run_dir(self, tmp: Path) -> None:
+        """Point the module-level GPSDO_RUN_DIR at a tmp path for this
+        test. unittest.addCleanup restores the original afterwards."""
+        original = harmonize.GPSDO_RUN_DIR
+        harmonize.GPSDO_RUN_DIR = tmp
+        self.addCleanup(lambda: setattr(harmonize, "GPSDO_RUN_DIR", original))
+
+    def _write_report(self, tmp: Path, serial: str, governs: list) -> None:
+        (tmp / f"{serial}.json").write_text(
+            json.dumps({
+                "schema": "v1",
+                "device": {"model": "lbe-1421", "serial": serial},
+                "governs": governs,
+                "a_level_hint": "A1",
+            })
+        )
+
+    def _tmp(self) -> Path:
+        import shutil
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        return d
+
+    def test_missing_dir_is_skipped(self) -> None:
+        tmp = self._tmp()
+        self._redirect_run_dir(tmp / "does-not-exist")
+        r = rule_gpsdo_governor_coverage(_make_view(Coordination()))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("skipped", r.message)
+
+    def test_empty_dir_is_skipped(self) -> None:
+        tmp = self._tmp()
+        self._redirect_run_dir(tmp)
+        coord = Coordination(radiods={
+            "main": Radiod(id="main", host="localhost"),
+        })
+        r = rule_gpsdo_governor_coverage(_make_view(coord))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("no gpsdo-monitor reports", r.message)
+
+    def test_index_json_alone_is_skipped(self) -> None:
+        tmp = self._tmp()
+        (tmp / "index.json").write_text('{"schema": "v1"}')
+        self._redirect_run_dir(tmp)
+        r = rule_gpsdo_governor_coverage(_make_view(Coordination(radiods={
+            "main": Radiod(id="main", host="localhost"),
+        })))
+        self.assertEqual(r.severity, "pass")
+
+    def test_single_governor_passes(self) -> None:
+        tmp = self._tmp()
+        self._write_report(tmp, "LBE-A", ["radiod:main"])
+        self._redirect_run_dir(tmp)
+        coord = Coordination(radiods={
+            "main": Radiod(id="main", host="localhost"),
+        })
+        r = rule_gpsdo_governor_coverage(_make_view(coord))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("one governor", r.message)
+
+    def test_missing_governor_warns(self) -> None:
+        tmp = self._tmp()
+        # Report exists but doesn't govern this radiod.
+        self._write_report(tmp, "LBE-A", ["radiod:other"])
+        self._redirect_run_dir(tmp)
+        coord = Coordination(radiods={
+            "main": Radiod(id="main", host="localhost"),
+        })
+        r = rule_gpsdo_governor_coverage(_make_view(coord))
+        self.assertEqual(r.severity, "warn")
+        self.assertIn("main", r.message)
+        self.assertIn("main", r.affected)
+
+    def test_multiple_governors_fail(self) -> None:
+        tmp = self._tmp()
+        self._write_report(tmp, "LBE-A", ["radiod:main"])
+        self._write_report(tmp, "LBE-B", ["radiod:main"])
+        self._redirect_run_dir(tmp)
+        coord = Coordination(radiods={
+            "main": Radiod(id="main", host="localhost"),
+        })
+        r = rule_gpsdo_governor_coverage(_make_view(coord))
+        self.assertEqual(r.severity, "fail")
+        self.assertIn("2 governors", r.message)
+        self.assertIn("LBE-A", r.message)
+        self.assertIn("LBE-B", r.message)
+
+    def test_multi_radiod_mixed_verdict_is_worst_severity(self) -> None:
+        tmp = self._tmp()
+        # main has two governors (fail), aux has none (warn) — fail wins.
+        self._write_report(tmp, "A", ["radiod:main"])
+        self._write_report(tmp, "B", ["radiod:main"])
+        self._redirect_run_dir(tmp)
+        coord = Coordination(radiods={
+            "main": Radiod(id="main", host="localhost"),
+            "aux":  Radiod(id="aux",  host="localhost"),
+        })
+        r = rule_gpsdo_governor_coverage(_make_view(coord))
+        self.assertEqual(r.severity, "fail")
+        self.assertIn("main", r.affected)
+        self.assertIn("aux", r.affected)
+
+    def test_remote_radiod_is_ignored(self) -> None:
+        tmp = self._tmp()
+        # gpsdo-monitor on THIS host has nothing to do with a remote radiod.
+        self._redirect_run_dir(tmp)
+        self._write_report(tmp, "A", ["radiod:main"])
+        coord = Coordination(radiods={
+            "main":   Radiod(id="main",   host="localhost"),
+            "remote": Radiod(id="remote", host="other.local"),
+        })
+        r = rule_gpsdo_governor_coverage(_make_view(coord))
+        # "main" covered, "remote" outside our scope → pass.
+        self.assertEqual(r.severity, "pass")
+
+    def test_no_local_radiod_is_skipped(self) -> None:
+        tmp = self._tmp()
+        self._write_report(tmp, "A", ["radiod:somewhere"])
+        self._redirect_run_dir(tmp)
+        coord = Coordination(radiods={
+            "remote": Radiod(id="remote", host="other.local"),
+        })
+        r = rule_gpsdo_governor_coverage(_make_view(coord))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("no local radiod", r.message)
+
+    def test_malformed_json_is_tolerated(self) -> None:
+        tmp = self._tmp()
+        (tmp / "bad.json").write_text("{ not valid json")
+        self._write_report(tmp, "good", ["radiod:main"])
+        self._redirect_run_dir(tmp)
+        coord = Coordination(radiods={
+            "main": Radiod(id="main", host="localhost"),
+        })
+        r = rule_gpsdo_governor_coverage(_make_view(coord))
+        # Malformed file ignored; the good report still counts.
+        self.assertEqual(r.severity, "pass")
+
+    def test_wrong_schema_is_ignored(self) -> None:
+        tmp = self._tmp()
+        (tmp / "v2.json").write_text(json.dumps({
+            "schema": "v2", "governs": ["radiod:main"],
+        }))
+        self._redirect_run_dir(tmp)
+        coord = Coordination(radiods={
+            "main": Radiod(id="main", host="localhost"),
+        })
+        r = rule_gpsdo_governor_coverage(_make_view(coord))
+        # Treated as no governor → warn.
+        self.assertEqual(r.severity, "warn")
 
 
 if __name__ == "__main__":

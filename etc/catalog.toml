@@ -79,3 +79,11 @@ repo            = ""                                  # frpc binary downloaded f
 uses            = []
 contract        = ""                                  # managed natively by sigmond
 install_script  = ""                                  # sigmond handles install directly (_install_frpc)
+
+[client.gpsdo-monitor]
+kind            = "infra"
+description     = "Leo Bodnar GPSDO health monitor + mDNS advertiser — supplies A-level signal to hf-timestd"
+repo            = "https://github.com/mijahauan/gpsdo-monitor"
+uses            = []
+contract        = ""                                  # infra, not a contract-conformant client
+install_script  = "/opt/git/gpsdo-monitor/install.sh"

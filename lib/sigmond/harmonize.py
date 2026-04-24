@@ -19,11 +19,17 @@ for the multi-radiod architecture in coordination.toml:
 
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from .sysview import SystemView
+
+# Path to the gpsdo-monitor daemon's per-device JSON drop.  Exposed as a
+# module-level constant so tests can redirect it to a tmp dir.
+GPSDO_RUN_DIR = Path("/run/gpsdo")
 
 
 @dataclass
@@ -315,6 +321,87 @@ def rule_cpu_isolation_runtime(view: SystemView) -> RuleResult:
         f"radiod cores {sorted(report.radiod_cpus)} uncontested", [])
 
 
+def rule_gpsdo_governor_coverage(view: SystemView) -> RuleResult:
+    """Each local radiod should have exactly one gpsdo-monitor device
+    declaring `governs = ["radiod:<id>"]`.
+
+    - 0 governors → warn (A-level witness missing for that radiod)
+    - 1 governor  → pass
+    - ≥2          → fail (ambiguous authority; hf-timestd cannot pick)
+
+    Reads the runtime drop `/run/gpsdo/*.json` written by the
+    `gpsdo-monitor` daemon. Skips cleanly (pass) when the directory is
+    absent, empty, or contains only stale/index files — which is the
+    right default before gpsdo-monitor is deployed on a host.
+    """
+    if not GPSDO_RUN_DIR.is_dir():
+        return RuleResult("gpsdo_governor_coverage", "pass",
+                          f"skipped (no {GPSDO_RUN_DIR})", [])
+    files = [p for p in GPSDO_RUN_DIR.glob("*.json") if p.name != "index.json"]
+    if not files:
+        return RuleResult("gpsdo_governor_coverage", "pass",
+                          "skipped (no gpsdo-monitor reports present)", [])
+
+    local_radiods = [r for r in view.coordination.radiods.values() if r.is_local]
+    if not local_radiods:
+        return RuleResult("gpsdo_governor_coverage", "pass",
+                          "skipped (no local radiod)", [])
+
+    # {radiod_id: [serial, ...]} of who claims to govern what.
+    governed: dict = {}
+    for path in files:
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("schema") != "v1":
+            continue
+        serial = path.stem
+        device = data.get("device")
+        if isinstance(device, dict) and device.get("serial"):
+            serial = str(device["serial"])
+        governs = data.get("governs") or []
+        if not isinstance(governs, list):
+            continue
+        for token in governs:
+            if not isinstance(token, str):
+                continue
+            # gpsdo-monitor's convention is "radiod:<id>"; strip the
+            # prefix to compare against coordination.toml's radiod.id.
+            rid = token.split(":", 1)[1] if token.startswith("radiod:") else token
+            governed.setdefault(rid, []).append(serial)
+
+    issues: list = []
+    severity = "pass"
+    one_governor_count = 0
+    affected: set = set()
+    for radiod in local_radiods:
+        claimants = governed.get(radiod.id, [])
+        if not claimants:
+            issues.append(f"{radiod.id}: no gpsdo-monitor governor declared")
+            if severity == "pass":
+                severity = "warn"
+            affected.add(radiod.id)
+        elif len(claimants) == 1:
+            one_governor_count += 1
+        else:
+            issues.append(
+                f"{radiod.id}: {len(claimants)} governors "
+                f"({', '.join(sorted(claimants))})"
+            )
+            severity = "fail"
+            affected.add(radiod.id)
+
+    if severity == "pass":
+        return RuleResult(
+            "gpsdo_governor_coverage", "pass",
+            f"{one_governor_count} local radiod(s) each have one governor",
+            [],
+        )
+    return RuleResult("gpsdo_governor_coverage", severity,
+                      "; ".join(issues), sorted(affected))
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_frequency_coverage,
@@ -328,6 +415,7 @@ ALL_RULES = [
 # ALL_RULES so unit tests with hand-built views don't pick up host state.
 ALL_RUNTIME_RULES = [
     rule_cpu_isolation_runtime,
+    rule_gpsdo_governor_coverage,
 ]
 
 
