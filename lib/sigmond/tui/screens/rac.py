@@ -12,11 +12,11 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Label, Static
 
 
-_FRPC_INI   = Path('/etc/sigmond/frpc.ini')
-_FRPS_URL   = 'vpn.wsprdaemon.org'
-_PORT_BASE  = 35800
-_WD_CONF    = Path('/etc/wsprdaemon/wsprdaemon.conf')
-_ADMIN_URL  = 'http://127.0.0.1:7500'
+_FRPC_CONFIG = Path('/etc/sigmond/frpc.toml')
+_FRPC_INI    = Path('/etc/sigmond/frpc.ini')   # legacy fallback for pre-fill only
+_PORT_BASE   = 35800
+_WD_CONF     = Path('/etc/wsprdaemon/wsprdaemon.conf')
+_ADMIN_URL   = 'http://127.0.0.1:7500'
 
 
 def _detect_rac_defaults_tui(current_id: str, current_num: str) -> tuple[str, str]:
@@ -149,7 +149,21 @@ class RacScreen(Vertical):
             self._rac_id = ''
             self._rac_number = ''
 
-        # Pre-fill from existing frpc.ini
+        # Pre-fill from existing frpc.toml (preferred) or legacy frpc.ini
+        if not self._rac_id and _FRPC_CONFIG.exists():
+            try:
+                import tomllib
+                with open(_FRPC_CONFIG, 'rb') as f:
+                    cfg = tomllib.load(f)
+                for proxy in cfg.get('proxies', []):
+                    if not proxy.get('name', '').endswith('-WEB'):
+                        self._rac_id = proxy.get('name', '')
+                        rp = proxy.get('remotePort', -1)
+                        if rp >= _PORT_BASE:
+                            self._rac_number = str(rp - _PORT_BASE)
+                        break
+            except Exception:
+                pass
         if not self._rac_id and _FRPC_INI.exists():
             try:
                 cfg = configparser.ConfigParser()

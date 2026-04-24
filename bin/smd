@@ -469,13 +469,17 @@ def _collect_deps_for_components(components: list) -> list:
 # ---------------------------------------------------------------------------
 
 _FRPC_VERSION   = '0.64.0'
-_FRPS_URL       = 'vpn.wsprdaemon.org'
+_FRPS_URL       = 'gw2.wsprdaemon.org'
 _FRPS_URL_HAMSCI = 'vpn.hamsci.org'
-_FRPS_PORT      = 35735
+_FRPS_PORT      = 35736                              # secure frps port (35735 = open/legacy)
+_FRPC_TOKEN     = 'e6fe04d781252e10b89b1ec490e005df' # shared token for frps-secure
 _RAC_PORT_BASE  = 35800
 _RAC_WEB_OFFSET = 10000
 _FRPC_BIN       = Path('/usr/local/sbin/frpc')
-_FRPC_INI       = Path('/etc/sigmond/frpc.ini')
+_FRPC_INI       = Path('/etc/sigmond/frpc.ini')      # legacy — kept for migration removal
+_FRPC_CONFIG    = Path('/etc/sigmond/frpc.toml')     # current config (TOML, TLS + token auth)
+_FRPC_KEY       = Path('/etc/sigmond/frpc_id_rsa')   # dedicated keypair for this station
+_FRPS_CA_CERT   = Path('/etc/sigmond/frps-ca.crt')  # gateway self-signed cert
 _RAC_SERVICE    = 'wd-rac'
 
 
@@ -598,6 +602,159 @@ def _detect_rac_defaults() -> tuple[str, int]:
     return rac_id, rac_number
 
 
+def _ensure_frpc_keypair(dry_run: bool = False) -> bool:
+    """Generate /etc/sigmond/frpc_id_rsa keypair if it doesn't already exist."""
+    pub = Path(str(_FRPC_KEY) + '.pub')
+    if _FRPC_KEY.exists() and pub.exists():
+        _ok(f'frpc keypair: {_FRPC_KEY}')
+        return True
+    if dry_run:
+        _info(f'dry-run: would generate SSH keypair at {_FRPC_KEY}')
+        return True
+    import tempfile as _tf2
+    with _tf2.TemporaryDirectory() as td:
+        tmp = Path(td) / 'frpc_id_rsa'
+        import socket as _sock
+        r = subprocess.run(
+            ['ssh-keygen', '-t', 'rsa', '-b', '4096', '-N', '',
+             '-C', f'wd-rac@{_sock.gethostname()}', '-f', str(tmp)],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            _err(f'ssh-keygen failed: {r.stderr.strip()}')
+            return False
+        _run(['mkdir', '-p', str(_FRPC_KEY.parent)], sudo=True)
+        _run(['install', '-m', '600', str(tmp),          str(_FRPC_KEY)],        sudo=True)
+        _run(['install', '-m', '644', str(tmp) + '.pub', str(_FRPC_KEY) + '.pub'], sudo=True)
+    pub_txt = pub.read_text().strip() if pub.exists() else '(unreadable)'
+    _ok(f'frpc keypair: generated  →  {_FRPC_KEY}')
+    _info(f'Send this public key to the RAC administrator to register the station:')
+    _info(f'  {pub_txt}')
+    return True
+
+
+def _frpc_user_field() -> str:
+    """Return the 16-char sha256 prefix used as the frpc user identity.
+
+    Matches: sha256sum /etc/sigmond/frpc_id_rsa.pub | cut -c1-16
+    """
+    import hashlib
+    pub = Path(str(_FRPC_KEY) + '.pub')
+    if not pub.exists():
+        return ''
+    return hashlib.sha256(pub.read_bytes()).hexdigest()[:16]
+
+
+def _fetch_frps_ca_cert(dry_run: bool = False) -> bool:
+    """Fetch the frps server's TLS cert and save to _FRPS_CA_CERT."""
+    if _FRPS_CA_CERT.exists():
+        _ok(f'frps CA cert: {_FRPS_CA_CERT}')
+        return True
+    if dry_run:
+        _info(f'dry-run: would fetch TLS cert from {_FRPS_URL}:{_FRPS_PORT}')
+        return True
+    import ssl as _ssl, socket as _sock2
+    try:
+        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        with _sock2.create_connection((_FRPS_URL, _FRPS_PORT), timeout=10) as raw:
+            with ctx.wrap_socket(raw) as s:
+                der = s.getpeercert(binary_form=True)
+        pem = _ssl.DER_cert_to_PEM_cert(der)
+    except Exception as exc:
+        _err(f'failed to fetch frps CA cert from {_FRPS_URL}:{_FRPS_PORT}: {exc}')
+        return False
+    import tempfile as _tf3
+    with _tf3.NamedTemporaryFile('w', suffix='.crt', delete=False) as tf:
+        tf.write(pem)
+        tf_path = tf.name
+    _run(['mkdir', '-p', str(_FRPS_CA_CERT.parent)], sudo=True)
+    r = _run(['install', '-m', '644', tf_path, str(_FRPS_CA_CERT)], sudo=True)
+    Path(tf_path).unlink(missing_ok=True)
+    if r.returncode != 0:
+        _err(f'failed to save CA cert: {r.stderr.strip()}')
+        return False
+    _ok(f'frps CA cert: fetched and saved  →  {_FRPS_CA_CERT}')
+    return True
+
+
+def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> bool:
+    """Write /etc/sigmond/frpc.toml with TLS + token auth for the secure frps port."""
+    if not rac_id:
+        _err('wd-rac: rac_id is empty')
+        return False
+    if rac_number < 0:
+        _err('wd-rac: rac_number not set')
+        return False
+
+    frps_host = _FRPS_URL_HAMSCI if 200 <= rac_number <= 299 else _FRPS_URL
+    ssh_port  = _RAC_PORT_BASE + rac_number
+    web_port  = ssh_port + _RAC_WEB_OFFSET
+    user_field = _frpc_user_field()
+
+    local_ssh_port = 22
+    try:
+        for line in Path('/etc/ssh/sshd_config').read_text().splitlines():
+            if line.startswith('Port '):
+                local_ssh_port = int(line.split()[1])
+    except Exception:
+        pass
+
+    lines = [
+        f'serverAddr = "{frps_host}"',
+        f'serverPort = {_FRPS_PORT}',
+    ]
+    if user_field:
+        lines.append(f'user = "{user_field}"')
+    lines += [
+        '',
+        '[auth]',
+        'method = "token"',
+        f'token = "{_FRPC_TOKEN}"',
+        '',
+        '[transport.tls]',
+        'enable = true',
+        f'trustedCaFile = "{_FRPS_CA_CERT}"',
+        '',
+        '[webServer]',
+        'addr = "127.0.0.1"',
+        'port = 7500',
+        '',
+        '[[proxies]]',
+        f'name = "{rac_id}"',
+        'type = "tcp"',
+        'localIP = "127.0.0.1"',
+        f'localPort = {local_ssh_port}',
+        f'remotePort = {ssh_port}',
+        '',
+        '[[proxies]]',
+        f'name = "{rac_id}-WEB"',
+        'type = "tcp"',
+        'localIP = "127.0.0.1"',
+        'localPort = 8081',
+        f'remotePort = {web_port}',
+    ]
+    content = '\n'.join(lines) + '\n'
+
+    if dry_run:
+        _info(f'dry-run: would write {_FRPC_CONFIG}:\n{textwrap.indent(content, "     ")}')
+        return True
+
+    _run(['mkdir', '-p', str(_FRPC_CONFIG.parent)], sudo=True)
+    import tempfile as _tf4
+    with _tf4.NamedTemporaryFile('w', suffix='.toml', delete=False) as tf:
+        tf.write(content)
+        tf_path = tf.name
+    r = _run(['install', '-m', '640', tf_path, str(_FRPC_CONFIG)], sudo=True)
+    Path(tf_path).unlink(missing_ok=True)
+    if r.returncode != 0:
+        _err(f'frpc.toml write failed: {r.stderr.strip()}')
+        return False
+    _ok(f'frpc.toml: written ({rac_id}, channel {rac_number}, port {ssh_port})')
+    return True
+
+
 def _write_frpc_ini(rac_id: str, rac_number: int, dry_run: bool = False) -> bool:
     """Write /etc/sigmond/frpc.ini for the given RAC ID and number."""
     if not rac_id:
@@ -669,7 +826,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={_FRPC_BIN} -c {_FRPC_INI}
+ExecStart={_FRPC_BIN} -c {_FRPC_CONFIG}
 Restart=always
 RestartSec=30s
 TimeoutStartSec=30
@@ -690,6 +847,9 @@ WantedBy=multi-user.target
     if r.returncode != 0:
         _err(f'wd-rac.service write failed: {r.stderr.strip()}')
         return False
+    # Remove legacy frpc.ini now that we use frpc.toml.
+    if _FRPC_INI.exists():
+        _run(['rm', '-f', str(_FRPC_INI)], sudo=True)
     _run(['systemctl', 'daemon-reload'], sudo=True)
     _run(['systemctl', 'enable', 'wd-rac.service'], sudo=True)
     _run(['systemctl', 'restart', 'wd-rac.service'], sudo=True)
@@ -738,8 +898,10 @@ def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False) ->
 
     ok = True
     ok = _install_frpc(dry_run) and ok
+    ok = _ensure_frpc_keypair(dry_run) and ok
+    ok = _fetch_frps_ca_cert(dry_run) and ok
     if rac_id and rac_number >= 0:
-        ok = _write_frpc_ini(rac_id, rac_number, dry_run) and ok
+        ok = _write_frpc_config(rac_id, rac_number, dry_run) and ok
         ok = _install_rac_service(dry_run) and ok
     return ok
 
@@ -749,7 +911,7 @@ def rac_status() -> dict:
     result = {
         'frpc_installed': _FRPC_BIN.exists(),
         'frpc_version':   '',
-        'ini_exists':     _FRPC_INI.exists(),
+        'config_exists':  _FRPC_CONFIG.exists(),
         'service_active': False,
         'tunnel_ok':      False,
         'rac_id':         '',
@@ -761,23 +923,24 @@ def rac_status() -> dict:
         if r.returncode == 0:
             result['frpc_version'] = r.stdout.strip().split()[-1]
 
-    if result['ini_exists']:
+    if result['config_exists']:
         try:
-            cfg = configparser.ConfigParser()
-            cfg.read(_FRPC_INI)
-            sections = [s for s in cfg.sections() if s != 'common' and not s.endswith('-WEB')]
-            if sections:
-                result['rac_id'] = sections[0]
-                rp = cfg.getint(sections[0], 'remote_port', fallback=-1)
-                result['ssh_port']   = rp
-                result['rac_number'] = rp - _RAC_PORT_BASE if rp > 0 else -1
+            import tomllib
+            with open(_FRPC_CONFIG, 'rb') as f:
+                cfg = tomllib.load(f)
+            for proxy in cfg.get('proxies', []):
+                if not proxy.get('name', '').endswith('-WEB'):
+                    result['rac_id']    = proxy.get('name', '')
+                    rp = proxy.get('remotePort', -1)
+                    result['ssh_port']   = rp
+                    result['rac_number'] = rp - _RAC_PORT_BASE if rp > 0 else -1
+                    break
         except Exception:
             pass
 
     r = _run(['systemctl', 'is-active', 'wd-rac.service'])
     result['service_active'] = (r.returncode == 0 and r.stdout.strip() == 'active')
 
-    # Quick reachability test: can we talk to the frps server port?
     if result['service_active']:
         import socket
         try:
