@@ -691,7 +691,8 @@ WantedBy=multi-user.target
         _err(f'wd-rac.service write failed: {r.stderr.strip()}')
         return False
     _run(['systemctl', 'daemon-reload'], sudo=True)
-    _run(['systemctl', 'enable', '--now', 'wd-rac.service'], sudo=True)
+    _run(['systemctl', 'enable', 'wd-rac.service'], sudo=True)
+    _run(['systemctl', 'restart', 'wd-rac.service'], sudo=True)
     _ok('wd-rac.service: installed and enabled')
     return True
 
