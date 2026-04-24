@@ -602,21 +602,48 @@ def _detect_rac_defaults() -> tuple[str, int]:
     return rac_id, rac_number
 
 
+_WD_USER    = 'wsprdaemon'
+_WD_SSH_DIR = Path(f'/home/{_WD_USER}/.ssh')
+
+
+def _find_wd_pubkey() -> Path | None:
+    """Return the wsprdaemon user's SSH public key path, or None."""
+    for name in ('id_ed25519', 'id_rsa', 'id_ecdsa'):
+        p = _WD_SSH_DIR / f'{name}.pub'
+        if p.exists():
+            return p
+    return None
+
+
 def _ensure_frpc_keypair(dry_run: bool = False) -> bool:
-    """Generate /etc/sigmond/frpc_id_rsa keypair if it doesn't already exist."""
-    pub = Path(str(_FRPC_KEY) + '.pub')
-    if _FRPC_KEY.exists() and pub.exists():
-        _ok(f'frpc keypair: {_FRPC_KEY}')
+    """Ensure there is an SSH public key for frpc authentication.
+
+    Preference order:
+      1. /home/wsprdaemon/.ssh/id_*.pub — already registered on the gateway
+         via wd-upload-wsprdaemon uploads (no admin action needed).
+      2. /etc/sigmond/frpc_id_rsa.pub   — fallback: generate a dedicated key
+         and display it so the operator can register it manually.
+    """
+    pub = _find_wd_pubkey()
+    if pub:
+        _ok(f'frpc identity: using {_WD_USER} SSH key  →  {pub}')
+        _info('  (auto-registered on gateway via wsprdaemon uploads)')
+        return True
+
+    # Fall back to dedicated key.
+    fallback_pub = Path(str(_FRPC_KEY) + '.pub')
+    if _FRPC_KEY.exists() and fallback_pub.exists():
+        _ok(f'frpc identity: using dedicated key  →  {_FRPC_KEY}')
         return True
     if dry_run:
         _info(f'dry-run: would generate SSH keypair at {_FRPC_KEY}')
         return True
-    import tempfile as _tf2
+
+    import tempfile as _tf2, socket as _sock
     with _tf2.TemporaryDirectory() as td:
         tmp = Path(td) / 'frpc_id_rsa'
-        import socket as _sock
         r = subprocess.run(
-            ['ssh-keygen', '-t', 'rsa', '-b', '4096', '-N', '',
+            ['ssh-keygen', '-t', 'ed25519', '-N', '',
              '-C', f'wd-rac@{_sock.gethostname()}', '-f', str(tmp)],
             capture_output=True, text=True,
         )
@@ -624,11 +651,12 @@ def _ensure_frpc_keypair(dry_run: bool = False) -> bool:
             _err(f'ssh-keygen failed: {r.stderr.strip()}')
             return False
         _run(['mkdir', '-p', str(_FRPC_KEY.parent)], sudo=True)
-        _run(['install', '-m', '600', str(tmp),          str(_FRPC_KEY)],        sudo=True)
+        _run(['install', '-m', '600', str(tmp),          str(_FRPC_KEY)],          sudo=True)
         _run(['install', '-m', '644', str(tmp) + '.pub', str(_FRPC_KEY) + '.pub'], sudo=True)
-    pub_txt = pub.read_text().strip() if pub.exists() else '(unreadable)'
-    _ok(f'frpc keypair: generated  →  {_FRPC_KEY}')
-    _info(f'Send this public key to the RAC administrator to register the station:')
+    pub_txt = fallback_pub.read_text().strip() if fallback_pub.exists() else '(unreadable)'
+    _ok(f'frpc identity: generated dedicated key  →  {_FRPC_KEY}')
+    _warn('wsprdaemon SSH key not found — gateway registration is not automatic.')
+    _warn('Send this public key to the RAC administrator to register the station:')
     _info(f'  {pub_txt}')
     return True
 
@@ -636,10 +664,12 @@ def _ensure_frpc_keypair(dry_run: bool = False) -> bool:
 def _frpc_user_field() -> str:
     """Return the 16-char sha256 prefix used as the frpc user identity.
 
-    Matches: sha256sum /etc/sigmond/frpc_id_rsa.pub | cut -c1-16
+    Uses the wsprdaemon user's key if available (auto-registered via uploads),
+    otherwise the dedicated /etc/sigmond/frpc_id_rsa.pub.
+    Matches: sha256sum <pubkey_file> | cut -c1-16
     """
     import hashlib
-    pub = Path(str(_FRPC_KEY) + '.pub')
+    pub = _find_wd_pubkey() or Path(str(_FRPC_KEY) + '.pub')
     if not pub.exists():
         return ''
     return hashlib.sha256(pub.read_bytes()).hexdigest()[:16]
