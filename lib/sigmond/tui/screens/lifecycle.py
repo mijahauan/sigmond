@@ -143,6 +143,10 @@ class LifecycleScreen(Vertical):
     }
     """
 
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._target: Optional[str] = None   # None → "all", str → single component
+
     def compose(self):
         yield Static(
             "Lifecycle — start, stop, restart managed services",
@@ -154,9 +158,10 @@ class LifecycleScreen(Vertical):
             yield Button("▶ Start all",   id="lc-start",   variant="success")
             yield Button("■ Stop all",    id="lc-stop",    variant="error")
             yield Button("↺ Restart all", id="lc-restart", variant="warning")
+            yield Button("☐ All",         id="lc-clear",   variant="default")
 
         yield Static(
-            "[dim]Highlight a row to target a single component.[/]",
+            "[dim]Click a row to target one component; click again or press ☐ All to clear.[/]",
             id="lc-hint")
 
         table = DataTable(id="lc-table", cursor_type="row", zebra_stripes=True)
@@ -168,7 +173,6 @@ class LifecycleScreen(Vertical):
 
     def on_mount(self) -> None:
         self._refresh()
-        self._update_button_labels()
 
     # ------------------------------------------------------------------
     # button dispatch
@@ -179,19 +183,28 @@ class LifecycleScreen(Vertical):
         if bid == "lc-refresh":
             self._refresh()
             return
-        comp = self._selected_component()
+        if bid == "lc-clear":
+            self._target = None
+            self._update_button_labels()
+            return
         if bid == "lc-start":
-            self._verb_all("start") if comp is None else self._verb_one("start", comp)
+            self._verb_all("start") if self._target is None else self._verb_one("start", self._target)
         elif bid == "lc-stop":
-            self._verb_all("stop") if comp is None else self._verb_one("stop", comp)
+            self._verb_all("stop") if self._target is None else self._verb_one("stop", self._target)
         elif bid == "lc-restart":
-            self._verb_all("restart") if comp is None else self._verb_one("restart", comp)
+            self._verb_all("restart") if self._target is None else self._verb_one("restart", self._target)
 
-    def on_data_table_cursor_moved(self, event: DataTable.CursorMoved) -> None:
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Click or Enter on a row: select it (or deselect if already selected)."""
+        key = event.row_key.value if hasattr(event.row_key, 'value') else str(event.row_key)
+        if self._target == key:
+            self._target = None   # second click deselects
+        else:
+            self._target = key
         self._update_button_labels()
 
     def _update_button_labels(self) -> None:
-        comp = self._selected_component()
+        comp = self._target
         suffix = f" {comp}" if comp else " all"
         self.query_one("#lc-start",   Button).label = f"▶ Start{suffix}"
         self.query_one("#lc-stop",    Button).label = f"■ Stop{suffix}"
@@ -242,18 +255,6 @@ class LifecycleScreen(Vertical):
     # ------------------------------------------------------------------
     # actions
     # ------------------------------------------------------------------
-
-    def _selected_component(self) -> Optional[str]:
-        """Return the component name for the highlighted row, or None if none."""
-        table = self.query_one("#lc-table", DataTable)
-        if table.row_count == 0 or table.cursor_row is None:
-            return None
-        try:
-            row = list(table.get_row_at(table.cursor_row))
-            comp = str(row[0]) if row else ""
-            return comp if comp and not comp.startswith('[') else None
-        except Exception:
-            return None
 
     def _verb_all(self, verb: str) -> None:
         smd = _smd_binary()

@@ -1539,13 +1539,15 @@ def cmd_start(args) -> int:
 
     _heading('start')
     _netdiag_auto_refresh('start')
+    rc = 0
     for unit in units:
         r = _run(['systemctl', 'start', unit.unit], sudo=True)
         if r.returncode == 0:
             _ok(f'{unit.unit}')
         else:
             _err(f'{unit.unit}: {r.stderr.strip()}')
-    return 0
+            rc = 1
+    return rc
 
 
 def cmd_stop(args) -> int:
