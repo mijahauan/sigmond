@@ -67,14 +67,17 @@ class ConfirmModal(ModalScreen[bool]):
     """
 
     def __init__(self, title: str, body: str, cmd_preview: Optional[str] = None,
-                 yes_label: str = "Yes", no_label: str = "Cancel",
+                 yes_label: str = "Yes",   yes_variant: str = "primary",
+                 no_label:  str = "Cancel", no_variant:  str = "default",
                  **kwargs) -> None:
         super().__init__(**kwargs)
         self._title = title
         self._body = body
         self._cmd_preview = cmd_preview
         self._yes_label = yes_label
+        self._yes_variant = yes_variant
         self._no_label = no_label
+        self._no_variant = no_variant
 
     def compose(self) -> ComposeResult:
         with Grid():
@@ -83,8 +86,8 @@ class ConfirmModal(ModalScreen[bool]):
             if self._cmd_preview:
                 yield Static(f"\n[dim]$ {self._cmd_preview}[/]", id="cm-cmd")
             with Horizontal():
-                yield Button(self._no_label, id="cm-no", variant="default")
-                yield Button(self._yes_label, id="cm-yes", variant="primary")
+                yield Button(self._no_label,  id="cm-no",  variant=self._no_variant)
+                yield Button(self._yes_label, id="cm-yes", variant=self._yes_variant)
 
     def on_mount(self) -> None:
         # Default focus on No so a stray Enter cancels rather than proceeds.

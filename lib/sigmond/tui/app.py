@@ -200,8 +200,25 @@ class SigmondApp(App):
         def _on_choice(do_update: bool) -> None:
             if not do_update:
                 return
+            # Check for local changes before attempting pull.
+            dirty = sp.run(
+                ['git', '-C', repo, 'status', '--porcelain'],
+                capture_output=True, text=True)
+            if dirty.stdout.strip():
+                self.notify(
+                    "Update aborted: uncommitted local changes present.\n"
+                    "Run `git stash` then `git pull` manually in the sigmond repo.",
+                    severity="error", timeout=8)
+                return
             with self.suspend():
-                sp.run(['git', '-C', repo, 'pull', '--ff-only'], check=False)
+                result = sp.run(
+                    ['git', '-C', repo, 'pull', '--ff-only'], check=False)
+            if result.returncode != 0:
+                self.notify(
+                    f"git pull failed (exit {result.returncode}) — "
+                    "update manually: cd ~/sigmond && git pull",
+                    severity="error", timeout=8)
+                return
             self.notify(
                 "sigmond updated — please restart `smd tui` to run the new version.",
                 severity="information", timeout=6)
@@ -214,11 +231,13 @@ class SigmondApp(App):
                     f"sigmond is [bold]{behind} commit(s)[/] behind origin/main.\n\n"
                     f"  Running:  [dim]#{current}[/]\n"
                     f"  Latest:   [bold]#{latest}[/]\n\n"
-                    "Update now? sigmond will exit so you can restart with the new version.\n"
-                    "  [dim](choose Continue to skip and proceed as-is)[/]"
+                    "Update now? sigmond will pull and exit so you can restart.\n"
+                    "  [dim](choose Continue to skip and keep running as-is)[/]"
                 ),
                 yes_label="Update & Exit",
+                yes_variant="warning",
                 no_label="Continue",
+                no_variant="success",
             ),
             _on_choice,
         )
