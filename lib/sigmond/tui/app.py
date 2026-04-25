@@ -357,6 +357,23 @@ class SigmondApp(App):
             "gpsdo-monitor's full TUI focused on that device.",
         )
 
+    def action_show_kiwisdr(self) -> None:
+        from .screens.kiwisdr import KiwiSDRScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(KiwiSDRScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "KiwiSDR live",
+            "Discovers all KiwiSDRs on the local LAN by scanning port 8073.\n\n"
+            "For each KiwiSDR found, fetches /status and /gps to show:\n"
+            "  • Name and software version\n"
+            "  • Connected users / max users\n"
+            "  • GPS fix status and fix count\n"
+            "  • Uptime and antenna description\n\n"
+            "Press 'Rescan' to run a fresh port scan.",
+        )
+
     def action_show_validate(self) -> None:
         from .screens.validate import ValidateScreen
         center = self.query_one("#center")
