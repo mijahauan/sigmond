@@ -37,6 +37,13 @@ from ...sdr_labels import SdrDeviceMeta, get_device, load_devices, set_device
 _GRID_RE = re.compile(r'^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$')
 
 
+def _normalize_grid(val: str) -> str:
+    """Uppercase field+square, lowercase subsquare (convention: CM88mc not CM88MC)."""
+    if len(val) == 6:
+        return val[:4].upper() + val[4:].lower()
+    return val.upper()
+
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -396,10 +403,10 @@ class DeviceMetaModal(ModalScreen):
         with Vertical():
             with Horizontal(id="dm-header"):
                 yield Static(f"[dim]{self._meta.key}[/]", id="dm-title")
-                yield Button("✕", id="dm-x", variant="error")
+                yield Button("[white bold]X[/]", id="dm-x", variant="error")
 
 
-            yield Label("Name / status stream ID")
+            yield Label("Configuration name")
             yield Input(value=self._meta.label,
                         placeholder="e.g. Omni  →  omni-hf.status",
                         id="dm-label")
@@ -415,7 +422,7 @@ class DeviceMetaModal(ModalScreen):
 
             yield Label("Maidenhead grid square (4 or 6 characters)")
             yield Input(value=self._meta.grid,
-                        placeholder="e.g. CM88mc",
+                        placeholder="e.g. CM88mc  (subsquare letters auto-lowercased)",
                         id="dm-grid")
             yield Static("", classes="dm-hint", id="dm-grid-hint")
 
@@ -479,7 +486,7 @@ class DeviceMetaModal(ModalScreen):
             hint.set_class(False, "dm-err")
             hint.set_class(True,  "dm-ok")
         else:
-            hint.update("✗ must be 4 chars (AA00) or 6 chars (AA00AA)")
+            hint.update("✗ must be 4 chars (AA00) or 6 chars (AA00aa — subsquare lowercase)")
             hint.set_class(True,  "dm-err")
             hint.set_class(False, "dm-ok")
 
@@ -506,7 +513,7 @@ class DeviceMetaModal(ModalScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
         if bid == "dm-save":
-            grid = self.query_one("#dm-grid", Input).value.strip().upper()
+            grid = _normalize_grid(self.query_one("#dm-grid", Input).value.strip())
             if grid and not _GRID_RE.match(grid):
                 self.query_one("#dm-grid-hint", Static).update(
                     "[bold]✗ fix grid before saving[/]")
@@ -526,7 +533,7 @@ class DeviceMetaModal(ModalScreen):
                 False,
             ))
         elif bid == "dm-copy-grid":
-            grid = self.query_one("#dm-grid", Input).value.strip().upper()
+            grid = _normalize_grid(self.query_one("#dm-grid", Input).value.strip())
             if grid and not _GRID_RE.match(grid):
                 self.query_one("#dm-grid-hint", Static).update(
                     "[bold]✗ fix grid before copying[/]")
