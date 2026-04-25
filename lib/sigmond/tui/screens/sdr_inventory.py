@@ -375,9 +375,9 @@ class DeviceMetaModal(ModalScreen):
         background: $panel;
         border: thick $primary;
     }
-    DeviceMetaModal #dm-header  { height: 1; margin-bottom: 1; }
+    DeviceMetaModal #dm-header  { height: auto; margin-bottom: 1; align: left middle; }
     DeviceMetaModal #dm-title   { width: 1fr; color: $text-muted; }
-    DeviceMetaModal #dm-x       { width: 5; min-width: 5; height: 1; color: white; }
+    DeviceMetaModal #dm-x       { width: 7; min-width: 7; }
     DeviceMetaModal #dm-ttl     { margin-bottom: 0; }
     DeviceMetaModal .dm-key    { color: $text-muted; margin-bottom: 1; }
     DeviceMetaModal Label      { margin-bottom: 0; }
