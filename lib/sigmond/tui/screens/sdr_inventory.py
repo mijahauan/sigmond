@@ -45,10 +45,11 @@ _GRID_RE = re.compile(r'^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$')
 class SdrEntry:
     key: str              # label-store key: usb:vid:pid:n | kiwisdr:ip:port | ka9q_fe:host:name
     source: str           # "usb_sdr" | "kiwisdr" | "ka9q_fe"
-    sdr_type: str         # "RX-888" | "RTL-SDR" | "KiwiSDR" | "ka9q frontend" | ...
+    sdr_type: str         # "RX-888" | "RX-888 Mk2" | "RTL-SDR" | "KiwiSDR" | ...
     location: str         # bus/dev string, IP:port, or host
     detail: str           # chip, version, frontend name, etc.
     status: str           # "ok" | "no response" | error string
+    serial: str = ""      # USB serial number (iSerial from lsusb -v)
     users: str = ""       # KiwiSDR users/max
     gps: str = ""         # GPS status for KiwiSDR
     channels: int = 0     # KiwiSDR rx_chans from /status (0 = unknown)
@@ -61,6 +62,19 @@ class SdrEntry:
 # ---------------------------------------------------------------------------
 # Discovery helpers
 # ---------------------------------------------------------------------------
+
+def _get_usb_serial(bus: str, device: str) -> str:
+    """Return the USB iSerial string for a device, or empty string."""
+    try:
+        r = subprocess.run(
+            ['lsusb', '-v', '-s', f'{int(bus)}:{int(device)}'],
+            capture_output=True, text=True, timeout=5,
+        )
+        m = re.search(r'iSerial\s+\d+\s+(\S+)', r.stdout)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
 
 def _scan_usb() -> list[SdrEntry]:
     from ...discovery.usb_sdr import KNOWN_SDR_DEVICES, _parse_lsusb
@@ -82,12 +96,14 @@ def _scan_usb() -> list[SdrEntry]:
         n = idx_by_key.get(k, 0)
         idx_by_key[k] = n + 1
         label_key = f"usb:{dev['vid']}:{dev['pid']}:{n}"
+        serial = _get_usb_serial(dev["bus"], dev["device"])
         entries.append(SdrEntry(
             key=label_key,
             source="usb_sdr",
             sdr_type=sdr_type,
             location=f"bus {dev['bus']} dev {dev['device']}",
             detail=f"{chip}  {dev.get('name', '')}".strip(),
+            serial=serial,
             status="ok",
         ))
 
@@ -373,11 +389,12 @@ class DeviceMetaModal(ModalScreen):
         with Vertical():
             yield Static(f"[dim]{self._meta.key}[/]", classes="dm-key")
 
-            yield Label("Name / description")
+            yield Label("Name / status stream ID")
             yield Input(value=self._meta.label,
-                        placeholder="e.g. RX-888 Omni",
+                        placeholder="e.g. Omni  →  omni-hf.status",
                         id="dm-label")
-            yield Static("", classes="dm-hint", id="dm-label-hint")
+            yield Static("[dim]becomes the radiod status stream: <name>-hf.status[/]",
+                         classes="dm-hint", id="dm-label-hint")
 
             yield Label("Reporter ID")
             yield Input(value=self._meta.call,
@@ -512,8 +529,14 @@ class DeviceMetaModal(ModalScreen):
 # RX-888 radiod config generation
 # ---------------------------------------------------------------------------
 
-_RX888_CONF_TEMPLATE = Path('/opt/git/ka9q-radio/config/radiod@rx888-wsprdaemon.conf')
-_RADIOD_CONF_DIR     = Path('/etc/radio')
+_RADIOD_CONF_DIR = Path('/etc/radio')
+
+# Template selected per SDR type when generating a radiod instance config.
+_SDR_CONF_TEMPLATE: dict[str, Path] = {
+    "RX-888":     Path('/opt/git/ka9q-radio/config/radiod@rx888-wsprdaemon.conf'),
+    "RX-888 Mk2": Path('/opt/git/ka9q-radio/config/radiod@rx888-wsprdaemon.conf'),
+    "FX3 SDR":    Path('/opt/git/ka9q-radio/config/radiod@rx888-wsprdaemon.conf'),
+}
 
 
 def _config_name(label: str) -> str:
@@ -524,15 +547,18 @@ def _config_name(label: str) -> str:
 
 
 def _write_radiod_conf(entry: SdrEntry, meta: SdrDeviceMeta) -> Optional[str]:
-    """Write /etc/radio/radiod@<name>.conf for an RX-888 device.
+    """Write /etc/radio/radiod@<name>.conf for a USB SDR device.
 
     Returns an error string on failure, or None on success.
     """
-    if not _RX888_CONF_TEMPLATE.exists():
-        return f"template not found: {_RX888_CONF_TEMPLATE}"
+    template_path = _SDR_CONF_TEMPLATE.get(entry.sdr_type)
+    if template_path is None:
+        return f"no template for SDR type '{entry.sdr_type}'"
+    if not template_path.exists():
+        return f"template not found: {template_path}"
 
     try:
-        template = _RX888_CONF_TEMPLATE.read_text()
+        template = template_path.read_text()
     except Exception as e:
         return f"could not read template: {e}"
 
@@ -600,7 +626,7 @@ class SdrInventoryScreen(Vertical):
         yield Static("[dim]scanning…[/]", id="sdr-status")
 
         table = DataTable(id="sdr-table", zebra_stripes=True, cursor_type="row")
-        table.add_columns("Source", "Type", "Location", "Detail", "Users", "GPS", "Name", "Call", "Grid")
+        table.add_columns("Source", "Type", "Location", "Detail", "Serial", "Users", "GPS", "Name", "Call", "Grid")
         yield table
 
         with Horizontal(id="sdr-btn-row"):
@@ -667,9 +693,11 @@ class SdrInventoryScreen(Vertical):
             name_cell = f"[green]{e.label}[/]" if e.label else "[dim]—[/]"
             call_cell = f"[cyan]{e.call}[/]"   if e.call  else "[dim]—[/]"
             grid_cell = e.grid if e.grid else "[dim]—[/]"
+            serial_cell = f"[dim]{e.serial}[/]" if e.serial else "[dim]—[/]"
             table.add_row(
                 src_cell, type_cell, e.location,
                 e.detail[:35] if e.detail else "[dim]—[/]",
+                serial_cell,
                 e.users or "[dim]—[/]",
                 e.gps   or "[dim]—[/]",
                 name_cell, call_cell, grid_cell,
@@ -707,7 +735,7 @@ class SdrInventoryScreen(Vertical):
                         set_device(d2)
             self._render_entries()
 
-            if entry.sdr_type in ("RX-888", "FX3 SDR") and new_meta.label:
+            if entry.sdr_type in _SDR_CONF_TEMPLATE and new_meta.label:
                 err = _write_radiod_conf(entry, new_meta)
                 if err:
                     self.query_one("#sdr-status", Static).update(
