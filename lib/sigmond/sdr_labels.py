@@ -30,6 +30,7 @@ class SdrDeviceMeta:
     call:     str = ""
     grid:     str = ""
     channels: int = 0   # KiwiSDR: max simultaneous receive channels; 0 = unlimited/unknown
+    ttl:      int = 0   # ka9q-radio TTL: 0 = local only, 1 = send multicast out ethernet
 
 
 def load_devices(path: Path = SDR_LABELS_PATH) -> dict[str, SdrDeviceMeta]:
@@ -52,12 +53,17 @@ def load_devices(path: Path = SDR_LABELS_PATH) -> dict[str, SdrDeviceMeta]:
                 channels = int(val.get('channels', 0) or 0)
             except (ValueError, TypeError):
                 channels = 0
+            try:
+                ttl = int(val.get('ttl', 0) or 0)
+            except (ValueError, TypeError):
+                ttl = 0
             result[key] = SdrDeviceMeta(
                 key=key,
                 label=str(val.get('label', '') or ''),
                 call=str(val.get('call', '')  or ''),
                 grid=str(val.get('grid', '')  or ''),
                 channels=channels,
+                ttl=ttl,
             )
 
     # Backward-compat: flat [labels] section from earlier format
@@ -78,7 +84,7 @@ def save_devices(devices: dict[str, SdrDeviceMeta],
     ]
     for key in sorted(devices):
         d = devices[key]
-        if not (d.label or d.call or d.grid or d.channels):
+        if not (d.label or d.call or d.grid or d.channels or d.ttl):
             continue
         ek = key.replace('"', '\\"')
         lines.append(f'[device."{ek}"]\n')
@@ -90,6 +96,8 @@ def save_devices(devices: dict[str, SdrDeviceMeta],
             lines.append(f'grid     = "{_esc(d.grid)}"\n')
         if d.channels:
             lines.append(f'channels = {d.channels}\n')
+        if d.ttl:
+            lines.append(f'ttl      = {d.ttl}\n')
         lines.append('\n')
 
     content = "".join(lines)
