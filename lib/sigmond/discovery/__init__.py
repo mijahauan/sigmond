@@ -86,9 +86,17 @@ def cache_path() -> Path:
 
 
 def save_cache(view: EnvironmentView, path: Optional[Path] = None) -> None:
-    """Write the latest view to disk so successive CLI calls are instant."""
+    """Write the latest view to disk so successive CLI calls are instant.
+
+    Silently skips if the cache directory is not writable (e.g. /var/lib/sigmond
+    not yet created or owned by root).  The environment screen still works; it
+    just won't persist the results across restarts.
+    """
     p = path or cache_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        return
     payload = {
         "probed_at": view.probed_at,
         "observations": [_obs_to_dict(o) for o in view.observations],
@@ -103,7 +111,10 @@ def save_cache(view: EnvironmentView, path: Optional[Path] = None) -> None:
             for d in view.deltas
         ],
     }
-    p.write_text(json.dumps(payload, indent=2))
+    try:
+        p.write_text(json.dumps(payload, indent=2))
+    except PermissionError:
+        pass
 
 
 def load_cache(path: Optional[Path] = None) -> dict:
