@@ -167,13 +167,15 @@ class ModeModal(ModalScreen):
     ModeModal Button     { margin-right: 1; }
     """
 
+    # I1 (IQ archive) is supported in the config format but not offered in the UI
+    _UI_MODES = ["W2", "F2", "F5", "F15", "F30"]
+
     _MODE_DESCS = {
         "W2":  "W2  — WSPR 2-minute (standard)",
         "F2":  "F2  — FST4W 2-minute",
         "F5":  "F5  — FST4W 5-minute",
         "F15": "F15 — FST4W 15-minute",
         "F30": "F30 — FST4W 30-minute",
-        "I1":  "I1  — IQ archive (no decode)",
     }
 
     def __init__(self, rx_name: str, band: str,
@@ -191,7 +193,7 @@ class ModeModal(ModalScreen):
             yield Static(f"Modes: {self._rx} / {self._band}m", classes="mm-title")
             if self._current is None:
                 yield Static("[dim]pre-populated with band defaults[/]", classes="mm-hint")
-            for mode in ALL_MODES:
+            for mode in self._UI_MODES:
                 yield Checkbox(
                     self._MODE_DESCS.get(mode, mode),
                     value=(mode in active),
@@ -207,13 +209,13 @@ class ModeModal(ModalScreen):
 
     def on_mount(self) -> None:
         try:
-            self.query_one(f"#mm-{ALL_MODES[0]}", Checkbox).focus()
+            self.query_one(f"#mm-{self._UI_MODES[0]}", Checkbox).focus()
         except Exception:
             pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "mm-save":
-            modes = [m for m in ALL_MODES
+            modes = [m for m in self._UI_MODES
                      if self.query_one(f"#mm-{m}", Checkbox).value]
             self.dismiss(" ".join(modes) if modes else "")
         elif event.button.id == "mm-disable":
@@ -426,6 +428,18 @@ class WdClientScreen(Vertical):
         self._load()
 
     def action_save(self) -> None:
+        # Auto-populate undefined bands for any receiver that has been touched
+        needs_refresh = False
+        for row in self._rows:
+            if row.rx.bands:
+                for band in ALL_BANDS:
+                    if band not in row.rx.bands:
+                        row.rx.bands[band] = default_modes(band)
+                        needs_refresh = True
+        if needs_refresh:
+            self._dirty = True
+            self._refresh_table()
+
         # Build a WdConfig from current rows (only receivers with at least one band)
         wdc = WdConfig()
         # Preserve general settings from existing conf
