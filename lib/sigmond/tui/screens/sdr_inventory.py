@@ -230,7 +230,7 @@ def _scan_kiwis() -> list[SdrEntry]:
     candidates = [f"{s}.{i}" for s in subnets for i in range(1, 255)]
     open_hosts: list[str] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=128) as ex:
-        fmap = {ex.submit(_check_port, h, 8073, 0.3): h for h in candidates}
+        fmap = {ex.submit(_check_port, h, 8073, 0.6): h for h in candidates}
         for fut in concurrent.futures.as_completed(fmap):
             try:
                 if fut.result():
