@@ -231,6 +231,17 @@ class ModeModal(ModalScreen):
 # Main screen
 # ---------------------------------------------------------------------------
 
+def _cell_visible_width(modes_str: str) -> int:
+    """Visible character count for a modes cell (markup-stripped, for column sizing)."""
+    if not modes_str.strip():
+        return 1  # "—"
+    # W2 renders as "W" (1 char); I1 renders as "I" (1 char); others render as-is
+    abbrev_w = {"W2": 1, "I1": 1}
+    tokens = modes_str.split()
+    widths = [abbrev_w.get(t, len(t)) for t in tokens]
+    return sum(widths) + max(len(widths) - 1, 0)  # sum + (n-1) "·" separators
+
+
 def _modes_cell(modes_str: str) -> str:
     if not modes_str.strip():
         return "[dim]—[/]"
@@ -274,9 +285,7 @@ class WdClientScreen(Vertical):
         yield Static("wsprdaemon-client Configuration", classes="wd-title")
         yield Static("[dim]loading…[/]", id="wd-status")
 
-        table = DataTable(id="wd-table", zebra_stripes=True, cursor_type="cell")
-        table.add_columns("Receiver", *ALL_BANDS)
-        yield table
+        yield DataTable(id="wd-table", zebra_stripes=True, cursor_type="cell")
 
         with Horizontal(id="wd-btn-row"):
             yield Button("↺ Reload",          id="wd-reload",  variant="default")
@@ -332,7 +341,26 @@ class WdClientScreen(Vertical):
 
     def _refresh_table(self) -> None:
         table = self.query_one("#wd-table", DataTable)
-        table.clear()
+
+        # Compute per-column widths from actual data so every cell is visible
+        rx_width = max(
+            (max(len(row.display_name), len(row.rx.call)) for row in self._rows),
+            default=10,
+        )
+        rx_width = max(rx_width, 8)
+
+        band_widths: dict[str, int] = {}
+        for band in ALL_BANDS:
+            w = len(band)  # header is the floor
+            for row in self._rows:
+                w = max(w, _cell_visible_width(row.rx.bands.get(band, "")))
+            band_widths[band] = w
+
+        table.clear(columns=True)
+        table.add_column("Receiver", width=rx_width)
+        for band in ALL_BANDS:
+            table.add_column(band, width=band_widths[band])
+
         for row in self._rows:
             name_cell = row.display_name
             if row.rx.call:
