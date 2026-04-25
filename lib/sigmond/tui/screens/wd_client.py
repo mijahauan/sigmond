@@ -53,6 +53,11 @@ class ReceiverRow:
     def name(self) -> str:
         return self.rx.name
 
+    @property
+    def channel_limit(self) -> int:
+        """Max simultaneous bands for this receiver; 0 = unlimited (USB/ka9q)."""
+        return self.meta.channels if self.meta.key.startswith("kiwisdr:") else 0
+
 
 def _make_wd_name(meta: SdrDeviceMeta, existing_names: set[str]) -> str:
     """Derive a wsprdaemon receiver name from an SDR inventory entry."""
@@ -365,6 +370,10 @@ class WdClientScreen(Vertical):
             name_cell = row.display_name
             if row.rx.call:
                 name_cell += f"\n[dim]{row.rx.call}[/]"
+            if row.channel_limit:
+                configured = len(row.rx.bands)
+                color = "yellow" if configured >= row.channel_limit else "dim"
+                name_cell += f"\n[{color}]{configured}/{row.channel_limit} ch[/]"
             cells = [name_cell]
             for band in ALL_BANDS:
                 cells.append(_modes_cell(row.rx.bands.get(band, "")))
@@ -374,10 +383,13 @@ class WdClientScreen(Vertical):
     # cell click / double-click → mode modal
 
     def _populate_row_defaults(self, receiver_row: ReceiverRow) -> bool:
-        """Fill every undefined band in the row with its default modes.
+        """Fill undefined bands with defaults up to the channel limit (0 = unlimited).
         Returns True if any band was changed."""
+        limit = receiver_row.channel_limit
         changed = False
         for band in ALL_BANDS:
+            if limit and len(receiver_row.rx.bands) >= limit:
+                break
             if band not in receiver_row.rx.bands:
                 receiver_row.rx.bands[band] = default_modes(band)
                 changed = True
@@ -411,13 +423,22 @@ class WdClientScreen(Vertical):
                     f"[dim]{receiver_row.display_name}: all bands already configured[/]")
             return
 
-        band = ALL_BANDS[col - 1]
+        band  = ALL_BANDS[col - 1]
+        limit = receiver_row.channel_limit
 
         # Double-click on a band cell: first populate all undefined bands, then edit this one
         if is_double:
             self._populate_row_defaults(receiver_row)
 
         current = receiver_row.rx.bands.get(band, "")
+
+        # Warn if adding a new band would exceed the channel limit
+        if limit and not current and len(receiver_row.rx.bands) >= limit:
+            self.query_one("#wd-status", Static).update(
+                f"[yellow]{receiver_row.display_name}: already using all "
+                f"{limit} channel(s) — disable a band before adding another[/]"
+            )
+            return
         dfl     = default_modes(band)
 
         def _after(new_modes: Optional[str]) -> None:
@@ -456,11 +477,14 @@ class WdClientScreen(Vertical):
         self._load()
 
     def action_save(self) -> None:
-        # Auto-populate undefined bands for any receiver that has been touched
+        # Auto-populate undefined bands (up to channel limit) for any touched receiver
         needs_refresh = False
         for row in self._rows:
             if row.rx.bands:
+                limit = row.channel_limit
                 for band in ALL_BANDS:
+                    if limit and len(row.rx.bands) >= limit:
+                        break
                     if band not in row.rx.bands:
                         row.rx.bands[band] = default_modes(band)
                         needs_refresh = True

@@ -25,10 +25,11 @@ from .paths import SDR_LABELS_PATH
 
 @dataclass
 class SdrDeviceMeta:
-    key:   str
-    label: str = ""
-    call:  str = ""
-    grid:  str = ""
+    key:      str
+    label:    str = ""
+    call:     str = ""
+    grid:     str = ""
+    channels: int = 0   # KiwiSDR: max simultaneous receive channels; 0 = unlimited/unknown
 
 
 def load_devices(path: Path = SDR_LABELS_PATH) -> dict[str, SdrDeviceMeta]:
@@ -47,11 +48,16 @@ def load_devices(path: Path = SDR_LABELS_PATH) -> dict[str, SdrDeviceMeta]:
     # New rich format: [device."key"] sections
     for key, val in (raw.get('device', {}) or {}).items():
         if isinstance(val, dict):
+            try:
+                channels = int(val.get('channels', 0) or 0)
+            except (ValueError, TypeError):
+                channels = 0
             result[key] = SdrDeviceMeta(
                 key=key,
                 label=str(val.get('label', '') or ''),
                 call=str(val.get('call', '')  or ''),
                 grid=str(val.get('grid', '')  or ''),
+                channels=channels,
             )
 
     # Backward-compat: flat [labels] section from earlier format
@@ -72,16 +78,18 @@ def save_devices(devices: dict[str, SdrDeviceMeta],
     ]
     for key in sorted(devices):
         d = devices[key]
-        if not (d.label or d.call or d.grid):
+        if not (d.label or d.call or d.grid or d.channels):
             continue
         ek = key.replace('"', '\\"')
         lines.append(f'[device."{ek}"]\n')
         if d.label:
-            lines.append(f'label = "{_esc(d.label)}"\n')
+            lines.append(f'label    = "{_esc(d.label)}"\n')
         if d.call:
-            lines.append(f'call  = "{_esc(d.call)}"\n')
+            lines.append(f'call     = "{_esc(d.call)}"\n')
         if d.grid:
-            lines.append(f'grid  = "{_esc(d.grid)}"\n')
+            lines.append(f'grid     = "{_esc(d.grid)}"\n')
+        if d.channels:
+            lines.append(f'channels = {d.channels}\n')
         lines.append('\n')
 
     content = "".join(lines)

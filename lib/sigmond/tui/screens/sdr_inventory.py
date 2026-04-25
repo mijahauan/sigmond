@@ -50,6 +50,7 @@ class SdrEntry:
     status: str           # "ok" | "no response" | error string
     users: str = ""       # KiwiSDR users/max
     gps: str = ""         # GPS status for KiwiSDR
+    channels: int = 0     # KiwiSDR rx_chans from /status (0 = unknown)
     # metadata from label store
     label: str = ""
     call:  str = ""
@@ -176,6 +177,10 @@ def _probe_kiwi(host: str, port: int) -> SdrEntry:
     users   = fields.get('users', '')
     umax    = fields.get('users_max', '')
     fixes   = fields.get('fixes', '')
+    try:
+        rx_chans = int(fields.get('rx_chans', '0') or '0')
+    except ValueError:
+        rx_chans = 0
 
     gps_body = _fetch(f"{base}/gps", timeout=3.0)
     gps_fix = None
@@ -213,6 +218,7 @@ def _probe_kiwi(host: str, port: int) -> SdrEntry:
         status="ok",
         users=users_str,
         gps=gps_str,
+        channels=rx_chans,
     )
 
 
@@ -299,12 +305,26 @@ def _gather_all() -> list[SdrEntry]:
     ka9q_fe = _scan_ka9q_frontends()
     all_entries = usb + kiwis + ka9q_fe
     devices = load_devices()
+    changed = False
     for e in all_entries:
         meta = devices.get(e.key)
         if meta:
             e.label = meta.label
             e.call  = meta.call
             e.grid  = meta.grid
+            if e.channels > 0 and meta.channels == 0:
+                # Auto-persist channel count detected live for the first time
+                meta.channels = e.channels
+                changed = True
+            elif e.channels == 0 and meta.channels > 0:
+                # Use stored value as fallback when device is offline or scan missed it
+                e.channels = meta.channels
+    if changed:
+        try:
+            from ...sdr_labels import save_devices
+            save_devices(devices)
+        except Exception:
+            pass
     return all_entries
 
 
@@ -345,6 +365,7 @@ class DeviceMetaModal(ModalScreen):
     def __init__(self, meta: SdrDeviceMeta, **kwargs) -> None:
         super().__init__(**kwargs)
         self._meta = meta
+        self._is_kiwi = meta.key.startswith("kiwisdr:")
         self._id_touched = bool(meta.call)   # don't auto-fill if call already set
 
     def compose(self) -> ComposeResult:
@@ -369,6 +390,15 @@ class DeviceMetaModal(ModalScreen):
                         placeholder="e.g. CM88mc",
                         id="dm-grid")
             yield Static("", classes="dm-hint", id="dm-grid-hint")
+
+            if self._is_kiwi:
+                yield Label("Max receive channels (from KiwiSDR /status rx_chans)")
+                ch_val = str(self._meta.channels) if self._meta.channels else ""
+                yield Input(value=ch_val,
+                            placeholder="e.g. 4  (leave blank if unknown)",
+                            id="dm-channels")
+                hint = "[dim]auto-detected from /status rx_chans[/]" if self._meta.channels else ""
+                yield Static(hint, classes="dm-hint", id="dm-channels-hint")
 
             with Horizontal(id="dm-btns"):
                 with Horizontal(id="dm-btns-l"):
@@ -419,12 +449,20 @@ class DeviceMetaModal(ModalScreen):
 
     # ── buttons ──────────────────────────────────────────────────────────
 
+    def _read_channels(self) -> int:
+        if not self._is_kiwi:
+            return self._meta.channels
+        try:
+            v = self.query_one("#dm-channels", Input).value.strip()
+            return int(v) if v else 0
+        except (ValueError, Exception):
+            return 0
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
         if bid == "dm-save":
             grid = self.query_one("#dm-grid", Input).value.strip().upper()
             if grid and not _GRID_RE.match(grid):
-                # Refuse to save invalid grid
                 self.query_one("#dm-grid-hint", Static).update(
                     "[bold]✗ fix grid before saving[/]")
                 return
@@ -437,8 +475,9 @@ class DeviceMetaModal(ModalScreen):
                     label=self.query_one("#dm-label", Input).value.strip(),
                     call=call.upper(),
                     grid=grid,
+                    channels=self._read_channels(),
                 ),
-                False,   # copy_grid_to_all
+                False,
             ))
         elif bid == "dm-copy-grid":
             grid = self.query_one("#dm-grid", Input).value.strip().upper()
@@ -455,8 +494,9 @@ class DeviceMetaModal(ModalScreen):
                     label=self.query_one("#dm-label", Input).value.strip(),
                     call=call.upper(),
                     grid=grid,
+                    channels=self._read_channels(),
                 ),
-                True,    # copy_grid_to_all
+                True,
             ))
         elif bid == "dm-clear":
             self.dismiss((SdrDeviceMeta(key=self._meta.key), False))
@@ -581,6 +621,7 @@ class SdrInventoryScreen(Vertical):
         current_meta = SdrDeviceMeta(
             key=entry.key, label=entry.label,
             call=entry.call, grid=entry.grid,
+            channels=entry.channels,
         )
 
         def _after(result) -> None:
@@ -588,9 +629,10 @@ class SdrInventoryScreen(Vertical):
                 return
             new_meta, copy_grid_to_all = result
             set_device(new_meta)
-            entry.label = new_meta.label
-            entry.call  = new_meta.call
-            entry.grid  = new_meta.grid
+            entry.label    = new_meta.label
+            entry.call     = new_meta.call
+            entry.grid     = new_meta.grid
+            entry.channels = new_meta.channels
             if copy_grid_to_all and new_meta.grid:
                 devices = load_devices()
                 for e2 in self._entries:
