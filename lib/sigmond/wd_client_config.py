@@ -21,16 +21,27 @@ from .paths import SIGMOND_CONF
 
 WD_CONF_PATH = Path('/etc/wsprdaemon/wsprdaemon.conf')
 
-# All WSPR-capable bands, display order
+# All WSPR-capable bands, display order (frequency ascending)
 ALL_BANDS: list[str] = [
     "2200", "630", "160",
     "80", "80eu", "60", "60eu",
     "40", "30", "22",
-    "20", "17", "15", "12", "10", "6",
+    "20", "17", "15", "12", "10", "8", "6",
 ]
 
 # Mode tokens
 ALL_MODES: list[str] = ["W2", "F2", "F5", "F15", "F30", "I1"]
+
+# Default modes pre-populated when a band is first enabled
+DEFAULT_BAND_MODES: dict[str, str] = {
+    "2200": "W2 F2 F5 F15 F30",
+    "630":  "W2 F2 F5 F15 F30",
+}
+_DEFAULT_MODES_STANDARD = "W2 F2 F5"
+
+def default_modes(band: str) -> str:
+    """Return the pre-populated mode string for a band."""
+    return DEFAULT_BAND_MODES.get(band, _DEFAULT_MODES_STANDARD)
 
 
 @dataclass

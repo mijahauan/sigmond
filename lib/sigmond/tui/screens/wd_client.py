@@ -1,18 +1,16 @@
 """wsprdaemon-client configuration screen.
 
-Displays a receiver × band grid.  Each cell shows which decode modes are
-active for that (receiver, band) pair.  Click a cell (or press Enter) to
-toggle modes via a small modal.
+Single band × receiver matrix.  Rows come from the SDR inventory; columns
+are the 17 WSPR bands (2200m–6m, including 8m).  Each cell shows the active
+decode modes or "—" if that band is not configured for that receiver.
 
-Layout
-------
-  Title + status line
-  Receiver metadata table  (Name | Type | Address | Call | Grid)
-  Band × mode grid         (scrolls horizontally for all 16 bands)
-  Button row               (Add Receiver | Remove | Save | Apply)
+Click any cell to toggle modes.  Clicking a "—" cell opens the mode modal
+with band-appropriate defaults pre-checked (2200/630: W2+F2+F5+F15+F30;
+all others: W2+F2+F5).
 
-Reads /etc/wsprdaemon/wsprdaemon.conf (v4 INI).  Warns if v3 bash
-format is detected and offers to launch the migration command.
+The generated /etc/wsprdaemon/wsprdaemon.conf uses receiver names derived
+from SDR type (KA9Q_N for USB/ka9q-radio; KIWI_N for KiwiSDR) and call/grid
+from the SDR inventory.
 """
 
 from __future__ import annotations
@@ -24,52 +22,126 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, DataTable, Input, Label, Select, Static
+from textual.widgets import Button, Checkbox, DataTable, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
 from ...wd_client_config import (
     ALL_BANDS, ALL_MODES, WD_CONF_PATH,
     WdConfig, WdReceiver,
-    is_v3_format, load_config, save_config,
+    default_modes, is_v3_format, load_config, save_config,
 )
-from ...sdr_labels import load_devices
+from ...sdr_labels import SdrDeviceMeta, load_devices
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Row data model — one per SDR inventory entry
 # ---------------------------------------------------------------------------
 
-def _modes_cell(modes_str: str) -> str:
-    """Compact display for a modes string, e.g. 'W2 F2 F5' → 'W·F2·F5'."""
-    if not modes_str.strip():
-        return "[dim]—[/]"
-    tokens = modes_str.split()
-    abbrev = []
-    for t in tokens:
-        if t == "W2":   abbrev.append("W")
-        elif t == "F2":  abbrev.append("F2")
-        elif t == "F5":  abbrev.append("F5")
-        elif t == "F15": abbrev.append("F15")
-        elif t == "F30": abbrev.append("F30")
-        elif t == "I1":  abbrev.append("I")
-        else:            abbrev.append(t)
-    return "·".join(abbrev)
+class ReceiverRow:
+    """Bridges an SDR inventory entry to a WdReceiver in the config."""
+
+    def __init__(self, meta: SdrDeviceMeta, rx: WdReceiver) -> None:
+        self.meta = meta     # from SDR inventory
+        self.rx   = rx       # WdReceiver (may have empty bands initially)
+
+    @property
+    def display_name(self) -> str:
+        return self.meta.label or self.rx.name or self.meta.key
+
+    @property
+    def name(self) -> str:
+        return self.rx.name
 
 
-def _smd_binary() -> str:
-    import os, sys, shutil
-    argv0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
-    if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
-        return argv0
-    return shutil.which('smd') or '/usr/local/sbin/smd'
+def _make_wd_name(meta: SdrDeviceMeta, existing_names: set[str]) -> str:
+    """Derive a wsprdaemon receiver name from an SDR inventory entry."""
+    key = meta.key
+    if key.startswith("kiwisdr:"):
+        prefix = "KIWI"
+    else:
+        prefix = "KA9Q"
+    n = 0
+    while f"{prefix}_{n}" in existing_names:
+        n += 1
+    return f"{prefix}_{n}"
+
+
+def _build_rows(
+    inventory: dict[str, SdrDeviceMeta],
+    existing_conf: WdConfig,
+) -> list[ReceiverRow]:
+    """Merge SDR inventory + existing conf into a list of ReceiverRows.
+
+    Priority order:
+      1. Inventory entries that match an existing conf receiver by address
+      2. Inventory entries not yet in the conf  (empty band set)
+      3. Conf receivers with no matching inventory entry  (kept as-is)
+    """
+    rows: list[ReceiverRow] = []
+    used_names: set[str] = set()
+
+    # Build address → WdReceiver map for fast lookup
+    addr_to_rx: dict[str, WdReceiver] = {}
+    for rx in existing_conf.receivers.values():
+        if rx.address:
+            addr_to_rx[rx.address] = rx
+
+    # --- Inventory entries first ---
+    for meta in inventory.values():
+        # Derive address from the inventory key
+        if meta.key.startswith("kiwisdr:"):
+            address = meta.key.replace("kiwisdr:", "")  # "ip:port"
+        elif meta.key.startswith("ka9q_fe:"):
+            parts = meta.key.split(":", 2)
+            address = parts[2] if len(parts) > 2 else ""
+        else:
+            address = ""   # USB SDR — address set by user
+
+        # Match to existing conf receiver
+        existing_rx = addr_to_rx.get(address)
+        if existing_rx:
+            rx = existing_rx
+            used_names.add(rx.name)
+        else:
+            name = _make_wd_name(meta, used_names)
+            used_names.add(name)
+            rx = WdReceiver(
+                name=name,
+                address=address,
+                call=meta.call,
+                grid=meta.grid,
+            )
+
+        # Fill call/grid from inventory if conf doesn't have them
+        if not rx.call and meta.call:
+            rx.call = meta.call
+        if not rx.grid and meta.grid:
+            rx.grid = meta.grid
+
+        rows.append(ReceiverRow(meta=meta, rx=rx))
+
+    # --- Conf receivers not matched to any inventory entry ---
+    for rx in existing_conf.receivers.values():
+        if rx.name not in used_names:
+            dummy_meta = SdrDeviceMeta(
+                key=f"conf:{rx.name}",
+                label=rx.name,
+                call=rx.call,
+                grid=rx.grid,
+            )
+            rows.append(ReceiverRow(meta=dummy_meta, rx=rx))
+
+    return rows
 
 
 # ---------------------------------------------------------------------------
 # Mode toggle modal
 # ---------------------------------------------------------------------------
 
-class ModeModal(ModalScreen[Optional[str]]):
-    """Toggle decode modes for one (receiver, band) cell."""
+class ModeModal(ModalScreen):
+    """Toggle decode modes for one (receiver, band) cell.
+    Dismisses with space-separated modes string, "" to disable, or None to cancel.
+    """
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
@@ -85,8 +157,11 @@ class ModeModal(ModalScreen[Optional[str]]):
     ModeModal .mm-title  { text-style: bold; margin-bottom: 1; }
     ModeModal .mm-hint   { color: $text-muted; margin-bottom: 1; }
     ModeModal Checkbox   { margin-bottom: 0; }
-    ModeModal Horizontal { height: auto; align: right middle; margin-top: 1; }
-    ModeModal Button     { margin-left: 1; }
+    ModeModal #mm-btns   { height: auto; margin-top: 1; }
+    ModeModal #mm-btns-l { width: auto; }
+    ModeModal #mm-spacer { width: 1fr; }
+    ModeModal #mm-btns-r { width: auto; }
+    ModeModal Button     { margin-right: 1; }
     """
 
     _MODE_DESCS = {
@@ -95,32 +170,39 @@ class ModeModal(ModalScreen[Optional[str]]):
         "F5":  "F5  — FST4W 5-minute",
         "F15": "F15 — FST4W 15-minute",
         "F30": "F30 — FST4W 30-minute",
-        "I1":  "I1  — IQ archive only (no decode)",
+        "I1":  "I1  — IQ archive (no decode)",
     }
 
-    def __init__(self, rx_name: str, band: str, current_modes: str, **kwargs) -> None:
+    def __init__(self, rx_name: str, band: str,
+                 current_modes: str, default_modes_str: str, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._rx   = rx_name
-        self._band = band
-        self._current = set(current_modes.split()) if current_modes.strip() else set()
+        self._rx    = rx_name
+        self._band  = band
+        self._current = set(current_modes.split()) if current_modes.strip() else None
+        # None means "was empty" — we'll pre-populate with defaults
+        self._defaults = set(default_modes_str.split())
 
     def compose(self) -> ComposeResult:
+        active = self._current if self._current is not None else self._defaults
         with Vertical():
-            yield Static(f"Modes for {self._rx} / {self._band}m", classes="mm-title")
-            yield Static("Check modes to enable; uncheck to disable.", classes="mm-hint")
+            yield Static(f"Modes: {self._rx} / {self._band}m", classes="mm-title")
+            if self._current is None:
+                yield Static("[dim]pre-populated with band defaults[/]", classes="mm-hint")
             for mode in ALL_MODES:
                 yield Checkbox(
                     self._MODE_DESCS.get(mode, mode),
-                    value=(mode in self._current),
+                    value=(mode in active),
                     id=f"mm-{mode}",
                 )
-            with Horizontal():
-                yield Button("Cancel",   id="mm-cancel", variant="default")
-                yield Button("Disable",  id="mm-disable",variant="warning")
-                yield Button("Save",     id="mm-save",   variant="success")
+            with Horizontal(id="mm-btns"):
+                with Horizontal(id="mm-btns-l"):
+                    yield Button("💾 Save",    id="mm-save",    variant="success")
+                Static("", id="mm-spacer")
+                with Horizontal(id="mm-btns-r"):
+                    yield Button("Disable",    id="mm-disable", variant="error")
+                    yield Button("Cancel",     id="mm-cancel",  variant="default")
 
     def on_mount(self) -> None:
-        # Focus first checkbox
         try:
             self.query_one(f"#mm-{ALL_MODES[0]}", Checkbox).focus()
         except Exception:
@@ -141,128 +223,58 @@ class ModeModal(ModalScreen[Optional[str]]):
 
 
 # ---------------------------------------------------------------------------
-# Add receiver modal
-# ---------------------------------------------------------------------------
-
-class AddReceiverModal(ModalScreen[Optional[WdReceiver]]):
-    """Enter details for a new receiver."""
-
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
-
-    DEFAULT_CSS = """
-    AddReceiverModal { align: center middle; }
-    AddReceiverModal > Vertical {
-        width: 64;
-        height: auto;
-        padding: 1 2;
-        background: $panel;
-        border: thick $primary;
-    }
-    AddReceiverModal Label   { margin-bottom: 0; }
-    AddReceiverModal Input   { margin-bottom: 1; }
-    AddReceiverModal Select  { margin-bottom: 1; }
-    AddReceiverModal Horizontal { height: auto; align: right middle; margin-top: 1; }
-    AddReceiverModal Button  { margin-left: 1; }
-    """
-
-    def __init__(self, sdr_suggestions: list[tuple[str, str]], **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._suggestions = sdr_suggestions  # [(display, address), ...]
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Label("Receiver name (e.g. KA9Q_0 or KIWI_0)")
-            yield Input(placeholder="KA9Q_0", id="ar-name")
-            yield Label("Address (multicast DNS or host:port)")
-            if self._suggestions:
-                opts = [(f"{d} — {a}", a) for d, a in self._suggestions]
-                yield Select(
-                    options=[(label, val) for label, val in opts],
-                    prompt="Pick from SDR inventory…",
-                    id="ar-addr-select",
-                    allow_blank=True,
-                )
-            yield Input(placeholder="k3lr-wspr-pcm.local  or  192.168.1.100:8073",
-                        id="ar-address")
-            yield Label("WSPR reporter callsign")
-            yield Input(placeholder="AI6VN-0", id="ar-call")
-            yield Label("Maidenhead grid square")
-            yield Input(placeholder="CM88mc",  id="ar-grid")
-            with Horizontal():
-                yield Button("Cancel", id="ar-cancel", variant="default")
-                yield Button("Add",    id="ar-add",    variant="success")
-
-    def on_mount(self) -> None:
-        self.query_one("#ar-name", Input).focus()
-
-    def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "ar-addr-select" and event.value:
-            self.query_one("#ar-address", Input).value = str(event.value)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "ar-add":
-            name    = self.query_one("#ar-name",    Input).value.strip().upper()
-            address = self.query_one("#ar-address", Input).value.strip()
-            call    = self.query_one("#ar-call",    Input).value.strip().upper()
-            grid    = self.query_one("#ar-grid",    Input).value.strip()
-            if not name or not address:
-                return
-            self.dismiss(WdReceiver(name=name, address=address,
-                                    call=call, grid=grid))
-        else:
-            self.dismiss(None)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-# ---------------------------------------------------------------------------
 # Main screen
 # ---------------------------------------------------------------------------
 
+def _modes_cell(modes_str: str) -> str:
+    if not modes_str.strip():
+        return "[dim]—[/]"
+    abbrev = []
+    for t in modes_str.split():
+        if t == "W2":    abbrev.append("[green]W[/]")
+        elif t == "F2":  abbrev.append("F2")
+        elif t == "F5":  abbrev.append("F5")
+        elif t == "F15": abbrev.append("F15")
+        elif t == "F30": abbrev.append("F30")
+        elif t == "I1":  abbrev.append("[dim]I[/]")
+        else:            abbrev.append(t)
+    return "·".join(abbrev)
+
+
 class WdClientScreen(Vertical):
-    """wsprdaemon-client configuration — receiver × band grid editor."""
+    """wsprdaemon-client — band × receiver configuration grid."""
 
     BINDINGS = [
         Binding("s", "save",  "Save"),
         Binding("a", "apply", "Apply"),
+        Binding("r", "reload","Reload"),
     ]
 
     DEFAULT_CSS = """
     WdClientScreen { padding: 1; }
     WdClientScreen .wd-title  { text-style: bold; margin-bottom: 1; }
     WdClientScreen #wd-status { margin-bottom: 1; }
-    WdClientScreen #wd-rx-table  { margin-bottom: 0; }
-    WdClientScreen #wd-band-table { margin-top: 0; }
-    WdClientScreen .wd-section { text-style: bold; margin-top: 1; margin-bottom: 0; }
     WdClientScreen #wd-btn-row { height: 3; margin-top: 1; }
     WdClientScreen #wd-btn-row Button { margin-right: 1; }
     """
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._config: WdConfig = WdConfig()
+        self._rows: list[ReceiverRow] = []
         self._dirty = False
 
     def compose(self) -> ComposeResult:
         yield Static("wsprdaemon-client Configuration", classes="wd-title")
         yield Static("[dim]loading…[/]", id="wd-status")
 
-        yield Static("Receivers", classes="wd-section")
-        rx_table = DataTable(id="wd-rx-table", zebra_stripes=True, cursor_type="row")
-        rx_table.add_columns("Name", "Type", "Address", "Call", "Grid")
-        yield rx_table
-
-        yield Static("Band / Mode Matrix  (click cell to toggle modes)", classes="wd-section")
-        band_table = DataTable(id="wd-band-table", zebra_stripes=True, cursor_type="cell")
-        band_table.add_columns("Receiver", *ALL_BANDS)
-        yield band_table
+        table = DataTable(id="wd-table", zebra_stripes=True, cursor_type="cell")
+        table.add_columns("Receiver", *ALL_BANDS)
+        yield table
 
         with Horizontal(id="wd-btn-row"):
-            yield Button("+ Add receiver",    id="wd-add",    variant="default")
-            yield Button("− Remove selected", id="wd-remove", variant="error")
-            yield Button("💾 Save",           id="wd-save",   variant="success")
-            yield Button("▶ Apply (wd-ctl)", id="wd-apply",  variant="warning")
+            yield Button("↺ Reload",          id="wd-reload",  variant="default")
+            yield Button("💾 Save",           id="wd-save",    variant="success")
+            yield Button("▶ Apply (wd-ctl)", id="wd-apply",   variant="warning")
 
     def on_mount(self) -> None:
         self._load()
@@ -271,17 +283,22 @@ class WdClientScreen(Vertical):
     # loading
 
     def _load(self) -> None:
-        self.query_one("#wd-status", Static).update("[dim]reading config…[/]")
+        self.query_one("#wd-status", Static).update("[dim]reading SDR inventory + config…[/]")
         self.run_worker(self._worker_load, thread=True, name="wd-load")
 
-    def _worker_load(self) -> WdConfig:
-        return load_config()
+    def _worker_load(self) -> tuple:
+        inventory = load_devices()
+        conf      = load_config()
+        return inventory, conf
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name == "wd-load":
             if event.state == WorkerState.SUCCESS:
-                self._config = event.worker.result
-                self._refresh_view()
+                inventory, conf = event.worker.result
+                self._rows = _build_rows(inventory, conf)
+                self._dirty = False
+                self._refresh_table()
+                self._refresh_status()
         elif event.worker.name == "wd-apply-run":
             if event.state == WorkerState.SUCCESS:
                 rc, out = event.worker.result
@@ -292,98 +309,64 @@ class WdClientScreen(Vertical):
                     self.query_one("#wd-status", Static).update(
                         f"[red]wd-ctl apply exited {rc}[/]  {out[:120]}")
 
-    def _refresh_view(self) -> None:
+    def _refresh_status(self) -> None:
         if is_v3_format():
             self.query_one("#wd-status", Static).update(
-                "[yellow]v3 bash config detected — run "
-                "[bold]sudo wd-ctl migrate-config[/] to convert to v4[/]")
+                "[yellow]v3 bash config — run [bold]sudo wd-ctl migrate-config[/] to convert[/]")
             return
-
-        n_rx = len(self._config.receivers)
-        total_bands = sum(len(rx.bands) for rx in self._config.receivers.values())
+        active = sum(1 for r in self._rows if r.rx.bands)
+        total  = sum(len(r.rx.bands) for r in self._rows)
         self.query_one("#wd-status", Static).update(
-            f"{n_rx} receiver(s) · {total_bands} band assignment(s) · "
+            f"{len(self._rows)} receiver(s) from inventory · "
+            f"{active} active · {total} band assignment(s) · "
             f"[dim]{WD_CONF_PATH}[/]"
-            + (" [yellow]unsaved changes[/]" if self._dirty else "")
+            + (" [yellow]· unsaved changes[/]" if self._dirty else "")
         )
 
-        self._populate_rx_table()
-        self._populate_band_table()
-
-    def _populate_rx_table(self) -> None:
-        table = self.query_one("#wd-rx-table", DataTable)
+    def _refresh_table(self) -> None:
+        table = self.query_one("#wd-table", DataTable)
         table.clear()
-        type_color = {"ka9q": "cyan", "kiwi": "blue", "merge": "magenta",
-                      "ka9q_wwv": "cyan", "unknown": "dim"}
-        for rx in self._config.receivers.values():
-            tc = type_color.get(rx.receiver_type, "")
-            type_cell = (f"[{tc}]{rx.receiver_type}[/]"
-                         if tc and tc != "dim" else f"[dim]{rx.receiver_type}[/]")
-            table.add_row(
-                rx.name, type_cell, rx.address or "[dim]—[/]",
-                rx.call or "[dim]—[/]", rx.grid or "[dim]—[/]",
-                key=rx.name,
-            )
-
-    def _populate_band_table(self) -> None:
-        table = self.query_one("#wd-band-table", DataTable)
-        table.clear()
-        for rx in self._config.receivers.values():
-            cells = [rx.name]
+        for row in self._rows:
+            name_cell = row.display_name
+            if row.rx.call:
+                name_cell += f"\n[dim]{row.rx.call}[/]"
+            cells = [name_cell]
             for band in ALL_BANDS:
-                modes = rx.bands.get(band, "")
-                cells.append(_modes_cell(modes))
-            table.add_row(*cells, key=rx.name)
+                cells.append(_modes_cell(row.rx.bands.get(band, "")))
+            table.add_row(*cells, key=row.name)
 
     # ------------------------------------------------------------------
     # cell click → mode modal
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
-        if event.data_table.id != "wd-band-table":
-            return
-        col_idx = event.coordinate.column
+        col = event.coordinate.column
         row_idx = event.coordinate.row
-        if col_idx == 0:
-            return  # receiver name column
-        band = ALL_BANDS[col_idx - 1]
-        # Get receiver name from row key
-        try:
-            row_key = event.data_table.get_row_index(row_idx)
-        except Exception:
-            row_key = None
-        rx_names = list(self._config.receivers.keys())
-        if row_idx < 0 or row_idx >= len(rx_names):
+        if col == 0:
+            return  # receiver name column — no action
+        band = ALL_BANDS[col - 1]
+        if row_idx < 0 or row_idx >= len(self._rows):
             return
-        rx_name = rx_names[row_idx]
-        rx = self._config.receivers.get(rx_name)
-        if rx is None:
-            return
-
-        current_modes = rx.bands.get(band, "")
+        receiver_row = self._rows[row_idx]
+        current = receiver_row.rx.bands.get(band, "")
+        dfl = default_modes(band)
 
         def _after(new_modes: Optional[str]) -> None:
             if new_modes is None:
                 return
             if new_modes:
-                rx.bands[band] = new_modes
+                receiver_row.rx.bands[band] = new_modes
             else:
-                rx.bands.pop(band, None)
+                receiver_row.rx.bands.pop(band, None)
             self._dirty = True
-            self._populate_band_table()
+            self._refresh_table()
             self._refresh_status()
 
         self.app.push_screen(
-            ModeModal(rx_name=rx_name, band=band, current_modes=current_modes),
+            ModeModal(rx_name=receiver_row.display_name,
+                      band=band,
+                      current_modes=current,
+                      default_modes_str=dfl),
             _after,
-        )
-
-    def _refresh_status(self) -> None:
-        n_rx = len(self._config.receivers)
-        total_bands = sum(len(rx.bands) for rx in self._config.receivers.values())
-        self.query_one("#wd-status", Static).update(
-            f"{n_rx} receiver(s) · {total_bands} band assignment(s) · "
-            f"[dim]{WD_CONF_PATH}[/]"
-            + (" [yellow]unsaved changes[/]" if self._dirty else "")
         )
 
     # ------------------------------------------------------------------
@@ -395,41 +378,61 @@ class WdClientScreen(Vertical):
             self.action_save()
         elif bid == "wd-apply":
             self.action_apply()
-        elif bid == "wd-add":
-            self._add_receiver()
-        elif bid == "wd-remove":
-            self._remove_selected()
+        elif bid == "wd-reload":
+            self.action_reload()
+
+    def action_reload(self) -> None:
+        self._dirty = False
+        self._load()
 
     def action_save(self) -> None:
+        # Build a WdConfig from current rows (only receivers with at least one band)
+        wdc = WdConfig()
+        # Preserve general settings from existing conf
+        existing = load_config()
+        wdc.ka9q_conf_name = existing.ka9q_conf_name
+        wdc.rac = existing.rac
+        for row in self._rows:
+            if not row.rx.bands:
+                continue   # skip unconfigured receivers
+            rx = row.rx
+            # Ensure call/grid from inventory take precedence over stale conf values
+            if row.meta.call:
+                rx.call = row.meta.call
+            if row.meta.grid:
+                rx.grid = row.meta.grid
+            wdc.receivers[rx.name] = rx
+        # Build a simple always-on schedule
+        slot: dict[str, str] = {}
+        for rx in wdc.receivers.values():
+            if rx.bands:
+                slot[rx.name] = " ".join(sorted(rx.bands.keys()))
+        if slot:
+            wdc.schedule["main"] = slot
         try:
-            save_config(self._config)
+            save_config(wdc)
             self._dirty = False
             self._refresh_status()
             self.query_one("#wd-status", Static).update(
-                f"[green]Saved to {WD_CONF_PATH}[/]")
+                f"[green]Saved → {WD_CONF_PATH}[/]")
         except PermissionError:
-            self._save_via_sudo()
+            self._save_via_sudo(wdc)
         except Exception as e:
             self.query_one("#wd-status", Static).update(f"[red]Save failed: {e}[/]")
 
-    def _save_via_sudo(self) -> None:
-        import tempfile
+    def _save_via_sudo(self, wdc: WdConfig) -> None:
+        import tempfile, pathlib
         try:
-            with tempfile.NamedTemporaryFile('w', suffix='.conf', delete=False) as f:
-                from ...wd_client_config import save_config as _sc
-                # write to tmp
-                import io
-                # rebuild content via save_config to a temp path
-                tmp_path = __import__('pathlib').Path(f.name)
-            save_config(self._config, tmp_path)
+            tmp = pathlib.Path(tempfile.mktemp(suffix='.conf'))
+            save_config(wdc, tmp)
             r = subprocess.run(
-                ['sudo', 'cp', str(tmp_path), str(WD_CONF_PATH)],
+                ['sudo', 'cp', str(tmp), str(WD_CONF_PATH)],
                 capture_output=True, timeout=15,
             )
             if r.returncode == 0:
                 self._dirty = False
                 self.query_one("#wd-status", Static).update(
-                    f"[green]Saved via sudo to {WD_CONF_PATH}[/]")
+                    f"[green]Saved via sudo → {WD_CONF_PATH}[/]")
             else:
                 self.query_one("#wd-status", Static).update(
                     f"[red]sudo cp failed: {r.stderr.decode()[:80]}[/]")
@@ -448,41 +451,3 @@ class WdClientScreen(Vertical):
             capture_output=True, text=True, timeout=120,
         )
         return r.returncode, (r.stdout + r.stderr)[-500:]
-
-    def _add_receiver(self) -> None:
-        # Build suggestions from SDR inventory
-        devices = load_devices()
-        suggestions: list[tuple[str, str]] = []
-        for meta in devices.values():
-            if meta.key.startswith("kiwisdr:"):
-                ip_port = meta.key.replace("kiwisdr:", "")
-                display = f"{meta.label or 'KiwiSDR'} ({ip_port})"
-                suggestions.append((display, ip_port))
-            elif meta.key.startswith("usb:"):
-                display = meta.label or meta.key
-                suggestions.append((display, ""))
-            elif meta.key.startswith("ka9q_fe:"):
-                parts = meta.key.split(":", 2)
-                addr = parts[2] if len(parts) > 2 else ""
-                display = f"{meta.label or 'ka9q'} ({addr})"
-                suggestions.append((display, addr))
-
-        def _after(rx: Optional[WdReceiver]) -> None:
-            if rx is None:
-                return
-            self._config.receivers[rx.name] = rx
-            self._dirty = True
-            self._refresh_view()
-
-        self.app.push_screen(AddReceiverModal(sdr_suggestions=suggestions), _after)
-
-    def _remove_selected(self) -> None:
-        table = self.query_one("#wd-rx-table", DataTable)
-        idx = table.cursor_row
-        rx_names = list(self._config.receivers.keys())
-        if idx < 0 or idx >= len(rx_names):
-            return
-        name = rx_names[idx]
-        self._config.receivers.pop(name, None)
-        self._dirty = True
-        self._refresh_view()
