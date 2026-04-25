@@ -144,7 +144,7 @@ class EnvironmentScreen(Vertical):
                      id="env-hint")
 
     def on_mount(self) -> None:
-        self._render(_load_cached(), banner="cached")
+        self._render_view(_load_cached(), banner="cached")
 
     # ------------------------------------------------------------------ actions
 
@@ -161,7 +161,7 @@ class EnvironmentScreen(Vertical):
         self._kick(sources=["http_kiwisdr"], label="kiwi")
 
     def action_reload_manifest(self) -> None:
-        self._render(_load_cached(), banner="manifest reloaded")
+        self._render_view(_load_cached(), banner="manifest reloaded")
 
     # ------------------------------------------------------------------ worker
 
@@ -186,11 +186,11 @@ class EnvironmentScreen(Vertical):
         banner = f"probe complete  ({len(result.get('sources') or [])} sources)"
         if errs:
             banner += f"  [yellow]errors: {len(errs)}[/]"
-        self._render(view, banner=banner, errors=errs)
+        self._render_view(view, banner=banner, errors=errs)
 
     # ------------------------------------------------------------------ render
 
-    def _render(self, view: EnvironmentView,
+    def _render_view(self, view: EnvironmentView,
                 banner: str = "",
                 errors: list | None = None) -> None:
         status = ""
