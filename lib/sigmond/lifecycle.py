@@ -119,10 +119,13 @@ def _resolve_component_units(component: str) -> list[UnitRef]:
             )
         )
 
+    conf_dir = systemd_config.get('conf_dir', '')
+
     # Process templated units: expand per instance
     for template in templated_units:
         kind = _unit_kind(template)
-        expanded = _expand_template(component, template, source, kind)
+        expanded = _expand_template(component, template, source, kind,
+                                    conf_dir=conf_dir)
         units.extend(expanded)
 
     return units
@@ -133,6 +136,7 @@ def _expand_template(
     template: str,
     source: str,
     kind: str,
+    conf_dir: str = "",
 ) -> list[UnitRef]:
     """Expand a templated unit (e.g., 'psk-recorder@.service') into per-instance UnitRefs.
 
@@ -148,6 +152,19 @@ def _expand_template(
         for env_file in env_dir.glob("*.env"):
             instance_name = env_file.stem
             configured.add(instance_name)
+
+    # Discover configured instances from a conf_dir (e.g. /etc/radio for radiod@)
+    # Matches files like "radiod@<instance>.conf" and extracts <instance>.
+    if conf_dir:
+        base = template.split('@')[0]  # "radiod@.service" -> "radiod"
+        conf_path = Path(conf_dir)
+        if conf_path.exists():
+            for cf in conf_path.glob(f"{base}@*.conf"):
+                if cf.is_file() and not cf.is_symlink():
+                    # "radiod@kfs-rx888-omni.conf" -> "kfs-rx888-omni"
+                    instance_name = cf.stem[len(base) + 1:]
+                    if instance_name:
+                        configured.add(instance_name)
 
     # Discover known instances from systemctl
     known = set(configured)
@@ -274,9 +291,12 @@ def _load_fallback_shim(component: str) -> list[UnitRef]:
             )
         )
 
+    conf_dir = systemd_config.get('conf_dir', '')
+
     for template in templated_units:
         kind = _unit_kind(template)
-        expanded = _expand_template(component, template, source, kind)
+        expanded = _expand_template(component, template, source, kind,
+                                    conf_dir=conf_dir)
         units.extend(expanded)
 
     return units
