@@ -604,7 +604,7 @@ class SdrInventoryScreen(Vertical):
         yield table
 
         with Horizontal(id="sdr-btn-row"):
-            yield Button("↺ Rescan",   id="sdr-rescan", variant="default")
+            yield Button("↺ Rescan",   id="sdr-rescan", variant="success")
             yield Button("✎ Edit",     id="sdr-label",  variant="primary")
 
     def on_mount(self) -> None:
