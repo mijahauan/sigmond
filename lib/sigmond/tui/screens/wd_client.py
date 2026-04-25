@@ -58,8 +58,11 @@ class ReceiverRow:
 
     @property
     def channel_limit(self) -> int:
-        """Max simultaneous bands for this receiver; 0 = unlimited (USB/ka9q)."""
-        return self.meta.channels if self.meta.key.startswith("kiwisdr:") else 0
+        """Max simultaneous bands for this receiver; 0 = unlimited (USB/ka9q).
+        KiwiSDR defaults to 8 if the scan hasn't stored rx_chans yet."""
+        if not self.meta.key.startswith("kiwisdr:"):
+            return 0
+        return self.meta.channels if self.meta.channels > 0 else 8
 
 
 def _trim_kiwi_bands(rx: WdReceiver, limit: int) -> None:
@@ -148,8 +151,8 @@ def _build_rows(
             rx.grid = meta.grid
 
         # Enforce channel limit for KiwiSDRs (trims excess bands on load)
-        if meta.key.startswith("kiwisdr:") and meta.channels:
-            _trim_kiwi_bands(rx, meta.channels)
+        if meta.key.startswith("kiwisdr:"):
+            _trim_kiwi_bands(rx, meta.channels if meta.channels > 0 else 8)
 
         rows.append(ReceiverRow(meta=meta, rx=rx))
 
@@ -272,6 +275,16 @@ def _cell_visible_width(modes_str: str) -> int:
     tokens = modes_str.split()
     widths = [abbrev_w.get(t, len(t)) for t in tokens]
     return sum(widths) + max(len(widths) - 1, 0)  # sum + (n-1) "·" separators
+
+
+def _modes_cell_plain(modes_str: str) -> str:
+    """Plain-text version of _modes_cell — no markup, safe to wrap in [red]/[green]."""
+    if not modes_str.strip():
+        return "—"
+    return "·".join(
+        "W" if t == "W2" else ("I" if t == "I1" else t)
+        for t in modes_str.split()
+    )
 
 
 def _modes_cell(modes_str: str) -> str:
@@ -404,8 +417,10 @@ class WdClientScreen(Vertical):
                 name_cell += f"\n[{ch_color}]{configured}/{row.channel_limit} ch[/]"
             cells = [name_cell]
             for band in ALL_BANDS:
-                raw = _modes_cell(row.rx.bands.get(band, ""))
-                cells.append(raw if row.enabled else f"[dim]{raw}[/]")
+                if row.enabled:
+                    cells.append(_modes_cell(row.rx.bands.get(band, "")))
+                else:
+                    cells.append(f"[red]{_modes_cell_plain(row.rx.bands.get(band, ''))}[/]")
             table.add_row(*cells, key=row.name)
 
     # ------------------------------------------------------------------
