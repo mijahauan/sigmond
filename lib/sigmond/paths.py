@@ -14,6 +14,7 @@ COORDINATION_PATH   = SIGMOND_CONF / 'coordination.toml'
 COORDINATION_ENV    = SIGMOND_CONF / 'coordination.env'
 ENVIRONMENT_PATH    = SIGMOND_CONF / 'environment.toml'
 ENVIRONMENT_CACHE   = SIGMOND_STATE / 'environment-cache.json'
+SDR_LABELS_PATH     = SIGMOND_STATE / 'sdr-labels.toml'
 SECRETS_ENV         = SIGMOND_CONF / 'secrets.env'
 
 WSPRDAEMON_CONF     = Path('/etc/wsprdaemon/wsprdaemon.conf')

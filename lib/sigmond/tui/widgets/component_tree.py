@@ -48,6 +48,7 @@ class ComponentTree(Tree):
         observe.add_leaf("\u25c9 ka9q-radio live", data={"screen": "radiod"})
         observe.add_leaf("\u25d0 GPSDO live",      data={"screen": "gpsdo"})
         observe.add_leaf("\u25b6 KiwiSDR live",    data={"screen": "kiwisdr"})
+        observe.add_leaf("\u229e SDR inventory",   data={"screen": "sdr_inventory"})
         observe.add_leaf("\u2316 Environment",     data={"screen": "environment"})
         observe.add_leaf("\u2261 Logs",        data={"screen": "logs"})
         observe.add_leaf("\u2714 Validate",    data={"screen": "validate"})
@@ -80,6 +81,8 @@ class ComponentTree(Tree):
             self.app.action_show_gpsdo()
         elif screen == "kiwisdr":
             self.app.action_show_kiwisdr()
+        elif screen == "sdr_inventory":
+            self.app.action_show_sdr_inventory()
         elif screen == "logs":
             self.app.action_show_logs()
         elif screen == "validate":

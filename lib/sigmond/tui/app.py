@@ -357,6 +357,25 @@ class SigmondApp(App):
             "gpsdo-monitor's full TUI focused on that device.",
         )
 
+    def action_show_sdr_inventory(self) -> None:
+        from .screens.sdr_inventory import SdrInventoryScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(SdrInventoryScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "SDR Inventory",
+            "Discovers all SDR receivers visible to this host:\n\n"
+            "  USB  — local SDRs on the USB bus (RX-888, RTL-SDR,\n"
+            "         Airspy HF+, LimeSDR, etc.) detected via lsusb\n\n"
+            "  KiwiSDR — LAN port-8073 scan + /status + /gps probe\n\n"
+            "  ka9q — frontends being served by ka9q-radio instances\n\n"
+            "Select a row and press [bold]e[/] (or the Label button) to "
+            "assign a name — e.g. 'Omni', 'Kiwi North', 'RX-888 HF'.  "
+            "Labels are stored in /var/lib/sigmond/sdr-labels.toml and "
+            "used by configuration screens to refer to devices by name.",
+        )
+
     def action_show_kiwisdr(self) -> None:
         from .screens.kiwisdr import KiwiSDRScreen
         center = self.query_one("#center")
