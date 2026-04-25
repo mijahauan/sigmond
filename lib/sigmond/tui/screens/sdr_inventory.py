@@ -20,6 +20,7 @@ import subprocess
 import time
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from textual.app import ComposeResult
@@ -508,6 +509,69 @@ class DeviceMetaModal(ModalScreen):
 
 
 # ---------------------------------------------------------------------------
+# RX-888 radiod config generation
+# ---------------------------------------------------------------------------
+
+_RX888_CONF_TEMPLATE = Path('/opt/git/ka9q-radio/config/radiod@rx888-wsprdaemon.conf')
+_RADIOD_CONF_DIR     = Path('/etc/radio')
+
+
+def _config_name(label: str) -> str:
+    """Sanitize a device label into a valid DNS/systemd instance name."""
+    name = label.lower().strip()
+    name = re.sub(r'[^a-z0-9]+', '-', name)
+    return name.strip('-') or 'rx888'
+
+
+def _write_radiod_conf(entry: SdrEntry, meta: SdrDeviceMeta) -> Optional[str]:
+    """Write /etc/radio/radiod@<name>.conf for an RX-888 device.
+
+    Returns an error string on failure, or None on success.
+    """
+    if not _RX888_CONF_TEMPLATE.exists():
+        return f"template not found: {_RX888_CONF_TEMPLATE}"
+
+    try:
+        template = _RX888_CONF_TEMPLATE.read_text()
+    except Exception as e:
+        return f"could not read template: {e}"
+
+    try:
+        device_index = int(entry.key.split(':')[-1])
+    except (ValueError, IndexError):
+        device_index = 0
+
+    config_name = _config_name(meta.label)
+
+    content = re.sub(
+        r'^(status\s*=\s*)\S.*$',
+        rf'\g<1>{config_name}-hf.status',
+        template,
+        flags=re.MULTILINE,
+    )
+    content = re.sub(
+        r'^#?number\s*=\s*\d+',
+        f'number = {device_index}',
+        content,
+        flags=re.MULTILINE,
+    )
+
+    dest = _RADIOD_CONF_DIR / f'radiod@{config_name}.conf'
+    try:
+        r = subprocess.run(
+            ['sudo', 'tee', str(dest)],
+            input=content, text=True,
+            capture_output=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return f"sudo tee failed: {r.stderr.strip()}"
+    except Exception as e:
+        return f"write failed: {e}"
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Screen
 # ---------------------------------------------------------------------------
 
@@ -642,5 +706,15 @@ class SdrInventoryScreen(Vertical):
                         e2.grid = new_meta.grid
                         set_device(d2)
             self._render_entries()
+
+            if entry.sdr_type in ("RX-888", "FX3 SDR") and new_meta.label:
+                err = _write_radiod_conf(entry, new_meta)
+                if err:
+                    self.query_one("#sdr-status", Static).update(
+                        f"[red]radiod config error: {err}[/]")
+                else:
+                    cname = _config_name(new_meta.label)
+                    self.query_one("#sdr-status", Static).update(
+                        f"[green]✔ radiod@{cname}.conf written[/]")
 
         self.app.push_screen(DeviceMetaModal(meta=current_meta), _after)
