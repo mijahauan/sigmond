@@ -366,6 +366,9 @@ class DeviceMetaModal(ModalScreen):
         background: $panel;
         border: thick $primary;
     }
+    DeviceMetaModal #dm-header  { height: 1; margin-bottom: 1; }
+    DeviceMetaModal #dm-title   { width: 1fr; color: $text-muted; }
+    DeviceMetaModal #dm-x       { width: 5; min-width: 5; height: 1; }
     DeviceMetaModal .dm-key    { color: $text-muted; margin-bottom: 1; }
     DeviceMetaModal Label      { margin-bottom: 0; }
     DeviceMetaModal Input      { margin-bottom: 0; }
@@ -387,7 +390,10 @@ class DeviceMetaModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Static(f"[dim]{self._meta.key}[/]", classes="dm-key")
+            with Horizontal(id="dm-header"):
+                yield Static(f"[dim]{self._meta.key}[/]", id="dm-title")
+                yield Button("✕", id="dm-x", variant="error")
+
 
             yield Label("Name / status stream ID")
             yield Input(value=self._meta.label,
@@ -595,6 +601,31 @@ def _write_radiod_conf(entry: SdrEntry, meta: SdrDeviceMeta) -> Optional[str]:
     return None
 
 
+def _verify_radiod_conf(config_name: str) -> Optional[str]:
+    """Read back the written conf file and verify the status line.
+
+    Returns an error string on mismatch/missing, or None on success.
+    """
+    dest = _RADIOD_CONF_DIR / f'radiod@{config_name}.conf'
+    try:
+        content = dest.read_text()
+    except Exception as e:
+        return f"cannot read {dest.name}: {e}"
+
+    expected = f"{config_name}-hf.status"
+    for line in content.splitlines():
+        s = line.strip()
+        if s.startswith('#'):
+            continue
+        if s.lower().startswith('status') and '=' in s:
+            _, val = s.split('=', 1)
+            actual = val.strip()
+            if actual == expected:
+                return None
+            return f"status mismatch: file has '{actual}', expected '{expected}'"
+    return f"status line not found in {dest.name}"
+
+
 # ---------------------------------------------------------------------------
 # Screen
 # ---------------------------------------------------------------------------
@@ -753,7 +784,12 @@ class SdrInventoryScreen(Vertical):
                         f"[red]radiod config error: {err}[/]")
                 else:
                     cname = _config_name(new_meta.label)
-                    self.query_one("#sdr-status", Static).update(
-                        f"[green]✔ radiod@{cname}.conf written[/]")
+                    verr = _verify_radiod_conf(cname)
+                    if verr:
+                        self.query_one("#sdr-status", Static).update(
+                            f"[yellow]⚠ written but verify failed: {verr}[/]")
+                    else:
+                        self.query_one("#sdr-status", Static).update(
+                            f"[green]✔ radiod@{cname}.conf written and verified[/]")
 
         self.app.push_screen(DeviceMetaModal(meta=current_meta), _after)
