@@ -16,6 +16,7 @@ from the SDR inventory.
 from __future__ import annotations
 
 import subprocess
+import time
 from typing import Optional
 
 from textual.app import ComposeResult
@@ -121,8 +122,10 @@ def _build_rows(
         rows.append(ReceiverRow(meta=meta, rx=rx))
 
     # --- Conf receivers not matched to any inventory entry ---
+    # Only include those with a valid address; addressless entries (e.g. stale
+    # experimental receivers like AI6VN-0 with no address field) are skipped.
     for rx in existing_conf.receivers.values():
-        if rx.name not in used_names:
+        if rx.name not in used_names and rx.address:
             dummy_meta = SdrDeviceMeta(
                 key=f"conf:{rx.name}",
                 label=rx.name,
@@ -262,6 +265,8 @@ class WdClientScreen(Vertical):
         super().__init__(**kwargs)
         self._rows: list[ReceiverRow] = []
         self._dirty = False
+        self._last_cell: tuple[int, int] = (-1, -1)
+        self._last_cell_time: float = 0.0
 
     def compose(self) -> ComposeResult:
         yield Static("wsprdaemon-client Configuration", classes="wd-title")
@@ -336,19 +341,54 @@ class WdClientScreen(Vertical):
             table.add_row(*cells, key=row.name)
 
     # ------------------------------------------------------------------
-    # cell click → mode modal
+    # cell click / double-click → mode modal
+
+    def _populate_row_defaults(self, receiver_row: ReceiverRow) -> bool:
+        """Fill every undefined band in the row with its default modes.
+        Returns True if any band was changed."""
+        changed = False
+        for band in ALL_BANDS:
+            if band not in receiver_row.rx.bands:
+                receiver_row.rx.bands[band] = default_modes(band)
+                changed = True
+        if changed:
+            self._dirty = True
+            self._refresh_table()
+            self._refresh_status()
+        return changed
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
-        col = event.coordinate.column
+        col     = event.coordinate.column
         row_idx = event.coordinate.row
-        if col == 0:
-            return  # receiver name column — no action
-        band = ALL_BANDS[col - 1]
         if row_idx < 0 or row_idx >= len(self._rows):
             return
         receiver_row = self._rows[row_idx]
+
+        # Detect double-click / double-Enter on same cell (≤ 0.5 s)
+        now  = time.monotonic()
+        cell = (row_idx, col)
+        is_double = (cell == self._last_cell and now - self._last_cell_time <= 0.5)
+        self._last_cell       = cell
+        self._last_cell_time  = now
+
+        # Click on receiver-name column:
+        #   single → populate all undefined bands (visual feedback only)
+        #   double → same (idempotent)
+        if col == 0:
+            changed = self._populate_row_defaults(receiver_row)
+            if not changed:
+                self.query_one("#wd-status", Static).update(
+                    f"[dim]{receiver_row.display_name}: all bands already configured[/]")
+            return
+
+        band = ALL_BANDS[col - 1]
+
+        # Double-click on a band cell: first populate all undefined bands, then edit this one
+        if is_double:
+            self._populate_row_defaults(receiver_row)
+
         current = receiver_row.rx.bands.get(band, "")
-        dfl = default_modes(band)
+        dfl     = default_modes(band)
 
         def _after(new_modes: Optional[str]) -> None:
             if new_modes is None:
