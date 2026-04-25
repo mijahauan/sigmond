@@ -333,7 +333,7 @@ class WdClientScreen(Vertical):
         yield DataTable(id="wd-table", zebra_stripes=True, cursor_type="cell")
 
         with Horizontal(id="wd-btn-row"):
-            yield Button("↺ Reload",          id="wd-reload",  variant="default")
+            yield Button("↺ Reload",          id="wd-reload",  variant="primary")
             yield Button("💾 Save",           id="wd-save",    variant="success")
             yield Button("▶ Apply (wd-ctl)", id="wd-apply",   variant="warning")
 
