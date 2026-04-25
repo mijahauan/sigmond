@@ -29,7 +29,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
-from ...sdr_labels import get_label, load_labels, set_label
+from ...sdr_labels import SdrDeviceMeta, get_device, load_devices, set_device
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +46,10 @@ class SdrEntry:
     status: str           # "ok" | "no response" | error string
     users: str = ""       # KiwiSDR users/max
     gps: str = ""         # GPS status for KiwiSDR
-    label: str = ""       # operator label (from label store)
+    # metadata from label store
+    label: str = ""
+    call:  str = ""
+    grid:  str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -291,59 +294,76 @@ def _gather_all() -> list[SdrEntry]:
     kiwis   = _scan_kiwis()
     ka9q_fe = _scan_ka9q_frontends()
     all_entries = usb + kiwis + ka9q_fe
-    labels = load_labels()
+    devices = load_devices()
     for e in all_entries:
-        e.label = labels.get(e.key, "")
+        meta = devices.get(e.key)
+        if meta:
+            e.label = meta.label
+            e.call  = meta.call
+            e.grid  = meta.grid
     return all_entries
 
 
 # ---------------------------------------------------------------------------
-# Label modal
+# Device metadata modal (label + callsign + grid)
 # ---------------------------------------------------------------------------
 
-class LabelModal(ModalScreen[Optional[str]]):
-    """Single-line text input to set/clear a device label."""
+class DeviceMetaModal(ModalScreen[Optional[SdrDeviceMeta]]):
+    """Edit label, WSPR callsign, and Maidenhead grid for an SDR device."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
     DEFAULT_CSS = """
-    LabelModal { align: center middle; }
-    LabelModal > Vertical {
-        width: 60;
+    DeviceMetaModal { align: center middle; }
+    DeviceMetaModal > Vertical {
+        width: 64;
         height: auto;
         padding: 1 2;
         background: $panel;
         border: thick $primary;
     }
-    LabelModal Label { margin-bottom: 1; }
-    LabelModal Input { margin-bottom: 1; }
-    LabelModal Horizontal { height: auto; align: right middle; }
-    LabelModal Button { margin-left: 1; }
+    DeviceMetaModal .dm-key   { color: $text-muted; margin-bottom: 1; }
+    DeviceMetaModal .dm-field { margin-bottom: 1; }
+    DeviceMetaModal Label     { margin-bottom: 0; }
+    DeviceMetaModal Input     { margin-bottom: 1; }
+    DeviceMetaModal Horizontal { height: auto; align: right middle; margin-top: 1; }
+    DeviceMetaModal Button    { margin-left: 1; }
     """
 
-    def __init__(self, device_key: str, current_label: str, **kwargs) -> None:
+    def __init__(self, meta: SdrDeviceMeta, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._key = device_key
-        self._current = current_label
+        self._meta = meta
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label(f"Label for: [bold]{self._key}[/]")
-            yield Input(value=self._current, placeholder="e.g. Omni antenna",
-                        id="label-input")
+            yield Static(f"[dim]{self._meta.key}[/]", classes="dm-key")
+            yield Label("Name / description")
+            yield Input(value=self._meta.label, placeholder="e.g. RX-888 Omni",
+                        id="dm-label")
+            yield Label("WSPR reporter callsign")
+            yield Input(value=self._meta.call, placeholder="e.g. AI6VN-0",
+                        id="dm-call")
+            yield Label("Maidenhead grid square")
+            yield Input(value=self._meta.grid, placeholder="e.g. CM88mc",
+                        id="dm-grid")
             with Horizontal():
-                yield Button("Cancel",    id="lm-cancel",  variant="default")
-                yield Button("Clear",     id="lm-clear",   variant="warning")
-                yield Button("Save",      id="lm-save",    variant="success")
+                yield Button("Cancel", id="dm-cancel", variant="default")
+                yield Button("Clear",  id="dm-clear",  variant="warning")
+                yield Button("Save",   id="dm-save",   variant="success")
 
     def on_mount(self) -> None:
-        self.query_one("#label-input", Input).focus()
+        self.query_one("#dm-label", Input).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "lm-save":
-            self.dismiss(self.query_one("#label-input", Input).value)
-        elif event.button.id == "lm-clear":
-            self.dismiss("")
+        if event.button.id == "dm-save":
+            self.dismiss(SdrDeviceMeta(
+                key=self._meta.key,
+                label=self.query_one("#dm-label", Input).value.strip(),
+                call =self.query_one("#dm-call",  Input).value.strip().upper(),
+                grid =self.query_one("#dm-grid",  Input).value.strip(),
+            ))
+        elif event.button.id == "dm-clear":
+            self.dismiss(SdrDeviceMeta(key=self._meta.key))
         else:
             self.dismiss(None)
 
@@ -380,12 +400,12 @@ class SdrInventoryScreen(Vertical):
         yield Static("[dim]scanning…[/]", id="sdr-status")
 
         table = DataTable(id="sdr-table", zebra_stripes=True, cursor_type="row")
-        table.add_columns("Source", "Type", "Location", "Detail", "Users", "GPS", "Label")
+        table.add_columns("Source", "Type", "Location", "Detail", "Users", "GPS", "Name", "Call", "Grid")
         yield table
 
         with Horizontal(id="sdr-btn-row"):
-            yield Button("↺ Rescan",      id="sdr-rescan", variant="default")
-            yield Button("✎ Label",       id="sdr-label",  variant="primary")
+            yield Button("↺ Rescan",   id="sdr-rescan", variant="default")
+            yield Button("✎ Edit",     id="sdr-label",  variant="primary")
 
     def on_mount(self) -> None:
         self._rescan()
@@ -444,13 +464,15 @@ class SdrInventoryScreen(Vertical):
             type_cell = e.sdr_type
             if e.status not in ("ok", "none"):
                 type_cell = f"[red]{e.sdr_type}[/]"
-            label_cell = f"[green]{e.label}[/]" if e.label else "[dim]—[/]"
+            name_cell = f"[green]{e.label}[/]" if e.label else "[dim]—[/]"
+            call_cell = f"[cyan]{e.call}[/]"   if e.call  else "[dim]—[/]"
+            grid_cell = e.grid if e.grid else "[dim]—[/]"
             table.add_row(
                 src_cell, type_cell, e.location,
-                e.detail[:40] if e.detail else "[dim]—[/]",
+                e.detail[:35] if e.detail else "[dim]—[/]",
                 e.users or "[dim]—[/]",
                 e.gps   or "[dim]—[/]",
-                label_cell,
+                name_cell, call_cell, grid_cell,
                 key=e.key,
             )
 
@@ -460,15 +482,18 @@ class SdrInventoryScreen(Vertical):
         if idx < 0 or idx >= len(self._entries):
             return
         entry = self._entries[idx]
+        current_meta = SdrDeviceMeta(
+            key=entry.key, label=entry.label,
+            call=entry.call, grid=entry.grid,
+        )
 
-        def _after(new_label: Optional[str]) -> None:
-            if new_label is None:
+        def _after(new_meta: Optional[SdrDeviceMeta]) -> None:
+            if new_meta is None:
                 return
-            set_label(entry.key, new_label)
-            entry.label = new_label
+            set_device(new_meta)
+            entry.label = new_meta.label
+            entry.call  = new_meta.call
+            entry.grid  = new_meta.grid
             self._render_entries()
 
-        self.app.push_screen(
-            LabelModal(device_key=entry.key, current_label=entry.label),
-            _after,
-        )
+        self.app.push_screen(DeviceMetaModal(meta=current_meta), _after)

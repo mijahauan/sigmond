@@ -54,7 +54,7 @@ class BackupScreen(Vertical):
     def compose(self):
         yield Static("Backup configuration", classes="bs-title")
         yield Static(_WHAT, id="bs-what")
-        yield Button("Create backup now", id="bs-run", variant="primary")
+        yield Button("Create backup now", id="bs-run", variant="success")
         yield Static("", id="bs-last")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

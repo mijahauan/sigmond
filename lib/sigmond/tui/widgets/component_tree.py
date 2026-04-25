@@ -37,6 +37,8 @@ class ComponentTree(Tree):
         configure = self.root.add("Configure", expand=True)
         configure.add_leaf("\u2630 Topology",          data={"screen": "topology"})
         configure.add_leaf("\u2691 Software versions", data={"screen": "components"})
+        configure.add_leaf("\u229e SDR inventory",     data={"screen": "sdr_inventory"})
+        configure.add_leaf("\u223f wsprdaemon-client", data={"screen": "wd_client"})
         configure.add_leaf("\u2261 Config view",       data={"screen": "config_show"})
         configure.add_leaf("\u2699 CPU affinity",      data={"screen": "cpu_affinity"})
         configure.add_leaf("\u21f5 CPU frequency",     data={"screen": "cpu_freq"})
@@ -48,7 +50,6 @@ class ComponentTree(Tree):
         observe.add_leaf("\u25c9 ka9q-radio live", data={"screen": "radiod"})
         observe.add_leaf("\u25d0 GPSDO live",      data={"screen": "gpsdo"})
         observe.add_leaf("\u25b6 KiwiSDR live",    data={"screen": "kiwisdr"})
-        observe.add_leaf("\u229e SDR inventory",   data={"screen": "sdr_inventory"})
         observe.add_leaf("\u2316 Environment",     data={"screen": "environment"})
         observe.add_leaf("\u2261 Logs",        data={"screen": "logs"})
         observe.add_leaf("\u2714 Validate",    data={"screen": "validate"})
@@ -83,6 +84,8 @@ class ComponentTree(Tree):
             self.app.action_show_kiwisdr()
         elif screen == "sdr_inventory":
             self.app.action_show_sdr_inventory()
+        elif screen == "wd_client":
+            self.app.action_show_wd_client()
         elif screen == "logs":
             self.app.action_show_logs()
         elif screen == "validate":

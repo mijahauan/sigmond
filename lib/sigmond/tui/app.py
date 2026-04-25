@@ -357,6 +357,28 @@ class SigmondApp(App):
             "gpsdo-monitor's full TUI focused on that device.",
         )
 
+    def action_show_wd_client(self) -> None:
+        from .screens.wd_client import WdClientScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(WdClientScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "wsprdaemon-client",
+            "Configure receivers and bands for wsprdaemon-client.\n\n"
+            "The top table shows each defined receiver (KA9Q multicast,\n"
+            "KiwiSDR, or merge).  The band grid below shows which decode\n"
+            "modes are active per (receiver, band).\n\n"
+            "Click a cell in the band grid to toggle modes:\n"
+            "  W2  — WSPR 2-minute (standard)\n"
+            "  F2/F5 — FST4W 2 or 5-minute\n"
+            "  F15/F30 — FST4W 15 or 30-minute\n\n"
+            "Save writes /etc/wsprdaemon/wsprdaemon.conf.\n"
+            "Apply runs [bold]sudo wd-ctl apply[/] to activate.\n\n"
+            "Use Configure → SDR Inventory to assign names,\n"
+            "callsigns and grid squares to physical receivers.",
+        )
+
     def action_show_sdr_inventory(self) -> None:
         from .screens.sdr_inventory import SdrInventoryScreen
         center = self.query_one("#center")
