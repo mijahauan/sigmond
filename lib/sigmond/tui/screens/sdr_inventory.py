@@ -418,9 +418,9 @@ class SdrInventoryScreen(Vertical):
         if event.state != WorkerState.SUCCESS:
             return
         self._entries = event.worker.result or []
-        self._render()
+        self._render_entries()
 
-    def _render(self) -> None:
+    def _render_entries(self) -> None:
         table = self.query_one("#sdr-table", DataTable)
         table.clear()
 
@@ -466,7 +466,7 @@ class SdrInventoryScreen(Vertical):
                 return
             set_label(entry.key, new_label)
             entry.label = new_label
-            self._render()
+            self._render_entries()
 
         self.app.push_screen(
             LabelModal(device_key=entry.key, current_label=entry.label),
