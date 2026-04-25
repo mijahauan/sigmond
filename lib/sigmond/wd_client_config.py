@@ -32,6 +32,9 @@ ALL_BANDS: list[str] = [
 # Mode tokens
 ALL_MODES: list[str] = ["W2", "F2", "F5", "F15", "F30", "I1"]
 
+# Default bands pre-selected for KiwiSDR receivers (8 typical HF channels)
+KIWI_DEFAULT_BANDS: list[str] = ["80", "40", "30", "20", "17", "15", "12", "10"]
+
 # Default modes pre-populated when a band is first enabled
 DEFAULT_BAND_MODES: dict[str, str] = {
     "2200": "W2 F2 F5 F15 F30",

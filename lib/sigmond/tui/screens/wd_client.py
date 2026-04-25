@@ -4,9 +4,11 @@ Single band × receiver matrix.  Rows come from the SDR inventory; columns
 are the 17 WSPR bands (2200m–6m, including 8m).  Each cell shows the active
 decode modes or "—" if that band is not configured for that receiver.
 
-Click any cell to toggle modes.  Clicking a "—" cell opens the mode modal
-with band-appropriate defaults pre-checked (2200/630: W2+F2+F5+F15+F30;
-all others: W2+F2+F5).
+Click a receiver name to toggle it on (green) or off (red).  Disabled
+receivers are shown but excluded from save.  Click a band cell to edit
+modes; double-click to fill all empty bands first then edit the cell.
+KiwiSDR rows are capped at their rx_chans channel count; default bands
+are 80/40/30/20/17/15/12/10m.
 
 The generated /etc/wsprdaemon/wsprdaemon.conf uses receiver names derived
 from SDR type (KA9Q_N for USB/ka9q-radio; KIWI_N for KiwiSDR) and call/grid
@@ -27,7 +29,7 @@ from textual.widgets import Button, Checkbox, DataTable, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
 from ...wd_client_config import (
-    ALL_BANDS, ALL_MODES, WD_CONF_PATH,
+    ALL_BANDS, ALL_MODES, KIWI_DEFAULT_BANDS, WD_CONF_PATH,
     WdConfig, WdReceiver,
     default_modes, is_v3_format, load_config, save_config,
 )
@@ -42,8 +44,9 @@ class ReceiverRow:
     """Bridges an SDR inventory entry to a WdReceiver in the config."""
 
     def __init__(self, meta: SdrDeviceMeta, rx: WdReceiver) -> None:
-        self.meta = meta     # from SDR inventory
-        self.rx   = rx       # WdReceiver (may have empty bands initially)
+        self.meta    = meta    # from SDR inventory
+        self.rx      = rx      # WdReceiver (may have empty bands initially)
+        self.enabled = True    # UI toggle: False = excluded from save
 
     @property
     def display_name(self) -> str:
@@ -57,6 +60,26 @@ class ReceiverRow:
     def channel_limit(self) -> int:
         """Max simultaneous bands for this receiver; 0 = unlimited (USB/ka9q)."""
         return self.meta.channels if self.meta.key.startswith("kiwisdr:") else 0
+
+
+def _trim_kiwi_bands(rx: WdReceiver, limit: int) -> None:
+    """Trim a KiwiSDR receiver's band dict down to *limit* entries.
+
+    Retention priority: KIWI_DEFAULT_BANDS first, then whatever else was
+    configured, in original insertion order.
+    """
+    if not limit or len(rx.bands) <= limit:
+        return
+    kept: dict[str, str] = {}
+    for band in KIWI_DEFAULT_BANDS:
+        if band in rx.bands and len(kept) < limit:
+            kept[band] = rx.bands[band]
+    for band, modes in rx.bands.items():
+        if len(kept) >= limit:
+            break
+        if band not in kept:
+            kept[band] = modes
+    rx.bands = kept
 
 
 def _make_wd_name(meta: SdrDeviceMeta, existing_names: set[str]) -> str:
@@ -123,6 +146,10 @@ def _build_rows(
             rx.call = meta.call
         if not rx.grid and meta.grid:
             rx.grid = meta.grid
+
+        # Enforce channel limit for KiwiSDRs (trims excess bands on load)
+        if meta.key.startswith("kiwisdr:") and meta.channels:
+            _trim_kiwi_bands(rx, meta.channels)
 
         rows.append(ReceiverRow(meta=meta, rx=rx))
 
@@ -335,11 +362,11 @@ class WdClientScreen(Vertical):
             self.query_one("#wd-status", Static).update(
                 "[yellow]v3 bash config — run [bold]sudo wd-ctl migrate-config[/] to convert[/]")
             return
-        active = sum(1 for r in self._rows if r.rx.bands)
-        total  = sum(len(r.rx.bands) for r in self._rows)
+        enabled = sum(1 for r in self._rows if r.rx.bands and r.enabled)
+        total   = len(self._rows)
+        bands   = sum(len(r.rx.bands) for r in self._rows if r.enabled)
         self.query_one("#wd-status", Static).update(
-            f"{len(self._rows)} receiver(s) from inventory · "
-            f"{active} active · {total} band assignment(s) · "
+            f"{total} receiver(s) · [green]{enabled} active[/] · {bands} band assignments · "
             f"[dim]{WD_CONF_PATH}[/]"
             + (" [yellow]· unsaved changes[/]" if self._dirty else "")
         )
@@ -367,16 +394,18 @@ class WdClientScreen(Vertical):
             table.add_column(band, width=band_widths[band])
 
         for row in self._rows:
-            name_cell = row.display_name
+            name_color = "green" if row.enabled else "red"
+            name_cell = f"[{name_color}]{row.display_name}[/]"
             if row.rx.call:
                 name_cell += f"\n[dim]{row.rx.call}[/]"
             if row.channel_limit:
                 configured = len(row.rx.bands)
-                color = "yellow" if configured >= row.channel_limit else "dim"
-                name_cell += f"\n[{color}]{configured}/{row.channel_limit} ch[/]"
+                ch_color = "yellow" if configured >= row.channel_limit else "dim"
+                name_cell += f"\n[{ch_color}]{configured}/{row.channel_limit} ch[/]"
             cells = [name_cell]
             for band in ALL_BANDS:
-                cells.append(_modes_cell(row.rx.bands.get(band, "")))
+                raw = _modes_cell(row.rx.bands.get(band, ""))
+                cells.append(raw if row.enabled else f"[dim]{raw}[/]")
             table.add_row(*cells, key=row.name)
 
     # ------------------------------------------------------------------
@@ -384,10 +413,13 @@ class WdClientScreen(Vertical):
 
     def _populate_row_defaults(self, receiver_row: ReceiverRow) -> bool:
         """Fill undefined bands with defaults up to the channel limit (0 = unlimited).
+        KiwiSDR uses KIWI_DEFAULT_BANDS order; other receivers use ALL_BANDS order.
         Returns True if any band was changed."""
         limit = receiver_row.channel_limit
+        is_kiwi = receiver_row.meta.key.startswith("kiwisdr:")
+        bands_source = KIWI_DEFAULT_BANDS if is_kiwi else ALL_BANDS
         changed = False
-        for band in ALL_BANDS:
+        for band in bands_source:
             if limit and len(receiver_row.rx.bands) >= limit:
                 break
             if band not in receiver_row.rx.bands:
@@ -413,14 +445,19 @@ class WdClientScreen(Vertical):
         self._last_cell       = cell
         self._last_cell_time  = now
 
-        # Click on receiver-name column:
-        #   single → populate all undefined bands (visual feedback only)
-        #   double → same (idempotent)
+        # Click on receiver-name column: toggle enabled/disabled
         if col == 0:
-            changed = self._populate_row_defaults(receiver_row)
-            if not changed:
-                self.query_one("#wd-status", Static).update(
-                    f"[dim]{receiver_row.display_name}: all bands already configured[/]")
+            receiver_row.enabled = not receiver_row.enabled
+            if receiver_row.enabled and not receiver_row.rx.bands:
+                # Just enabled with no bands yet → auto-populate defaults
+                self._populate_row_defaults(receiver_row)
+                return   # _populate_row_defaults handles refresh
+            self._dirty = True
+            self._refresh_table()
+            self._refresh_status()
+            state = "enabled" if receiver_row.enabled else "disabled"
+            self.query_one("#wd-status", Static).update(
+                f"[dim]{receiver_row.display_name}: {state}[/]")
             return
 
         band  = ALL_BANDS[col - 1]
@@ -477,12 +514,14 @@ class WdClientScreen(Vertical):
         self._load()
 
     def action_save(self) -> None:
-        # Auto-populate undefined bands (up to channel limit) for any touched receiver
+        # Auto-populate undefined bands (up to channel limit) for active receivers
         needs_refresh = False
         for row in self._rows:
-            if row.rx.bands:
+            if row.rx.bands and row.enabled:
                 limit = row.channel_limit
-                for band in ALL_BANDS:
+                is_kiwi = row.meta.key.startswith("kiwisdr:")
+                bands_source = KIWI_DEFAULT_BANDS if is_kiwi else ALL_BANDS
+                for band in bands_source:
                     if limit and len(row.rx.bands) >= limit:
                         break
                     if band not in row.rx.bands:
@@ -499,8 +538,8 @@ class WdClientScreen(Vertical):
         wdc.ka9q_conf_name = existing.ka9q_conf_name
         wdc.rac = existing.rac
         for row in self._rows:
-            if not row.rx.bands:
-                continue   # skip unconfigured receivers
+            if not row.rx.bands or not row.enabled:
+                continue   # skip unconfigured or disabled receivers
             rx = row.rx
             # Ensure call/grid from inventory take precedence over stale conf values
             if row.meta.call:
