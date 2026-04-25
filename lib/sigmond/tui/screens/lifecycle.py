@@ -158,7 +158,7 @@ class LifecycleScreen(Vertical):
             yield Button("▶ Start all",   id="lc-start",   variant="success")
             yield Button("■ Stop all",    id="lc-stop",    variant="error")
             yield Button("↺ Restart all", id="lc-restart", variant="warning")
-            yield Button("☐ All",         id="lc-clear",   variant="default")
+            yield Button("☐ All",         id="lc-clear",   variant="primary")
 
         yield Static(
             "[dim]Click a row to target one component; click again or press ☐ All to clear.[/]",

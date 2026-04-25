@@ -75,24 +75,45 @@ def _discover_service_units(comp: str) -> list:
 
 
 def _batch_is_active(unit_names: list) -> dict:
-    """Call ``systemctl is-active unit1 unit2 ...`` once and return
-    {unit: state}.  systemd returns a line per unit on stdout in the
-    same order, and exits non-zero if any unit is inactive — which we
-    ignore because we want the per-unit verdict from stdout either way.
+    """Query ActiveState (and Type/Result) for each unit via ``systemctl show``
+    and return {unit: state}.
+
+    ``systemctl is-active`` reports ``inactive`` for Type=oneshot services even
+    after a successful run.  We detect that case and promote it to ``active``
+    so component status correctly shows ✔ running for timer-driven oneshotslike
+    wd-spool-clean.service.
     """
     if not unit_names:
         return {}
     try:
         r = subprocess.run(
-            ['systemctl', 'is-active', *unit_names],
+            ['systemctl', 'show', '--property=Type,Result,ActiveState',
+             *unit_names],
             capture_output=True, text=True, timeout=10,
         )
     except (subprocess.SubprocessError, OSError):
         return {u: 'unknown' for u in unit_names}
-    lines = r.stdout.strip().split('\n')
+
+    # Output: one block of key=value lines per unit, separated by blank lines,
+    # in the same order as the arguments.
+    blocks = r.stdout.strip().split('\n\n')
     result: dict = {}
     for i, unit in enumerate(unit_names):
-        result[unit] = lines[i].strip() if i < len(lines) else 'unknown'
+        if i >= len(blocks):
+            result[unit] = 'unknown'
+            continue
+        props: dict[str, str] = {}
+        for line in blocks[i].strip().splitlines():
+            if '=' in line:
+                k, v = line.split('=', 1)
+                props[k] = v
+        active_state = props.get('ActiveState', 'unknown')
+        # A oneshot that completed successfully is functionally "active"
+        if (active_state == 'inactive'
+                and props.get('Type') == 'oneshot'
+                and props.get('Result') == 'success'):
+            active_state = 'active'
+        result[unit] = active_state
     return result
 
 
