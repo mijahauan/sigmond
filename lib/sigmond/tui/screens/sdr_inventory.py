@@ -29,7 +29,11 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
+import re
+
 from ...sdr_labels import SdrDeviceMeta, get_device, load_devices, set_device
+
+_GRID_RE = re.compile(r'^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$')
 
 
 # ---------------------------------------------------------------------------
@@ -305,65 +309,157 @@ def _gather_all() -> list[SdrEntry]:
 
 
 # ---------------------------------------------------------------------------
-# Device metadata modal (label + callsign + grid)
+# Device metadata modal
 # ---------------------------------------------------------------------------
 
-class DeviceMetaModal(ModalScreen[Optional[SdrDeviceMeta]]):
-    """Edit label, WSPR callsign, and Maidenhead grid for an SDR device."""
+class DeviceMetaModal(ModalScreen):
+    """Edit name, reporter ID, and Maidenhead grid for an SDR device.
+
+    Dismisses with (SdrDeviceMeta, copy_grid_to_all: bool) or None on cancel.
+    """
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
     DEFAULT_CSS = """
     DeviceMetaModal { align: center middle; }
     DeviceMetaModal > Vertical {
-        width: 64;
+        width: 66;
         height: auto;
         padding: 1 2;
         background: $panel;
         border: thick $primary;
     }
-    DeviceMetaModal .dm-key   { color: $text-muted; margin-bottom: 1; }
-    DeviceMetaModal .dm-field { margin-bottom: 1; }
-    DeviceMetaModal Label     { margin-bottom: 0; }
-    DeviceMetaModal Input     { margin-bottom: 1; }
-    DeviceMetaModal Horizontal { height: auto; align: right middle; margin-top: 1; }
-    DeviceMetaModal Button    { margin-left: 1; }
+    DeviceMetaModal .dm-key    { color: $text-muted; margin-bottom: 1; }
+    DeviceMetaModal Label      { margin-bottom: 0; }
+    DeviceMetaModal Input      { margin-bottom: 0; }
+    DeviceMetaModal .dm-hint   { height: 1; color: $text-muted; margin-bottom: 1; }
+    DeviceMetaModal .dm-err    { height: 1; color: $error;      margin-bottom: 1; }
+    DeviceMetaModal .dm-ok     { height: 1; color: $success;    margin-bottom: 1; }
+    DeviceMetaModal #dm-btns   { height: auto; margin-top: 1; }
+    DeviceMetaModal #dm-btns-l { width: auto; }
+    DeviceMetaModal #dm-spacer { width: 1fr; }
+    DeviceMetaModal #dm-btns-r { width: auto; }
+    DeviceMetaModal Button     { margin-right: 1; }
     """
 
     def __init__(self, meta: SdrDeviceMeta, **kwargs) -> None:
         super().__init__(**kwargs)
         self._meta = meta
+        self._id_touched = bool(meta.call)   # don't auto-fill if call already set
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(f"[dim]{self._meta.key}[/]", classes="dm-key")
+
             yield Label("Name / description")
-            yield Input(value=self._meta.label, placeholder="e.g. RX-888 Omni",
+            yield Input(value=self._meta.label,
+                        placeholder="e.g. RX-888 Omni",
                         id="dm-label")
-            yield Label("WSPR reporter callsign")
-            yield Input(value=self._meta.call, placeholder="e.g. AI6VN-0",
+            yield Static("", classes="dm-hint", id="dm-label-hint")
+
+            yield Label("Reporter ID")
+            yield Input(value=self._meta.call,
+                        placeholder="e.g. AI6VN-0  (any string accepted by wsprnet)",
                         id="dm-call")
-            yield Label("Maidenhead grid square")
-            yield Input(value=self._meta.grid, placeholder="e.g. CM88mc",
+            yield Static("[dim]auto-filled from name if left blank[/]",
+                         classes="dm-hint", id="dm-call-hint")
+
+            yield Label("Maidenhead grid square (4 or 6 characters)")
+            yield Input(value=self._meta.grid,
+                        placeholder="e.g. CM88mc",
                         id="dm-grid")
-            with Horizontal():
-                yield Button("Cancel", id="dm-cancel", variant="default")
-                yield Button("Clear",  id="dm-clear",  variant="warning")
-                yield Button("Save",   id="dm-save",   variant="success")
+            yield Static("", classes="dm-hint", id="dm-grid-hint")
+
+            with Horizontal(id="dm-btns"):
+                with Horizontal(id="dm-btns-l"):
+                    yield Button("💾 Save",            id="dm-save",     variant="success")
+                Static("", id="dm-spacer")
+                with Horizontal(id="dm-btns-r"):
+                    yield Button("Copy grid → all unset", id="dm-copy-grid", variant="default")
+                    yield Button("Clear all",  id="dm-clear",    variant="error")
+                    yield Button("Cancel",     id="dm-cancel",   variant="error")
 
     def on_mount(self) -> None:
         self.query_one("#dm-label", Input).focus()
+        self._validate_grid(self._meta.grid)
+
+    # ── reactive input handling ──────────────────────────────────────────
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "dm-label":
+            # Auto-fill reporter ID from name if user hasn't manually set it
+            if not self._id_touched:
+                name = event.value.strip()
+                self.query_one("#dm-call", Input).value = name
+        elif event.input.id == "dm-call":
+            self._id_touched = True
+            hint = self.query_one("#dm-call-hint", Static)
+            if event.value.strip():
+                hint.update("")
+            else:
+                hint.update("[dim]auto-filled from name if left blank[/]")
+        elif event.input.id == "dm-grid":
+            self._validate_grid(event.value)
+
+    def _validate_grid(self, val: str) -> None:
+        hint = self.query_one("#dm-grid-hint", Static)
+        if not val.strip():
+            hint.update("")
+            hint.set_class(False, "dm-err")
+            hint.set_class(False, "dm-ok")
+            return
+        if _GRID_RE.match(val.strip()):
+            hint.update("✔ valid grid")
+            hint.set_class(False, "dm-err")
+            hint.set_class(True,  "dm-ok")
+        else:
+            hint.update("✗ must be 4 chars (AA00) or 6 chars (AA00AA)")
+            hint.set_class(True,  "dm-err")
+            hint.set_class(False, "dm-ok")
+
+    # ── buttons ──────────────────────────────────────────────────────────
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "dm-save":
-            self.dismiss(SdrDeviceMeta(
-                key=self._meta.key,
-                label=self.query_one("#dm-label", Input).value.strip(),
-                call =self.query_one("#dm-call",  Input).value.strip().upper(),
-                grid =self.query_one("#dm-grid",  Input).value.strip(),
+        bid = event.button.id
+        if bid == "dm-save":
+            grid = self.query_one("#dm-grid", Input).value.strip().upper()
+            if grid and not _GRID_RE.match(grid):
+                # Refuse to save invalid grid
+                self.query_one("#dm-grid-hint", Static).update(
+                    "[bold]✗ fix grid before saving[/]")
+                return
+            call = self.query_one("#dm-call", Input).value.strip()
+            if not call:
+                call = self.query_one("#dm-label", Input).value.strip()
+            self.dismiss((
+                SdrDeviceMeta(
+                    key=self._meta.key,
+                    label=self.query_one("#dm-label", Input).value.strip(),
+                    call=call.upper(),
+                    grid=grid,
+                ),
+                False,   # copy_grid_to_all
             ))
-        elif event.button.id == "dm-clear":
-            self.dismiss(SdrDeviceMeta(key=self._meta.key))
+        elif bid == "dm-copy-grid":
+            grid = self.query_one("#dm-grid", Input).value.strip().upper()
+            if grid and not _GRID_RE.match(grid):
+                self.query_one("#dm-grid-hint", Static).update(
+                    "[bold]✗ fix grid before copying[/]")
+                return
+            call = self.query_one("#dm-call", Input).value.strip()
+            if not call:
+                call = self.query_one("#dm-label", Input).value.strip()
+            self.dismiss((
+                SdrDeviceMeta(
+                    key=self._meta.key,
+                    label=self.query_one("#dm-label", Input).value.strip(),
+                    call=call.upper(),
+                    grid=grid,
+                ),
+                True,    # copy_grid_to_all
+            ))
+        elif bid == "dm-clear":
+            self.dismiss((SdrDeviceMeta(key=self._meta.key), False))
         else:
             self.dismiss(None)
 
@@ -487,13 +583,22 @@ class SdrInventoryScreen(Vertical):
             call=entry.call, grid=entry.grid,
         )
 
-        def _after(new_meta: Optional[SdrDeviceMeta]) -> None:
-            if new_meta is None:
+        def _after(result) -> None:
+            if result is None:
                 return
+            new_meta, copy_grid_to_all = result
             set_device(new_meta)
             entry.label = new_meta.label
             entry.call  = new_meta.call
             entry.grid  = new_meta.grid
+            if copy_grid_to_all and new_meta.grid:
+                devices = load_devices()
+                for e2 in self._entries:
+                    if e2.key != entry.key and not e2.grid:
+                        d2 = devices.get(e2.key, SdrDeviceMeta(key=e2.key))
+                        d2.grid = new_meta.grid
+                        e2.grid = new_meta.grid
+                        set_device(d2)
             self._render_entries()
 
         self.app.push_screen(DeviceMetaModal(meta=current_meta), _after)
