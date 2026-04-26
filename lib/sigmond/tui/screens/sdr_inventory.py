@@ -703,7 +703,7 @@ class SdrInventoryScreen(Vertical):
         yield Static("[dim]scanning…[/]", id="sdr-status")
 
         table = DataTable(id="sdr-table", zebra_stripes=True, cursor_type="row")
-        table.add_columns("Source", "Type", "Location", "Detail", "Serial", "Users", "GPS", "Config name", "Reporter ID", "Grid", "TTL")
+        table.add_columns("Source", "Type", "Location", "Detail", "Serial", "Users", "GPS", "Config name", "Reporter ID", "Grid")
         yield table
 
         with Horizontal(id="sdr-btn-row"):
@@ -792,17 +792,13 @@ class SdrInventoryScreen(Vertical):
             call_cell   = f"[cyan]{e.call}[/]"   if e.call  else "[dim]—[/]"
             grid_cell   = e.grid if e.grid else "[dim]—[/]"
             serial_cell = f"[dim]{e.serial}[/]"  if e.serial else "[dim]—[/]"
-            if e.source == "usb_sdr" and e.status == "ok":
-                ttl_cell = str(e.ttl)
-            else:
-                ttl_cell = "[dim]—[/]"
             table.add_row(
                 src_cell, type_cell, e.location,
                 e.detail[:35] if e.detail else "[dim]—[/]",
                 serial_cell,
                 e.users or "[dim]—[/]",
                 e.gps   or "[dim]—[/]",
-                name_cell, call_cell, grid_cell, ttl_cell,
+                name_cell, call_cell, grid_cell,
                 key=e.key,
             )
 

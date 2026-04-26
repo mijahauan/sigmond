@@ -118,7 +118,8 @@ def _build_rows(
         if rx.address:
             addr_to_rx[rx.address] = rx
 
-    # --- Inventory entries first ---
+    # --- Inventory entries only (conf receivers with no matching inventory entry
+    #     are intentionally dropped — user should add them to SDR inventory first) ---
     for meta in inventory.values():
         # Derive address from the inventory key
         if meta.key.startswith("kiwisdr:"):
@@ -126,6 +127,8 @@ def _build_rows(
         elif meta.key.startswith("ka9q_fe:"):
             parts = meta.key.split(":", 2)
             address = parts[2] if len(parts) > 2 else ""
+        elif meta.key.startswith("ka9q_remote:"):
+            address = meta.key.replace("ka9q_remote:", "")
         else:
             address = ""   # USB SDR — address set by user
 
@@ -155,19 +158,6 @@ def _build_rows(
             _trim_kiwi_bands(rx, meta.channels if meta.channels > 0 else 8)
 
         rows.append(ReceiverRow(meta=meta, rx=rx))
-
-    # --- Conf receivers not matched to any inventory entry ---
-    # Only include those with a valid address; addressless entries (e.g. stale
-    # experimental receivers like AI6VN-0 with no address field) are skipped.
-    for rx in existing_conf.receivers.values():
-        if rx.name not in used_names and rx.address:
-            dummy_meta = SdrDeviceMeta(
-                key=f"conf:{rx.name}",
-                label=rx.name,
-                call=rx.call,
-                grid=rx.grid,
-            )
-            rows.append(ReceiverRow(meta=dummy_meta, rx=rx))
 
     return rows
 
@@ -336,6 +326,7 @@ class WdClientScreen(Vertical):
             yield Button("↺ Reload",          id="wd-reload",  variant="primary")
             yield Button("💾 Save",           id="wd-save",    variant="success")
             yield Button("▶ Apply (wd-ctl)", id="wd-apply",   variant="warning")
+            yield Button("🗑 Delete receiver", id="wd-delete",  variant="error")
 
     def on_mount(self) -> None:
         self._load()
@@ -523,6 +514,21 @@ class WdClientScreen(Vertical):
             self.action_apply()
         elif bid == "wd-reload":
             self.action_reload()
+        elif bid == "wd-delete":
+            self._delete_selected_receiver()
+
+    def _delete_selected_receiver(self) -> None:
+        table = self.query_one("#wd-table", DataTable)
+        row_idx = table.cursor_row
+        if row_idx < 0 or row_idx >= len(self._rows):
+            return
+        row = self._rows[row_idx]
+        name = row.display_name
+        self._rows.pop(row_idx)
+        self._dirty = True
+        self._refresh_table()
+        self.query_one("#wd-status", Static).update(
+            f"[yellow]Deleted {name} — save to write to conf[/]")
 
     def action_reload(self) -> None:
         self._dirty = False
