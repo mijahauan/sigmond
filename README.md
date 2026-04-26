@@ -66,6 +66,11 @@ smd list --available
     ·  psk-recorder           FT4/FT8 spot recorder for PSKReporter
     ·  wspr-recorder          WSPR/FST4W audio recorder (period-aligned WAVs)
     ·  wsprdaemon-client      WSPR decoder + poster + uploader
+
+  Infrastructure (3)
+    ·  igmp-querier           IGMPv2 querier daemon for multicast LANs
+    ·  wd-rac                 WsprDaemon Remote Access Channel (frpc tunnel)
+    ·  gpsdo-monitor          Leo Bodnar GPSDO health monitor + mDNS
 ```
 
 ### 3. Install clients
@@ -108,6 +113,31 @@ sudo vi /etc/sigmond/topology.toml
 
 Enable or disable components by setting `enabled = true` or `false`.
 
+#### Using the TUI (recommended)
+
+Instead of editing config files manually, you can use the interactive TUI:
+
+```bash
+sudo smd tui
+```
+
+The TUI provides:
+- **Install screen** — browse and install components from the catalog
+- **Topology screen** — enable/disable components with live validation
+- **Overview screen** — system health dashboard
+- **Logs screen** — view and filter service logs
+- **CPU affinity screen** — configure CPU core isolation
+- **CPU frequency screen** — monitor and control CPU frequencies
+- **Environment screen** — discover and probe network peers (KIWISDRs, GPSDOs)
+- **GPSDO screen** — monitor Leo Bodnar GPSDO health
+- **Validate screen** — cross-client harmonization checks
+- **Lifecycle screen** — start/stop/restart services
+- **Apply screen** — reconcile services with current config
+- **Update screen** — pull latest code and re-apply
+- **Backup/Restore screens** — backup and restore configuration
+
+Keybindings: `t` = topology, `i` = install, `v` = validate, `q` = quit
+
 ### 5. Start services
 
 ```bash
@@ -136,6 +166,7 @@ and any issues.
 | Command | Description |
 |---------|-------------|
 | `smd install [<client>]` | Install a client from the catalog, or run full-suite install |
+| `smd tui` | Launch the interactive TUI configurator |
 | `smd start [--components X]` | Start managed services |
 | `smd stop [--components X]` | Stop managed services |
 | `smd restart [--components X]` | Restart with reset-failed |
@@ -150,6 +181,7 @@ and any issues.
 | `smd config show` | Dump effective coordination config |
 | `smd apply` | Reconcile services with current config |
 | `smd update` | Pull latest code and re-apply |
+| `smd environment list|probe|describe` | Situational awareness of network peers |
 
 All lifecycle commands (`start`, `stop`, `restart`, `reload`, `status`,
 `list`) accept `--components X,Y` to filter to specific components.
@@ -265,6 +297,14 @@ smd status
 | **psk-recorder** | FT4/FT8 spot recorder — decodes and uploads to PSKReporter | [mijahauan/psk-recorder](https://github.com/mijahauan/psk-recorder) |
 | **wspr-recorder** | WSPR/FST4W audio recorder — produces period-aligned WAVs for wsprdaemon-client | [mijahauan/wspr-recorder](https://github.com/mijahauan/wspr-recorder) |
 | **wsprdaemon-client** | WSPR decoder + poster + uploader — decodes WAVs and reports to wsprnet.org | [rrobinett/wsprdaemon-client](https://github.com/rrobinett/wsprdaemon-client) |
+
+### Infrastructure components
+
+| Component | What it does | Repo |
+|-----------|-------------|------|
+| **igmp-querier** | IGMPv2 querier daemon — keeps multicast streams alive on LANs without a router | [mijahauan/igmp-querier](https://github.com/mijahauan/igmp-querier) |
+| **wd-rac** | WsprDaemon Remote Access Channel — frpc reverse tunnel for remote SSH | Managed by sigmond |
+| **gpsdo-monitor** | Leo Bodnar GPSDO health monitor + mDNS advertiser | [mijahauan/gpsdo-monitor](https://github.com/mijahauan/gpsdo-monitor) |
 
 All clients use [ka9q-python](https://github.com/mijahauan/ka9q-python) to
 receive RTP streams from radiod.  Each client runs in its own Python venv

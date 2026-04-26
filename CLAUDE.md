@@ -35,6 +35,8 @@ smd config show|migrate  Inspect or migrate coordination config
 smd validate             Cross-client harmonization rules (read-only)
 smd update               Pull latest code and re-apply
 smd diag                 Network + deps + client validation diagnostics
+smd tui                  Launch interactive TUI configurator
+smd environment list|probe|describe   Situational awareness of network peers
 ```
 
 ## Architecture layers
@@ -80,16 +82,40 @@ smd diag                 Network + deps + client validation diagnostics
     C projects (radiod, ka9q-web) delegate to ka9q-update's `install-ka9q.sh`.
 
 11. **TUI configurator** (`lib/sigmond/tui/`, Textual) — three-panel layout
-    accessed via `smd tui` (or the deprecated `smd config edit` alias). Left: component tree with health indicators.
-    Center: topology editor, validate screen. Right: contextual help.
-    Textual is a lazy import; core smd stays stdlib-only.
+    accessed via `smd tui`. Left: component tree with health indicators.
+    Center: various screens (topology, install, logs, validate, cpu_affinity,
+    cpu_freq, environment, gpsdo, lifecycle, apply, update, backup, restore).
+    Right: contextual help. Textual is a lazy import; core smd stays stdlib-only.
+
+12. **Environment discovery** (`lib/sigmond/commands/environment.py`,
+    `lib/sigmond/discovery/`) — situational awareness of network peers:
+    mDNS discovery of KIWISDRs and GPSDOs, IGMP multicast probing, NTP
+    client probing, HTTP discovery. Powers `smd environment` and TUI screens.
+
+## Implemented TUI screens
+
+- **Overview** — system health dashboard with component status
+- **Install** — browse and install components from the catalog
+- **Topology** — enable/disable components with live validation
+- **Logs** — view and filter service logs (journal and file)
+- **CPU affinity** — visual core map with conflict detection
+- **CPU frequency** — monitor and control CPU frequencies
+- **Environment** — discover and probe network peers (KIWISDRs, GPSDOs, NTP)
+- **GPSDO** — monitor Leo Bodnar GPSDO health via mDNS
+- **Validate** — cross-client harmonization checks
+- **Lifecycle** — start/stop/restart services
+- **Apply** — reconcile services with current config
+- **Update** — pull latest code and re-apply
+- **Backup/Restore** — backup and restore configuration
+- **RAC** — Remote Access Channel (frpc tunnel) configuration
+- **Config show** — dump effective coordination config
+- **Diag net** — network diagnostics for multicast readiness
+- **Radiod** — radiod status and channel monitoring
 
 ## Still to build
 
 - **TUI per-client config screens** — wspr-recorder, hf-timestd, psk-recorder
   settings editors with live probing.
-- **TUI CPU affinity screen** — visual core map with conflict detection.
-- **TUI deploy screen** — config diff preview and service restart.
 - **Start ordering validation** — warn if clients declare cross-client
   After=/Requires= systemd dependencies.
 - **ka9q-python compat tracking** — `smd validate` rule to check that
