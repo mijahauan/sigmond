@@ -330,6 +330,22 @@ def _gather_all() -> list[SdrEntry]:
     ka9q_fe = _scan_ka9q_frontends()
     all_entries = usb + kiwis + ka9q_fe
     devices = load_devices()
+
+    # Inject manually-added remote ka9q SDRs (not discoverable by scan)
+    detected_keys = {e.key for e in all_entries}
+    for key, meta in sorted(devices.items()):
+        if key.startswith("ka9q_remote:") and key not in detected_keys:
+            address = key.split(":", 1)[1]
+            all_entries.append(SdrEntry(
+                key=key, source="ka9q_remote",
+                sdr_type="ka9q remote",
+                location=address,
+                detail="manually added",
+                status="ok",
+                label=meta.label, call=meta.call,
+                grid=meta.grid,   ttl=meta.ttl,
+            ))
+
     changed = False
     for e in all_entries:
         meta = devices.get(e.key)
@@ -339,11 +355,9 @@ def _gather_all() -> list[SdrEntry]:
             e.grid  = meta.grid
             e.ttl   = meta.ttl
             if e.channels > 0 and meta.channels == 0:
-                # Auto-persist channel count detected live for the first time
                 meta.channels = e.channels
                 changed = True
             elif e.channels == 0 and meta.channels > 0:
-                # Use stored value as fallback when device is offline or scan missed it
                 e.channels = meta.channels
     if changed:
         try:
@@ -665,8 +679,9 @@ class SdrInventoryScreen(Vertical):
     """Unified SDR receiver inventory — USB, KiwiSDR LAN, ka9q-radio frontends."""
 
     BINDINGS = [
-        Binding("r", "rescan",    "Rescan"),
-        Binding("e", "edit_label","Label"),
+        Binding("r", "rescan",      "Rescan"),
+        Binding("e", "edit_label",  "Label"),
+        Binding("d", "delete_entry","Delete"),
     ]
 
     DEFAULT_CSS = """
@@ -692,8 +707,10 @@ class SdrInventoryScreen(Vertical):
         yield table
 
         with Horizontal(id="sdr-btn-row"):
-            yield Button("↺ Rescan",   id="sdr-rescan", variant="success")
-            yield Button("✎ Edit",     id="sdr-label",  variant="primary")
+            yield Button("↺ Rescan",        id="sdr-rescan",       variant="success")
+            yield Button("✎ Edit",          id="sdr-label",        variant="primary")
+            yield Button("🗑 Remove",        id="sdr-delete",       variant="error")
+            yield Button("+ Add remote SDR", id="sdr-add-remote",  variant="default")
 
     def on_mount(self) -> None:
         self._rescan()
@@ -703,6 +720,9 @@ class SdrInventoryScreen(Vertical):
 
     def action_edit_label(self) -> None:
         self._open_label_modal()
+
+    def action_delete_entry(self) -> None:
+        self._delete_selected()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Double-click or two quick Enter presses opens the edit modal."""
@@ -720,6 +740,10 @@ class SdrInventoryScreen(Vertical):
             self._rescan()
         elif event.button.id == "sdr-label":
             self._open_label_modal()
+        elif event.button.id == "sdr-delete":
+            self._delete_selected()
+        elif event.button.id == "sdr-add-remote":
+            self._open_add_remote_modal()
 
     def _rescan(self) -> None:
         self.query_one("#sdr-status", Static).update(
@@ -754,9 +778,10 @@ class SdrInventoryScreen(Vertical):
         )
 
         src_labels = {
-            "usb_sdr": "[cyan]USB[/]",
-            "kiwisdr": "[blue]KiwiSDR[/]",
-            "ka9q_fe": "[magenta]ka9q[/]",
+            "usb_sdr":    "[cyan]USB local[/]",
+            "kiwisdr":    "[blue]KiwiSDR[/]",
+            "ka9q_fe":    "[magenta]ka9q local[/]",
+            "ka9q_remote":"[yellow]ka9q remote[/]",
         }
         for e in self._entries:
             src_cell = src_labels.get(e.source, e.source)
@@ -780,6 +805,100 @@ class SdrInventoryScreen(Vertical):
                 name_cell, call_cell, grid_cell, ttl_cell,
                 key=e.key,
             )
+
+    def _delete_selected(self) -> None:
+        table = self.query_one("#sdr-table", DataTable)
+        idx = table.cursor_row
+        if idx < 0 or idx >= len(self._entries):
+            return
+        entry = self._entries[idx]
+        devices = load_devices()
+        if entry.key in devices:
+            del devices[entry.key]
+            from ...sdr_labels import save_devices
+            save_devices(devices)
+        self._entries.pop(idx)
+        self._render_entries()
+        note = ""
+        if entry.source == "usb_sdr":
+            note = " (will reappear on rescan while device is attached)"
+        self.query_one("#sdr-status", Static).update(
+            f"[yellow]Removed {entry.label or entry.key}{note}[/]")
+
+    def _open_add_remote_modal(self) -> None:
+        from textual.screen import ModalScreen as _MS
+        from textual.widgets import Input as _In, Label as _Lb
+
+        class AddRemoteModal(_MS):
+            BINDINGS = [Binding("escape", "cancel", "Cancel")]
+            DEFAULT_CSS = """
+            AddRemoteModal { align: center middle; }
+            AddRemoteModal > Vertical {
+                width: 66; height: auto; padding: 1 2;
+                background: $panel; border: thick $primary;
+            }
+            AddRemoteModal Label  { margin-bottom: 0; }
+            AddRemoteModal Input  { margin-bottom: 1; }
+            AddRemoteModal Button { margin-right: 1; }
+            AddRemoteModal #ar-err { height: 1; color: $error; }
+            """
+            def compose(self):
+                with Vertical():
+                    yield Static("[bold]Add remote ka9q-radio SDR[/]")
+                    yield Static("[dim]For an RX-888 at another location whose multicast stream you receive.[/]")
+                    yield _Lb("Status stream address (mDNS hostname or IP)")
+                    yield _In(placeholder="e.g. southwest-hf.status  or  192.168.1.10",
+                              id="ar-addr")
+                    yield _Lb("Configuration name (label)")
+                    yield _In(placeholder="e.g. KFS-Southwest", id="ar-label")
+                    yield _Lb("Reporter ID")
+                    yield _In(placeholder="e.g. KFS-SW", id="ar-call")
+                    yield _Lb("Grid")
+                    yield _In(placeholder="e.g. CM88mc", id="ar-grid")
+                    yield Static("", id="ar-err")
+                    with Horizontal():
+                        yield Button("💾 Save",  id="ar-save",   variant="success")
+                        yield Button("Cancel",   id="ar-cancel", variant="error")
+
+            def on_mount(self):
+                self.query_one("#ar-addr", _In).focus()
+
+            def on_button_pressed(self, event: Button.Pressed) -> None:
+                if event.button.id == "ar-save":
+                    addr  = self.query_one("#ar-addr",  _In).value.strip()
+                    label = self.query_one("#ar-label", _In).value.strip()
+                    call  = self.query_one("#ar-call",  _In).value.strip().upper()
+                    grid  = _normalize_grid(self.query_one("#ar-grid", _In).value.strip())
+                    if not addr:
+                        self.query_one("#ar-err", Static).update("Address is required")
+                        return
+                    self.dismiss((addr, label, call, grid))
+                else:
+                    self.dismiss(None)
+
+            def action_cancel(self):
+                self.dismiss(None)
+
+        def _after(result) -> None:
+            if result is None:
+                return
+            addr, label, call, grid = result
+            key = f"ka9q_remote:{addr}"
+            meta = SdrDeviceMeta(key=key, label=label, call=call, grid=grid)
+            set_device(meta)
+            entry = SdrEntry(
+                key=key, source="ka9q_remote",
+                sdr_type="ka9q remote",
+                location=addr, detail="manually added",
+                status="ok",
+                label=label, call=call, grid=grid,
+            )
+            self._entries.append(entry)
+            self._render_entries()
+            self.query_one("#sdr-status", Static).update(
+                f"[green]✔ Added remote SDR: {label or addr}[/]")
+
+        self.app.push_screen(AddRemoteModal(), _after)
 
     def _open_label_modal(self) -> None:
         table = self.query_one("#sdr-table", DataTable)
