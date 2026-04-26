@@ -125,7 +125,11 @@ def get_physical_cores() -> list[set]:
 
     Reads /sys/devices/system/cpu/cpu*/topology/thread_siblings_list so that
     HT sibling pairs are grouped.  Ordered by lowest logical CPU in each group.
-    Falls back to treating each logical CPU as its own core (no HT, or VM).
+
+    If the OS reports every CPU as its own sole sibling (common under hypervisors
+    that don't pass through SMT topology), falls back to assuming consecutive
+    pairs: {0,1}, {2,3}, {4,5}, … so that radiod instances are each assigned
+    two adjacent CPUs rather than one.
     """
     seen: set = set()
     core_map: dict = {}
@@ -140,7 +144,22 @@ def get_physical_cores() -> list[set]:
         if key not in seen:
             seen.add(key)
             core_map[min(siblings)] = siblings
-    return [core_map[k] for k in sorted(core_map)]
+
+    cores = [core_map[k] for k in sorted(core_map)]
+
+    # If every entry is a singleton the hypervisor isn't exposing HT topology.
+    # Assume consecutive pairs so each radiod instance gets two CPUs.
+    if all(len(c) == 1 for c in cores) and len(cores) > 1:
+        cpu_list = sorted(cpu for c in cores for cpu in c)
+        paired: list[set] = []
+        for i in range(0, len(cpu_list), 2):
+            if i + 1 < len(cpu_list):
+                paired.append({cpu_list[i], cpu_list[i + 1]})
+            else:
+                paired.append({cpu_list[i]})
+        return paired
+
+    return cores
 
 
 def read_proc_cpus(pid_or_tid: str) -> Optional[str]:
