@@ -710,7 +710,7 @@ class SdrInventoryScreen(Vertical):
             yield Button("↺ Rescan",        id="sdr-rescan",       variant="success")
             yield Button("✎ Edit",          id="sdr-label",        variant="primary")
             yield Button("🗑 Remove",        id="sdr-delete",       variant="error")
-            yield Button("+ Add remote SDR", id="sdr-add-remote",  variant="default")
+            yield Button("+ Add remote SDR", id="sdr-add-remote",  variant="primary")
 
     def on_mount(self) -> None:
         self._rescan()

@@ -1516,6 +1516,36 @@ def cmd_apply(args) -> int:
 # smd start / stop / restart / reload
 # ---------------------------------------------------------------------------
 
+def _ensure_radiod_affinity_drop_ins(radiod_units: list,
+                                     topology_cpu_affinity=None) -> None:
+    """Write smd-cpu-affinity.conf drop-ins for radiod service instances.
+
+    Assigns physical core 0 to the first instance (alphabetically), core 1 to
+    the second, etc.  Runs daemon-reload after writing so the constraints are
+    in effect when the units start.
+    """
+    try:
+        from sigmond.cpu import get_physical_cores
+    except ImportError:
+        return
+
+    cores = get_physical_cores()
+    if not cores:
+        return
+
+    sorted_units = sorted(radiod_units, key=lambda u: u.instance or u.unit)
+    wrote_any = False
+    for i, unit_ref in enumerate(sorted_units):
+        core_cpus = cores[i] if i < len(cores) else cores[-1]
+        label = f'radiod {unit_ref.instance or unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}'
+        if _write_affinity_drop_in(unit_ref.unit, core_cpus, label):
+            _ok(f'affinity: {unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}')
+            wrote_any = True
+
+    if wrote_any:
+        _run(['systemctl', 'daemon-reload'], sudo=True)
+
+
 def cmd_start(args) -> int:
     if _need_root('start'):
         return 1
@@ -1536,6 +1566,12 @@ def cmd_start(args) -> int:
     if _HAS_SIGMOND_LIB:
         coord = load_coordination()
         units = order_units(units, coordination=coord)
+
+    # Write CPU affinity drop-ins for radiod instances before starting them.
+    radiod_services = [u for u in units
+                       if u.component == 'ka9q-radio' and u.kind == 'service']
+    if radiod_services:
+        _ensure_radiod_affinity_drop_ins(radiod_services, topology.get('cpu_affinity'))
 
     _heading('start')
     _netdiag_auto_refresh('start')
