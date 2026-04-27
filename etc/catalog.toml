@@ -55,6 +55,15 @@ contract        = "0.4"
 install_script  = "/opt/git/hf-timestd/scripts/install.sh"
 topology_alias  = "grape"
 
+[client.hfdl-recorder]
+kind            = "client"
+description     = "HFDL aviation HF data link recorder (one dumphfdl per band)"
+repo            = "https://github.com/mijahauan/hfdl-recorder"
+uses            = []
+requires        = ["ka9q-python", "ka9q-radio"]
+contract        = "0.4"
+install_script  = "/opt/git/hfdl-recorder/scripts/install.sh"
+
 [client.wsprdaemon-client]
 kind            = "client"
 description     = "WSPR decoder + poster + uploader (wsprd + jt9 --fst4w)"
