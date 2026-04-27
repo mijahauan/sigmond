@@ -21,11 +21,14 @@ from pathlib import Path
 from typing import Optional
 
 from rich.text import Text
-from textual.containers import Horizontal, Vertical
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Static
 from textual.worker import Worker, WorkerState
 
-from ..mutation import confirm_and_run
+from ..mutation import ConfirmModal
 
 
 def _smd_binary() -> str:
@@ -68,6 +71,8 @@ class _ComponentRow:
     version_policy: str      # "latest" | "ignore" | "<ref>"
     commit_idx: str = "—"   # total commit count, e.g. "247"
     behind: str = "—"       # commits behind origin/main, e.g. "3" or "0"
+    last_commit_date: str = "—"   # YYYY-MM-DD of most recent local commit
+    last_commit_ts: float = 0.0   # unix timestamp for sorting
     log_lines: list[str] = field(default_factory=list)
     ahead_log_lines: list[str] = field(default_factory=list)  # remote-only commits not yet pulled
 
@@ -122,14 +127,28 @@ def _git_ref(repo_dir: Path) -> str:
         return '—'
 
 
+def _git_last_commit_date(repo_dir: Path) -> tuple[str, float]:
+    """Return (YYYY-MM-DD, unix_timestamp) of the most recent local commit."""
+    try:
+        r = _git(repo_dir, 'log', '-1', '--format=%as %at')
+        parts = r.stdout.strip().split()
+        if r.returncode == 0 and len(parts) >= 2:
+            return parts[0], float(parts[1])
+        if r.returncode == 0 and len(parts) == 1:
+            return parts[0], 0.0
+    except Exception:
+        pass
+    return "—", 0.0
+
+
 def _git_log(repo_dir: Path, n: int = 15) -> list[str]:
-    """Return the last n log entries prefixed with their sequential commit index."""
+    """Return the last n log entries as '#idx  sha  date  subject'."""
     try:
         r_count = _git(repo_dir, 'rev-list', '--count', 'HEAD')
         total = (int(r_count.stdout.strip())
                  if r_count.returncode == 0 and r_count.stdout.strip().isdigit()
                  else 0)
-        r = _git(repo_dir, 'log', f'-{n}', '--format=%h %s (%as)', timeout=8)
+        r = _git(repo_dir, 'log', f'-{n}', '--format=%h %as %s', timeout=8)
         if r.returncode != 0:
             return []
         result = []
@@ -137,10 +156,11 @@ def _git_log(repo_dir: Path, n: int = 15) -> list[str]:
             if not line.strip():
                 continue
             idx = total - i
-            parts = line.split(' ', 1)
+            parts = line.split(' ', 2)
             sha  = parts[0]
-            rest = parts[1] if len(parts) > 1 else ''
-            result.append(f"#{idx:<5} {sha}  {rest}")
+            date = parts[1] if len(parts) > 1 else ''
+            subj = parts[2] if len(parts) > 2 else ''
+            result.append(f"#{idx:<5}  {sha}  {date}  {subj}")
         return result
     except Exception:
         return []
@@ -154,7 +174,7 @@ def _git_log_ahead(repo_dir: Path, n: int = 20) -> list[str]:
                  if r_count.returncode == 0 and r_count.stdout.strip().isdigit()
                  else 0)
         r = _git(repo_dir, 'log', f'-{n}', 'HEAD..origin/main',
-                 '--format=%h %s (%as)', timeout=8)
+                 '--format=%h %as %s', timeout=8)
         if r.returncode != 0 or not r.stdout.strip():
             return []
         result = []
@@ -162,10 +182,11 @@ def _git_log_ahead(repo_dir: Path, n: int = 20) -> list[str]:
             if not line.strip():
                 continue
             idx = total - i
-            parts = line.split(' ', 1)
+            parts = line.split(' ', 2)
             sha  = parts[0]
-            rest = parts[1] if len(parts) > 1 else ''
-            result.append(f"#{idx:<5} {sha}  {rest}")
+            date = parts[1] if len(parts) > 1 else ''
+            subj = parts[2] if len(parts) > 2 else ''
+            result.append(f"#{idx:<5}  {sha}  {date}  {subj}")
         return result
     except Exception:
         return []
@@ -237,11 +258,14 @@ def _gather(topology_components: dict, do_fetch: bool = False) -> _ComponentsVie
         repo_dir = _find_repo_dir(name, entry.repo)
         installed = repo_dir is not None or entry.is_installed()
 
-        current_ref    = _git_ref(repo_dir)        if repo_dir else '—'
-        commit_idx     = _git_commit_idx(repo_dir) if repo_dir else '—'
-        behind         = _git_behind(repo_dir)     if repo_dir else '—'
-        log_lines      = _git_log(repo_dir)        if repo_dir else []
-        ahead_log_lines = _git_log_ahead(repo_dir) if repo_dir else []
+        current_ref     = _git_ref(repo_dir)             if repo_dir else '—'
+        commit_idx      = _git_commit_idx(repo_dir)      if repo_dir else '—'
+        behind          = _git_behind(repo_dir)          if repo_dir else '—'
+        log_lines       = _git_log(repo_dir)             if repo_dir else []
+        ahead_log_lines = _git_log_ahead(repo_dir)       if repo_dir else []
+        last_commit_date, last_commit_ts = (
+            _git_last_commit_date(repo_dir) if repo_dir else ('—', 0.0)
+        )
 
         comp = topology_components.get(name)
         policy = (comp.version if comp else 'latest') or 'latest'
@@ -257,11 +281,124 @@ def _gather(topology_components: dict, do_fetch: bool = False) -> _ComponentsVie
             version_policy=policy,
             commit_idx=commit_idx,
             behind=behind,
+            last_commit_date=last_commit_date,
+            last_commit_ts=last_commit_ts,
             log_lines=log_lines,
             ahead_log_lines=ahead_log_lines,
         ))
 
+    # Sort: most recently committed local code first.
+    view.rows.sort(key=lambda r: r.last_commit_ts, reverse=True)
     return view
+
+
+class UpdateOutputModal(ModalScreen):
+    """Scrollable output modal for long-running smd update commands."""
+
+    BINDINGS = [Binding("escape", "try_dismiss", "Dismiss (when done)")]
+
+    DEFAULT_CSS = """
+    UpdateOutputModal { align: center middle; }
+    UpdateOutputModal > Vertical {
+        width: 92%;
+        height: 88%;
+        padding: 1 2;
+        background: $panel;
+        border: thick $primary;
+    }
+    UpdateOutputModal #uom-title { text-style: bold; margin-bottom: 0; }
+    UpdateOutputModal #uom-cmd   { color: $text-muted; margin-bottom: 1; }
+    UpdateOutputModal #uom-status { margin-bottom: 1; }
+    UpdateOutputModal #uom-scroll {
+        height: 1fr;
+        border: solid $surface;
+        padding: 0 1;
+        background: $background;
+    }
+    UpdateOutputModal #uom-btn-row { height: auto; margin-top: 1; }
+    """
+
+    _SPINNERS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    def __init__(self, title: str, cmd: list[str], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._title  = title
+        self._cmd    = cmd
+        self._done   = False
+        self._spin_idx = 0
+        self._spin_timer = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(f"[bold]{self._title}[/]", id="uom-title")
+            yield Static(f"[dim]$ {' '.join(self._cmd)}[/]", id="uom-cmd")
+            yield Static(f"{self._SPINNERS[0]} running…", id="uom-status")
+            with ScrollableContainer(id="uom-scroll"):
+                yield Static("", id="uom-output")
+            with Horizontal(id="uom-btn-row"):
+                yield Button("Dismiss", id="uom-dismiss",
+                             variant="primary", disabled=True)
+
+    def on_mount(self) -> None:
+        self._spin_timer = self.set_interval(0.1, self._tick_spinner)
+        self.run_worker(self._run_cmd, thread=True, name="uom-run")
+
+    def _tick_spinner(self) -> None:
+        self._spin_idx = (self._spin_idx + 1) % len(self._SPINNERS)
+        self.query_one("#uom-status", Static).update(
+            f"{self._SPINNERS[self._spin_idx]} running…")
+
+    def _run_cmd(self) -> tuple[str, int]:
+        """Stream command output, updating the UI every 10 lines."""
+        try:
+            proc = subprocess.Popen(
+                self._cmd,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            lines: list[str] = []
+            for raw in proc.stdout:
+                lines.append(raw.rstrip())
+                if len(lines) % 10 == 0:
+                    self.app.call_from_thread(self._update_output, list(lines))
+            proc.wait()
+            return '\n'.join(lines), proc.returncode
+        except Exception as exc:
+            return str(exc), 1
+
+    def _update_output(self, lines: list[str]) -> None:
+        safe = '\n'.join(l.replace('[', r'\[') for l in lines)
+        self.query_one("#uom-output", Static).update(safe)
+        self.query_one("#uom-scroll", ScrollableContainer).scroll_end(animate=False)
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name != "uom-run":
+            return
+        if self._spin_timer:
+            self._spin_timer.stop()
+            self._spin_timer = None
+        self._done = True
+        status = self.query_one("#uom-status", Static)
+        if event.state == WorkerState.SUCCESS:
+            output, rc = event.worker.result
+            self._update_output(output.splitlines())
+            if rc == 0:
+                status.update("[green]✔ completed successfully[/]")
+            else:
+                status.update(f"[yellow]⚠ finished with errors (exit {rc}) — scroll up to review[/]")
+        else:
+            status.update(f"[red]✘ failed: {event.worker.error}[/]")
+        btn = self.query_one("#uom-dismiss", Button)
+        btn.disabled = False
+        btn.focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "uom-dismiss":
+            self.dismiss(self._done)
+
+    def action_try_dismiss(self) -> None:
+        if self._done:
+            self.dismiss(True)
 
 
 class ComponentsScreen(Vertical):
@@ -331,7 +468,7 @@ class ComponentsScreen(Vertical):
         )
         yield Static("[dim]loading…[/]", id="cv-status")
         table = DataTable(id="cv-table", cursor_type="row", zebra_stripes=True)
-        table.add_columns("Name", "Kind", "Installed", "Current Ref", "Commit #", "Policy")
+        table.add_columns("Name", "Kind", "Installed", "Current Ref", "Commit #", "Last Commit", "Policy")
         yield table
         yield Static("(select a row to see git history)", id="cv-detail")
         with Horizontal(id="cv-actions"):
@@ -386,13 +523,15 @@ class ComponentsScreen(Vertical):
         self._rows = list(view.rows)
 
         for row in view.rows:
-            inst_cell = ("[green]✔[/]" if row.installed else "[dim]✘[/]")
+            inst_cell   = ("[green]✔[/]" if row.installed else "[dim]✘[/]")
             policy_cell = self._policy_markup(row.version_policy)
-            ref_cell = Text(row.current_ref, no_wrap=True)
-            idx_cell = self._commit_idx_markup(row.commit_idx, row.behind)
+            ref_cell    = Text(row.current_ref, no_wrap=True)
+            idx_cell    = self._commit_idx_markup(row.commit_idx, row.behind)
+            date_cell   = f"[dim]{row.last_commit_date}[/]" if row.last_commit_date == "—" \
+                          else row.last_commit_date
             table.add_row(
                 row.name, row.kind, inst_cell,
-                ref_cell, idx_cell, policy_cell,
+                ref_cell, idx_cell, date_cell, policy_cell,
                 key=row.name,
             )
 
@@ -486,28 +625,34 @@ class ComponentsScreen(Vertical):
             return
 
         smd = _smd_binary()
-
-        def _after_update(result) -> None:
-            if result is None or result.returncode != 0:
-                last.update(
-                    f"[yellow]⚠ {row.name}: update finished with errors — "
-                    f"scroll up in your terminal (outside the TUI) to read the output.[/]"
-                )
-            else:
-                last.update(f"[green]✔ {row.name} updated.[/]")
-            self._refresh()
-
         behind_str = f"  ({row.behind} commits behind)" if row.behind not in ("—", "0") else ""
-        confirm_and_run(
-            self.app,
-            title=f"Update {row.name}?",
-            body=(
-                f"Pull the latest commits for [bold]{row.name}[/] and re-apply.\n\n"
-                f"Current ref: {row.current_ref}{behind_str}"
+
+        def _after_confirm(confirmed: bool) -> None:
+            if not confirmed:
+                return
+
+            def _after_modal(_result: object) -> None:
+                last.update(f"[dim]{row.name}: update complete — refreshing…[/]")
+                self._refresh()
+
+            self.app.push_screen(
+                UpdateOutputModal(
+                    title=f"Updating {row.name}",
+                    cmd=['sudo', smd, 'update', '--components', row.name],
+                ),
+                _after_modal,
+            )
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"Update {row.name}?",
+                body=(
+                    f"Pull the latest commits for [bold]{row.name}[/] and re-apply.\n\n"
+                    f"Current ref: {row.current_ref}{behind_str}"
+                ),
+                cmd_preview=f"sudo {smd} update --components {row.name}",
             ),
-            cmd=[smd, 'update', '--components', row.name],
-            sudo=True,
-            on_complete=_after_update,
+            _after_confirm,
         )
 
     def _selected_row(self) -> Optional[_ComponentRow]:
@@ -575,7 +720,7 @@ class ComponentsScreen(Vertical):
                 row.version_policy = policy
                 table = self.query_one("#cv-table", DataTable)
                 try:
-                    table.update_cell(name, table.columns[4].key,
+                    table.update_cell(name, table.columns[5].key,
                                       self._policy_markup(policy))
                 except Exception:
                     pass
