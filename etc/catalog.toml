@@ -9,6 +9,15 @@
 # Operators MAY place an override copy at /etc/sigmond/catalog.toml;
 # otherwise sigmond reads this file directly from the repo.
 
+[client.sigmond]
+kind            = "manager"
+description     = "Sigmond — unified installer, configurator, and lifecycle manager for the HamSCI SDR suite"
+repo            = "https://github.com/mijahauan/sigmond"
+uses            = []
+requires        = []
+contract        = ""
+install_script  = ""                                  # self-managed; update via smd update
+
 [client.ka9q-python]
 kind            = "library"
 description     = "Python interface for ka9q-radio control and monitoring"

@@ -2464,8 +2464,18 @@ def cmd_update(args) -> int:
                     errors += 1
                 else:
                     _ok('sigmond: up to date')
+                # Always sync the catalog after self-update so new entries are live.
+                catalog_src = sigmond_dir / 'etc' / 'catalog.toml'
+                catalog_dst = Path('/etc/sigmond/catalog.toml')
+                if catalog_src.exists():
+                    try:
+                        import shutil as _shutil
+                        _shutil.copy2(str(catalog_src), str(catalog_dst))
+                        _ok('sigmond: catalog synced to /etc/sigmond/catalog.toml')
+                    except Exception as _exc:
+                        _warn(f'sigmond: could not sync catalog: {_exc}')
             else:
-                _info('sigmond: (dry-run) would pull')
+                _info('sigmond: (dry-run) would pull and sync catalog')
 
     # --- pull each installed catalog repo ---
     for name in sorted(catalog):

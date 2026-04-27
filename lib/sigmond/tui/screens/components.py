@@ -48,7 +48,16 @@ def _find_repo_dir(name: str, repo_url: str) -> Optional[Path]:
 
     Checks /opt/git/<name> first.  Falls back to /opt/git/<url-stem> so that
     entries like 'radiod' (repo at /opt/git/ka9q-radio) are handled correctly.
+    Sigmond itself lives next to this file, not under /opt/git.
     """
+    # Sigmond manages itself — its repo is the parent of this library.
+    # components.py lives at <repo>/lib/sigmond/tui/screens/components.py,
+    # so parents[4] is the repo root.
+    if name == 'sigmond':
+        self_dir = Path(__file__).resolve().parents[4]
+        if (self_dir / '.git').exists():
+            return self_dir
+
     primary = _OPT_GIT / name
     if primary.exists():
         return primary
@@ -782,12 +791,12 @@ class ComponentsScreen(Vertical):
         yield Static("[dim]fetching from remote…[/]", id="cv-status")
         table = DataTable(id="cv-table", cursor_type="row", zebra_stripes=True)
         table.add_columns(
-            "Name", "Kind", "Installed", "Current Ref", "Commit #", "Last Commit", "Policy"
+            "Name", "Kind", "Installed", "Current Ref", "Commit #", "Sync", "Last Commit", "Policy"
         )
         yield table
         with Horizontal(id="cv-actions"):
-            yield Button("↑ Update All Now",  id="cv-update-all", variant="success")
-            yield Button("⟳ Fetch + Refresh", id="cv-fetch",      variant="primary")
+            yield Button("⟳ Fetch + Refresh", id="cv-fetch",      variant="success")
+            yield Button("↑ Update All Now",  id="cv-update-all", variant="warning")
         yield Static("", id="cv-last")
 
     def on_mount(self) -> None:
@@ -837,7 +846,8 @@ class ComponentsScreen(Vertical):
             inst_cell   = ("[green]✔[/]" if row.installed else "[dim]✘[/]")
             policy_cell = self._policy_markup(row.version_policy)
             ref_cell    = Text(row.current_ref, no_wrap=True)
-            idx_cell    = self._commit_idx_markup(row.commit_idx, row.behind)
+            idx_cell    = f"#{row.commit_idx}" if row.commit_idx != "—" else "[dim]—[/]"
+            sync_cell   = self._sync_markup(row.commit_idx, row.behind)
             date_cell   = (
                 f"[dim]{row.last_commit_date}[/]"
                 if row.last_commit_date == "—"
@@ -845,7 +855,7 @@ class ComponentsScreen(Vertical):
             )
             table.add_row(
                 row.name, row.kind, inst_cell,
-                ref_cell, idx_cell, date_cell, policy_cell,
+                ref_cell, idx_cell, sync_cell, date_cell, policy_cell,
                 key=row.name,
             )
 
@@ -856,17 +866,19 @@ class ComponentsScreen(Vertical):
             return "[dim]ignore[/]"
         return f"[yellow]pin: {policy}[/]"
 
-    def _commit_idx_markup(self, idx: str, behind: str) -> str:
+    def _sync_markup(self, idx: str, behind: str) -> str:
+        """Return the sync-status cell: ✔, +N behind, or blank."""
         if idx == "—":
             return "[dim]—[/]"
-        if behind == "—" or behind == "0":
-            behind_tag = "[green]✔[/]" if behind == "0" else ""
-            return f"#{idx}  {behind_tag}".strip()
+        if behind == "0":
+            return "[green]✔[/]"
+        if behind == "—":
+            return ""
         try:
             n = int(behind)
-            return f"#{idx}  [yellow]+{n} behind[/]"
+            return f"[yellow]+{n} behind[/]"
         except ValueError:
-            return f"#{idx}"
+            return ""
 
     # ------------------------------------------------------------------
     # row selection — double-click opens detail modal
