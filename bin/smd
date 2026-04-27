@@ -1606,8 +1606,24 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
         return
 
     sorted_units = sorted(radiod_units, key=lambda u: u.instance or u.unit)
+    valid_unit_names = {u.unit for u in sorted_units}
     wrote_any = False
     units_to_restart: list[str] = []
+
+    # Remove drop-in dirs for radiod instances that no longer exist.
+    # These are left behind when an instance is removed from /etc/radio/
+    # and would otherwise create ghost entries in CPU affinity reports.
+    sys_dir = Path('/etc/systemd/system')
+    for p in sorted(sys_dir.glob('radiod@*.service.d')):
+        unit_name = p.name[:-2]  # strip '.d'
+        if '@.' in unit_name:
+            continue  # skip bare template radiod@.service.d
+        if unit_name not in valid_unit_names:
+            drop_in = p / _SMD_AFFINITY_DROP_IN
+            if drop_in.exists():
+                _ok(f'removing orphaned radiod affinity drop-in for {unit_name}')
+                _run(['rm', '-rf', str(p)], sudo=True)
+                wrote_any = True
 
     for i, unit_ref in enumerate(sorted_units):
         core_cpus = cores[i] if i < len(cores) else cores[-1]
@@ -1731,6 +1747,8 @@ def _write_affinity_drop_in(unit: str, cpus: set, label: str) -> bool:
         if r.returncode != 0:
             _err(f'{unit}: mv failed')
             return False
+        # 644 so non-root processes (TUI) can read the configured CPU set
+        _run(['chmod', '644', str(drop_in)], sudo=True)
     except OSError as e:
         _err(f'{unit}: {e}')
         return False

@@ -212,15 +212,28 @@ def _run_capture(cmd: list[str]) -> subprocess.CompletedProcess:
 def get_radiod_instances() -> list[str]:
     """Return sorted list of radiod@*.service unit names.
 
-    Combines three sources so inactive instances (never started since boot)
-    are still returned:
-      1. systemctl list-units --all  (active/failed/loaded)
-      2. radiod@*.service.d/ drop-in dirs in /etc/systemd/system/
-      3. radiod@*.service unit files/symlinks in /etc/systemd/system/
+    The authoritative source is /etc/radio/radiod@*.conf (matching the
+    ka9q-radio shim deploy.toml conf_dir).  Instances with a conf file
+    exist regardless of whether they have ever been started.  Drop-in dirs
+    are NOT used as a source because they are artifacts of past smd runs and
+    will persist after an instance is removed, creating ghost entries.
+
+    systemctl list-units is checked as a secondary source for units that
+    are currently loaded in systemd (e.g. active or recently stopped) but
+    whose conf file may have been removed mid-session.
     """
     found: set[str] = set()
 
-    # Source 1: loaded units (active, failed, inactive-but-loaded)
+    # Source 1: conf files in /etc/radio/ — authoritative configured instances
+    conf_dir = Path('/etc/radio')
+    if conf_dir.exists():
+        for cf in conf_dir.glob('radiod@*.conf'):
+            if cf.is_file() and not cf.is_symlink():
+                instance = cf.stem[len('radiod@'):]
+                if instance:
+                    found.add(f'radiod@{instance}.service')
+
+    # Source 2: loaded units (active, failed, inactive-but-loaded)
     r = _run_capture(['systemctl', 'list-units', '--no-legend', '--no-pager',
                       '--all', '--output=json', 'radiod@*.service'])
     try:
@@ -230,18 +243,6 @@ def get_radiod_instances() -> list[str]:
                 found.add(name)
     except Exception:
         pass
-
-    # Source 2: drop-in directories (/etc/systemd/system/radiod@<inst>.service.d/)
-    sys_dir = Path('/etc/systemd/system')
-    for p in sys_dir.glob('radiod@*.service.d'):
-        unit = p.name[:-2]  # strip trailing '.d'
-        if p.is_dir() and '@.' not in unit:  # exclude bare template radiod@.service
-            found.add(unit)
-
-    # Source 3: unit files/symlinks (/etc/systemd/system/radiod@<inst>.service)
-    for p in sys_dir.glob('radiod@*.service'):
-        if (p.is_file() or p.is_symlink()) and '@.' not in p.name:
-            found.add(p.name)
 
     return sorted(found)
 
@@ -506,9 +507,68 @@ def _smd_drop_in_path(unit: str) -> Path:
     return Path(f'/etc/systemd/system/{unit}.d/{SMD_AFFINITY_DROP_IN}')
 
 
+def _template_name(unit: str) -> Optional[str]:
+    """Return template name for a templated instance, or None for concrete units.
+
+    e.g. 'wd-decode@KA9Q_0-10.service' → 'wd-decode@.service'
+    """
+    if '@' not in unit:
+        return None
+    at_idx = unit.index('@')
+    dot_idx = unit.rfind('.')
+    if dot_idx <= at_idx:
+        return None
+    return unit[:at_idx + 1] + '.' + unit[dot_idx + 1:]
+
+
+def _read_drop_in_cpus(path: Path) -> set:
+    """Parse the effective CPUAffinity from an smd-cpu-affinity.conf file.
+
+    Returns the last non-empty CPUAffinity= value (systemd uses the last
+    assignment, and the file always resets then sets).
+    """
+    try:
+        for line in reversed(path.read_text().splitlines()):
+            line = line.strip()
+            if line.startswith('CPUAffinity=') and line != 'CPUAffinity=':
+                return parse_cpu_mask(line.split('=', 1)[1])
+    except OSError:
+        pass
+    return set()
+
+
+def _find_smd_drop_in(unit: str) -> Optional[Path]:
+    """Return the smd drop-in Path that applies to this unit, or None.
+
+    Checks the per-instance drop-in first, then the template-level drop-in.
+    Template-level drop-ins (e.g. wd-decode@.service.d/) are written by
+    ``smd diag cpu-affinity --apply`` and apply to all instances of that template.
+    """
+    inst_path = _smd_drop_in_path(unit)
+    if inst_path.exists():
+        return inst_path
+    tmpl = _template_name(unit)
+    if tmpl:
+        tmpl_path = _smd_drop_in_path(tmpl)
+        if tmpl_path.exists():
+            return tmpl_path
+    return None
+
+
 def _foreign_drop_in_paths(unit: str) -> list:
-    d = Path(f'/etc/systemd/system/{unit}.d')
-    return [d / name for name in FOREIGN_AFFINITY_DROP_INS]
+    """Return existing foreign drop-in Paths for this unit and its template."""
+    found = []
+    for name in FOREIGN_AFFINITY_DROP_INS:
+        p = Path(f'/etc/systemd/system/{unit}.d/{name}')
+        if p.exists():
+            found.append(p)
+    tmpl = _template_name(unit)
+    if tmpl:
+        for name in FOREIGN_AFFINITY_DROP_INS:
+            p = Path(f'/etc/systemd/system/{tmpl}.d/{name}')
+            if p.exists() and p not in found:
+                found.append(p)
+    return found
 
 
 def _systemctl_main_pid(unit: str) -> Optional[str]:
@@ -785,14 +845,9 @@ def build_affinity_report(
 
     all_unit_names = radiod_unit_names + other_unit_names
 
-    # Build unit→PID map from /proc in one fast walk (~50 ms) instead of a
-    # slow ``systemctl show`` call over 150+ units (~1.5 s).
+    # Build unit→PID map from /proc in one fast walk (~50 ms).
+    # CPUAffinity is read directly from drop-in files — no systemctl show needed.
     proc_pid_map = _proc_unit_pid_map()
-
-    # Only query CPUAffinity via systemctl show for units that have a drop-in
-    # file — units without one have no affinity setting worth verifying.
-    dropin_units = [u for u in all_unit_names if _smd_drop_in_path(u).exists()]
-    show_data = _batch_systemctl_show(dropin_units) if dropin_units else {}
 
     units: list = []
     radiod_main_pids: set = set()
@@ -800,16 +855,17 @@ def build_affinity_report(
     def _observe_unit_fast(unit: str, role: str) -> UnitAffinity:
         ua = UnitAffinity(unit=unit, role=role)
         ua.main_pid = proc_pid_map.get(unit)
-        # CPUAffinity only populated for units in show_data (those with drop-ins)
-        fields = show_data.get(unit, {})
-        ua.systemd_mask = parse_cpu_mask(fields.get('CPUAffinity', ''))
+        # Read CPUAffinity directly from the drop-in file (instance or template level).
+        drop_in = _find_smd_drop_in(unit)
+        if drop_in is not None:
+            ua.systemd_mask = _read_drop_in_cpus(drop_in)
+            ua.drop_in_present = True
         if ua.main_pid:
             proc = read_proc_cpus(ua.main_pid)
             ua.observed_mask_raw = proc or ""
             ua.observed_mask = parse_cpu_mask(proc) if proc else set()
             ua.thread_groups = thread_affinity_groups(ua.main_pid)
-        ua.drop_in_present = _smd_drop_in_path(unit).exists()
-        ua.foreign_drop_ins = [str(p) for p in _foreign_drop_in_paths(unit) if p.exists()]
+        ua.foreign_drop_ins = [str(p) for p in _foreign_drop_in_paths(unit)]
         return ua
 
     for unit in radiod_unit_names:
