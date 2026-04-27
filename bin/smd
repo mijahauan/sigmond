@@ -1556,8 +1556,8 @@ def cmd_apply(args) -> int:
         except Exception:
             pass  # non-fatal
 
-    # Write CPU affinity drop-ins for radiod and restart any with wrong pinning
-    # BEFORE wd-ctl apply so radiod is already correctly pinned when clients start.
+    # Write radiod CPU affinity drop-ins BEFORE wd-ctl apply so radiod cores
+    # are reserved before any client tries to start.
     if _HAS_SIGMOND_LIB and not dry_run:
         try:
             enabled = _enabled_components(topology)
@@ -1572,6 +1572,15 @@ def cmd_apply(args) -> int:
             pass  # non-fatal; affinity is best-effort
 
     ok = _run_wd_ctl_apply(topology['client_dir'], dry_run)
+
+    # Write "other" service affinity drop-ins AFTER wd-ctl apply so smd's
+    # assignments (based on actual radiod reservations) override wd-ctl's
+    # 99-wdctl-cpu-affinity.conf drop-ins which use the full CPU range.
+    if _HAS_SIGMOND_LIB and not dry_run:
+        try:
+            _ensure_other_affinity_drop_ins(topology.get('cpu_affinity'))
+        except Exception:
+            pass  # non-fatal; affinity is best-effort
 
     # Restart wd-upload-* services AFTER everything else — they depend on
     # decoders being active and fail with "unavailable resources" if started too early.
@@ -1647,6 +1656,60 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
     for unit in units_to_restart:
         _info(f'affinity changed: restarting {unit} to apply new CPU pinning')
         _run(['systemctl', 'restart', unit], sudo=True)
+
+
+def _ensure_other_affinity_drop_ins(topology_cpu_affinity=None) -> None:
+    """Write template-level smd-cpu-affinity.conf drop-ins for all non-radiod
+    managed services, restricting them to the CPUs not reserved for radiod.
+
+    Writes at the template level (e.g. wd-decode@.service.d/) so the drop-in
+    applies to all instances without needing a per-instance file.
+    Also removes any foreign drop-ins written by wd-ctl or hf-timestd.
+    Runs daemon-reload once after all writes.
+    """
+    try:
+        from sigmond.cpu import (compute_affinity_plan as _cplan,
+                                  AFFINITY_UNITS as _AU,
+                                  cpu_list_str as _cls)
+    except ImportError:
+        return
+
+    plan = _cplan(topology_cpu_affinity)
+    if not plan.other_cpus:
+        return
+
+    other_cpus = plan.other_cpus
+    label = f'other → CPUs {_cpu_list_str(other_cpus)}'
+    wrote_any = False
+
+    # Remove foreign drop-ins (written by wd-ctl or hf-timestd) first
+    removed = _remove_foreign_affinity_drop_ins()
+    if removed:
+        wrote_any = True
+
+    # Write template-level smd drop-ins for all AFFINITY_UNITS
+    for unit in _AU:
+        if _write_affinity_drop_in(unit, other_cpus, label):
+            wrote_any = True
+
+    if wrote_any:
+        _run(['systemctl', 'daemon-reload'], sudo=True)
+
+    # Apply runtime affinity to running instances without restarting them
+    for unit in _AU:
+        pattern = unit.replace('@.service', '@*.service') if '@.' in unit else unit
+        r = _run(['systemctl', 'list-units', '--no-legend', '--no-pager',
+                  '--state=running', '--output=json', pattern])
+        try:
+            import json as _json2
+            instances = [u.get('unit', '') for u in _json2.loads(r.stdout)
+                         if u.get('unit', '')]
+        except Exception:
+            instances = []
+        if not instances and '@.' not in unit:
+            instances = [unit]
+        for inst in instances:
+            _apply_cpu_affinity_runtime(inst, other_cpus)
 
 
 def cmd_start(args) -> int:
