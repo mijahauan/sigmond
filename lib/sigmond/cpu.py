@@ -210,14 +210,40 @@ def _run_capture(cmd: list[str]) -> subprocess.CompletedProcess:
 
 
 def get_radiod_instances() -> list[str]:
-    """Return sorted list of radiod@*.service unit names known to systemd."""
+    """Return sorted list of radiod@*.service unit names.
+
+    Combines three sources so inactive instances (never started since boot)
+    are still returned:
+      1. systemctl list-units --all  (active/failed/loaded)
+      2. radiod@*.service.d/ drop-in dirs in /etc/systemd/system/
+      3. radiod@*.service unit files/symlinks in /etc/systemd/system/
+    """
+    found: set[str] = set()
+
+    # Source 1: loaded units (active, failed, inactive-but-loaded)
     r = _run_capture(['systemctl', 'list-units', '--no-legend', '--no-pager',
                       '--all', '--output=json', 'radiod@*.service'])
     try:
-        return sorted(u.get('unit', '') for u in json.loads(r.stdout)
-                      if u.get('unit', ''))
+        for u in json.loads(r.stdout):
+            name = u.get('unit', '')
+            if name:
+                found.add(name)
     except Exception:
-        return []
+        pass
+
+    # Source 2: drop-in directories (/etc/systemd/system/radiod@<inst>.service.d/)
+    sys_dir = Path('/etc/systemd/system')
+    for p in sys_dir.glob('radiod@*.service.d'):
+        unit = p.name[:-2]  # strip trailing '.d'
+        if p.is_dir() and '@.' not in unit:  # exclude bare template radiod@.service
+            found.add(unit)
+
+    # Source 3: unit files/symlinks (/etc/systemd/system/radiod@<inst>.service)
+    for p in sys_dir.glob('radiod@*.service'):
+        if (p.is_file() or p.is_symlink()) and '@.' not in p.name:
+            found.add(p.name)
+
+    return sorted(found)
 
 
 def get_radiod_cpus() -> set:
@@ -501,9 +527,8 @@ def expand_template_instances(template: str) -> list:
     known to systemd.  Non-template names are returned as a single-entry
     list containing the name unchanged.
 
-    Uses ``systemctl list-units --all --output=json`` so inactive but
-    loaded instances are included.  Returns an empty list when a template
-    has no instances.
+    Prefer expand_all_template_instances() for bulk expansion — this
+    single-template version is kept for call sites that need just one.
     """
     if '@.' not in template:
         return [template]
@@ -515,6 +540,47 @@ def expand_template_instances(template: str) -> list:
     except Exception:
         return []
     return sorted(u.get('unit', '') for u in units if u.get('unit', ''))
+
+
+def _expand_all_templates_bulk(templates: dict) -> dict[str, list[str]]:
+    """Expand all template unit names to concrete instances in ONE systemctl call.
+
+    Returns a dict mapping each template name to its list of concrete instances.
+    Non-template names map to [name] directly without a subprocess call.
+    """
+    non_templates = {t: [t] for t in templates if '@.' not in t}
+    tmpl_list = [t for t in templates if '@.' in t]
+    if not tmpl_list:
+        return non_templates
+
+    patterns = [t.replace('@.service', '@*.service') for t in tmpl_list]
+    r = _run_capture(
+        ['systemctl', 'list-units', '--no-legend', '--no-pager',
+         '--all', '--output=json'] + patterns
+    )
+    all_units: list = []
+    try:
+        all_units = json.loads(r.stdout)
+    except Exception:
+        pass
+
+    # Map each returned unit back to the template it came from.
+    result: dict[str, list[str]] = {t: [] for t in tmpl_list}
+    result.update(non_templates)
+    for u in all_units:
+        name = u.get('unit', '')
+        if not name:
+            continue
+        # Match e.g. 'wd-decode@foo.service' back to 'wd-decode@.service'
+        at_idx = name.find('@')
+        dot_idx = name.rfind('.')
+        if at_idx >= 0 and dot_idx > at_idx:
+            tmpl_key = name[:at_idx + 1] + '.' + name[dot_idx + 1:]
+            if tmpl_key in result:
+                result[tmpl_key].append(name)
+    for key in result:
+        result[key] = sorted(result[key]) if result[key] != [key] else result[key]
+    return result
 
 
 def observe_unit(unit: str, role: str) -> UnitAffinity:
@@ -639,36 +705,134 @@ class AffinityReport:
         return [c for c in self.contention if not c.is_default]
 
 
+def _proc_unit_pid_map() -> dict[str, str]:
+    """Walk /proc once and return {unit_name: main_pid_str}.
+
+    Reads each process's cgroup file to extract its systemd unit name.
+    The main PID is the smallest PID in the unit's cgroup — the ExecStart
+    process is always spawned first and thus has the lowest PID.
+
+    ~40-60 ms on a busy system; avoids a slow ``systemctl show`` call.
+    """
+    unit_pids: dict[str, list[int]] = {}
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            text = (entry / 'cgroup').read_text()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if not line.startswith('0::'):
+                continue
+            # cgroup path: /system.slice/system-wd\x2ddecode.slice/wd-decode@foo.service
+            unit = line[3:].rsplit('/', 1)[-1]
+            if unit.endswith('.service'):
+                unit_pids.setdefault(unit, []).append(int(entry.name))
+            break
+    return {unit: str(min(pids)) for unit, pids in unit_pids.items()}
+
+
+def _batch_systemctl_show(unit_names: list[str]) -> dict[str, dict[str, str]]:
+    """Fetch MainPID and CPUAffinity for all units in a single systemctl call.
+
+    Returns {unit_name: {'MainPID': ..., 'CPUAffinity': ...}}.
+    """
+    if not unit_names:
+        return {}
+    r = _run_capture(
+        ['systemctl', 'show', '-p', 'MainPID,CPUAffinity'] + unit_names
+    )
+    result: dict[str, dict[str, str]] = {}
+    current_unit_idx = 0
+    current_fields: dict[str, str] = {}
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            # Blank line separates units in multi-unit output.
+            if current_unit_idx < len(unit_names):
+                result[unit_names[current_unit_idx]] = current_fields
+                current_unit_idx += 1
+                current_fields = {}
+            continue
+        if '=' in line:
+            k, _, v = line.partition('=')
+            current_fields[k.strip()] = v.strip()
+    if current_fields and current_unit_idx < len(unit_names):
+        result[unit_names[current_unit_idx]] = current_fields
+    return result
+
+
 def build_affinity_report(
     topology_cpu_affinity: Optional[dict] = None,
 ) -> AffinityReport:
     """Build a complete affinity report from live host state.
 
     Read-only: reads /sys, /proc, and shells out to ``systemctl show``.
-    No mutations.
+    No mutations.  Uses batched systemctl calls to minimise subprocess count.
     """
     caps = gather_capabilities()
     plan = compute_affinity_plan(topology_cpu_affinity)
 
+    # Expand all AFFINITY_UNITS templates in a single systemctl list-units call.
+    expanded = _expand_all_templates_bulk(AFFINITY_UNITS)
+
+    # Collect all unit names we need to observe.
+    radiod_unit_names = list(plan.radiod.keys())
+    other_unit_names: list[str] = []
+    for units_for_template in expanded.values():
+        other_unit_names.extend(units_for_template)
+
+    all_unit_names = radiod_unit_names + other_unit_names
+
+    # Build unit→PID map from /proc in one fast walk (~50 ms) instead of a
+    # slow ``systemctl show`` call over 150+ units (~1.5 s).
+    proc_pid_map = _proc_unit_pid_map()
+
+    # Only query CPUAffinity via systemctl show for units that have a drop-in
+    # file — units without one have no affinity setting worth verifying.
+    dropin_units = [u for u in all_unit_names if _smd_drop_in_path(u).exists()]
+    show_data = _batch_systemctl_show(dropin_units) if dropin_units else {}
+
     units: list = []
     radiod_main_pids: set = set()
-    for unit in plan.radiod.keys():
-        ua = observe_unit(unit, role='radiod')
+
+    def _observe_unit_fast(unit: str, role: str) -> UnitAffinity:
+        ua = UnitAffinity(unit=unit, role=role)
+        ua.main_pid = proc_pid_map.get(unit)
+        # CPUAffinity only populated for units in show_data (those with drop-ins)
+        fields = show_data.get(unit, {})
+        ua.systemd_mask = parse_cpu_mask(fields.get('CPUAffinity', ''))
+        if ua.main_pid:
+            proc = read_proc_cpus(ua.main_pid)
+            ua.observed_mask_raw = proc or ""
+            ua.observed_mask = parse_cpu_mask(proc) if proc else set()
+            ua.thread_groups = thread_affinity_groups(ua.main_pid)
+        ua.drop_in_present = _smd_drop_in_path(unit).exists()
+        ua.foreign_drop_ins = [str(p) for p in _foreign_drop_in_paths(unit) if p.exists()]
+        return ua
+
+    for unit in radiod_unit_names:
+        ua = _observe_unit_fast(unit, role='radiod')
         units.append(ua)
         if ua.main_pid:
             radiod_main_pids.add(ua.main_pid)
-    for template in AFFINITY_UNITS:
-        for unit in expand_template_instances(template):
-            units.append(observe_unit(unit, role='other'))
+    for unit in other_unit_names:
+        units.append(_observe_unit_fast(unit, role='other'))
 
     radiod_cpus_set: set = set()
     for cpus in plan.radiod.values():
         radiod_cpus_set.update(cpus)
 
-    contention = find_contending_processes(
-        radiod_cpus_set,
-        exclude_pids=radiod_main_pids,
-    )
+    # Only scan /proc for contention when at least one radiod instance is
+    # actually running — if none are active the walk is wasted work.
+    if radiod_main_pids:
+        contention = find_contending_processes(
+            radiod_cpus_set,
+            exclude_pids=radiod_main_pids,
+        )
+    else:
+        contention = []
 
     warnings: list = []
 
