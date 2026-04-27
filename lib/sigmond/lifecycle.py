@@ -396,4 +396,11 @@ def order_units(
     result: list[UnitRef] = []
     for name in ordered_names:
         result.extend(buckets[name])
+
+    # Upload services (wd-upload-*) depend on decoders being active and must
+    # start last — systemd's resource checks fail if they race their producers.
+    upload = [u for u in result if u.unit.startswith('wd-upload-')]
+    if upload:
+        result = [u for u in result if not u.unit.startswith('wd-upload-')] + upload
+
     return result

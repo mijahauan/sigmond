@@ -176,8 +176,7 @@ class UpdateOutputModal(ModalScreen):
             lines: list[str] = []
             for raw in proc.stdout:
                 lines.append(raw.rstrip())
-                if len(lines) % 10 == 0:
-                    self.app.call_from_thread(self._update_output, list(lines))
+                self.app.call_from_thread(self._update_output, list(lines))
             proc.wait()
             return '\n'.join(lines), proc.returncode
         except Exception as exc:

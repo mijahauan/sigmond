@@ -572,7 +572,7 @@ class WdClientScreen(Vertical):
         # Preserve general settings from existing conf
         existing = load_config()
         wdc.ka9q_conf_name = existing.ka9q_conf_name
-        wdc.rac = existing.rac
+        # RAC is managed independently by Sigmond — do not write it to wsprdaemon.conf
         wdc.excluded_keys = set(self._excluded_keys)
         for row in self._rows:
             if not row.rx.bands or not row.enabled:

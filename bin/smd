@@ -1551,9 +1551,12 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
     Assigns physical core 0 to the first instance (alphabetically), core 1 to
     the second, etc.  Runs daemon-reload after writing so the constraints are
     in effect when the units start.
+
+    For any instance already running with the wrong CPU affinity, restarts it
+    so the new constraint takes effect immediately.
     """
     try:
-        from sigmond.cpu import get_physical_cores
+        from sigmond.cpu import get_physical_cores, parse_cpu_mask
     except ImportError:
         return
 
@@ -1563,6 +1566,8 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
 
     sorted_units = sorted(radiod_units, key=lambda u: u.instance or u.unit)
     wrote_any = False
+    units_to_restart: list[str] = []
+
     for i, unit_ref in enumerate(sorted_units):
         core_cpus = cores[i] if i < len(cores) else cores[-1]
         label = f'radiod {unit_ref.instance or unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}'
@@ -1570,8 +1575,21 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
             _ok(f'affinity: {unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}')
             wrote_any = True
 
+            # Check if the unit is already running with the wrong affinity.
+            r_active = _run(['systemctl', 'is-active', '--quiet', unit_ref.unit])
+            if r_active.returncode == 0:
+                r_cur = _run(['systemctl', 'show', '-p', 'CPUAffinity',
+                              '--value', unit_ref.unit])
+                current_cpus = parse_cpu_mask(r_cur.stdout.strip())
+                if current_cpus != core_cpus:
+                    units_to_restart.append(unit_ref.unit)
+
     if wrote_any:
         _run(['systemctl', 'daemon-reload'], sudo=True)
+
+    for unit in units_to_restart:
+        _info(f'affinity changed: restarting {unit} to apply new CPU pinning')
+        _run(['systemctl', 'restart', unit], sudo=True)
 
 
 def cmd_start(args) -> int:
