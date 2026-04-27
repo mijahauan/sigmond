@@ -48,7 +48,10 @@ class ReceiverRow:
     def __init__(self, meta: SdrDeviceMeta, rx: WdReceiver) -> None:
         self.meta    = meta    # from SDR inventory
         self.rx      = rx      # WdReceiver (may have empty bands initially)
-        self.enabled = True    # UI toggle: False = excluded from save
+        # Start enabled only if bands are already configured; new/unconfigured
+        # receivers (e.g. KiwiSDRs found by mDNS with no config yet) start
+        # disabled so the user must explicitly opt them in.
+        self.enabled = bool(rx.bands)
 
     @property
     def display_name(self) -> str:
@@ -401,6 +404,10 @@ class WdClientScreen(Vertical):
         for band in ALL_BANDS:
             table.add_column(band, width=band_widths[band])
 
+        first_configured = next(
+            (i for i, row in enumerate(self._rows) if row.rx.bands), None
+        )
+
         for row in self._rows:
             name_color = "green" if row.enabled else "red"
             name_cell = f"[{name_color}]{row.display_name}[/]"
@@ -417,6 +424,9 @@ class WdClientScreen(Vertical):
                 else:
                     cells.append(f"[red]{_modes_cell_plain(row.rx.bands.get(band, ''))}[/]")
             table.add_row(*cells, key=row.name)
+
+        if first_configured is not None:
+            table.move_cursor(row=first_configured)
 
     # ------------------------------------------------------------------
     # cell click / double-click → mode modal

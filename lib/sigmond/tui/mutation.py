@@ -191,6 +191,9 @@ class UpdateOutputModal(ModalScreen):
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != "uom-run":
             return
+        # Only act on terminal states — PENDING and RUNNING also fire this event.
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            return
         if self._spin_timer:
             self._spin_timer.stop()
             self._spin_timer = None
