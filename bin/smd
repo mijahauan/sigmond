@@ -1500,6 +1500,26 @@ def _ensure_radiod_running() -> None:
 # smd apply
 # ---------------------------------------------------------------------------
 
+def _restart_upload_services_last() -> None:
+    """Restart active wd-upload-* services so they start after all producers."""
+    import subprocess as _sp
+    r = _sp.run(
+        ['systemctl', 'list-units', '--type=service', '--state=active',
+         '--no-legend', '--no-pager', 'wd-upload-*'],
+        capture_output=True, text=True,
+    )
+    units = [line.split()[0] for line in r.stdout.splitlines() if line.strip()]
+    if not units:
+        return
+    _info('upload services: restarting last so producers are ready...')
+    for unit in sorted(units):
+        r2 = _run(['systemctl', 'restart', unit], sudo=True)
+        if r2.returncode == 0:
+            _ok(f'{unit}: restarted')
+        else:
+            _err(f'{unit}: {r2.stderr.strip()}')
+
+
 def cmd_apply(args) -> int:
     if _need_root('apply'):
         return 1
@@ -1536,7 +1556,28 @@ def cmd_apply(args) -> int:
         except Exception:
             pass  # non-fatal
 
+    # Write CPU affinity drop-ins for radiod and restart any with wrong pinning
+    # BEFORE wd-ctl apply so radiod is already correctly pinned when clients start.
+    if _HAS_SIGMOND_LIB and not dry_run:
+        try:
+            enabled = _enabled_components(topology)
+            from sigmond.lifecycle import resolve_units as _resolve_units
+            radiod_units = [
+                u for u in _resolve_units(enabled, enabled)
+                if not u.orphaned and u.component == 'ka9q-radio' and u.kind == 'service'
+            ]
+            if radiod_units:
+                _ensure_radiod_affinity_drop_ins(radiod_units, topology.get('cpu_affinity'))
+        except Exception:
+            pass  # non-fatal; affinity is best-effort
+
     ok = _run_wd_ctl_apply(topology['client_dir'], dry_run)
+
+    # Restart wd-upload-* services AFTER everything else — they depend on
+    # decoders being active and fail with "unavailable resources" if started too early.
+    if not dry_run:
+        _restart_upload_services_last()
+
     return 0 if ok else 1
 
 

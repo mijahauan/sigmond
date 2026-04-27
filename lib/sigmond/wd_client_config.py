@@ -168,8 +168,7 @@ def save_config(wdc: WdConfig, path: Path = WD_CONF_PATH) -> None:
     ]
     if wdc.ka9q_conf_name:
         lines.append(f"ka9q_conf_name = {wdc.ka9q_conf_name}\n")
-    if wdc.rac:
-        lines.append(f"rac = {wdc.rac}\n")
+    # RAC is managed by Sigmond independently — never write 'rac' to this file.
     lines.append("\n")
 
     for rx in wdc.receivers.values():

@@ -625,6 +625,12 @@ class WdClientScreen(Vertical):
         if self._dirty:
             self.action_save()
 
+        import shutil as _shutil, sys as _sys, os as _os
+        argv0 = _os.path.abspath(_sys.argv[0]) if _sys.argv and _sys.argv[0] else ""
+        smd = (argv0 if argv0 and _os.path.isfile(argv0)
+               and _os.path.basename(argv0) == 'smd'
+               else _shutil.which('smd') or '/usr/local/sbin/smd')
+
         def _after_modal(_result: object) -> None:
             self.query_one("#wd-status", Static).update("[dim]apply complete — reloading…[/]")
             self._load()
@@ -632,7 +638,9 @@ class WdClientScreen(Vertical):
         self.app.push_screen(
             UpdateOutputModal(
                 title="Apply wsprdaemon-client configuration",
-                cmd=['sudo', 'wd-ctl', 'apply'],
+                # Run smd apply instead of wd-ctl directly so that CPU affinity
+                # is set first and upload services are restarted last.
+                cmd=['sudo', smd, 'apply'],
             ),
             _after_modal,
         )
