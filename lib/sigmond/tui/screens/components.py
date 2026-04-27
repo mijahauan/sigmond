@@ -5,9 +5,9 @@ Shows every catalog entry with:
   - current HEAD ref (git branch@sha)
   - version policy from topology.toml (latest / pinned ref / ignore)
 
-Selecting a row reveals a detail panel with the recent git log for that
-component.  Three buttons let the operator change the version policy for the
-selected component and save it back to topology.toml.
+Double-click a row to open ComponentDetailModal where git history, policy,
+and per-component update are available.  The main screen has two actions:
+"Update All Now" and "Fetch + Refresh".
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ import os
 import shutil
 import subprocess
 import sys
+import time as _time
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -292,6 +294,121 @@ def _gather(topology_components: dict, do_fetch: bool = False) -> _ComponentsVie
     return view
 
 
+# ---------------------------------------------------------------------------
+# Module-level topology writers (shared by ComponentsScreen and modal)
+# ---------------------------------------------------------------------------
+
+def _write_topology_toml(topo, path: Path) -> None:
+    """Write topology.toml from a loaded Topology object."""
+    lines = [
+        "# /etc/sigmond/topology.toml",
+        "# Managed by smd tui. Manual edits are fine too.",
+        "",
+    ]
+    for comp_name in sorted(topo.components):
+        comp = topo.components[comp_name]
+        lines.append(f"[component.{comp_name}]")
+        lines.append(f'enabled = {"true" if comp.enabled else "false"}')
+        if not comp.managed:
+            lines.append("managed = false")
+        if comp.version and comp.version != "latest":
+            lines.append(f'version = "{comp.version}"')
+        if comp.description:
+            lines.append(f'description = "{comp.description}"')
+        if comp.rac_id:
+            lines.append(f'rac_id = "{comp.rac_id}"')
+        if comp.rac_number >= 0:
+            lines.append(f'rac_number = {comp.rac_number}')
+        lines.append("")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _sudo_write_topology(topo, path: Path) -> bool:
+    """Fall back to writing topology.toml via sudo cp from a temp file."""
+    lines = [
+        "# /etc/sigmond/topology.toml",
+        "# Managed by smd tui. Manual edits are fine too.",
+        "",
+    ]
+    for comp_name in sorted(topo.components):
+        comp = topo.components[comp_name]
+        lines.append(f"[component.{comp_name}]")
+        lines.append(f'enabled = {"true" if comp.enabled else "false"}')
+        if not comp.managed:
+            lines.append("managed = false")
+        if comp.version and comp.version != "latest":
+            lines.append(f'version = "{comp.version}"')
+        if comp.description:
+            lines.append(f'description = "{comp.description}"')
+        if comp.rac_id:
+            lines.append(f'rac_id = "{comp.rac_id}"')
+        if comp.rac_number >= 0:
+            lines.append(f'rac_number = {comp.rac_number}')
+        lines.append("")
+    content = "\n".join(lines) + "\n"
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(suffix='.toml')
+        os.write(fd, content.encode())
+        os.close(fd)
+        r = subprocess.run(['sudo', 'cp', tmp, str(path)], capture_output=True)
+        return r.returncode == 0
+    except Exception:
+        return False
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _apply_version_policy(
+    name: str,
+    policy: str,
+    topo_components: dict,
+) -> tuple[bool, str]:
+    """Write version policy for one component to topology.toml.
+
+    Also updates topo_components in-place so the caller's cache stays current.
+    Returns (success, message).
+    """
+    from ...paths import TOPOLOGY_PATH
+    from ...topology import load_topology
+
+    try:
+        topo = load_topology(TOPOLOGY_PATH)
+    except Exception as exc:
+        return False, f"Error loading topology: {exc}"
+
+    comp = topo.components.get(name)
+    if comp is None:
+        return False, f"{name} not in topology — policy not saved."
+    comp.version = policy
+
+    # Update caller's in-memory cache.
+    local_comp = topo_components.get(name)
+    if local_comp is not None:
+        local_comp.version = policy
+
+    try:
+        _write_topology_toml(topo, TOPOLOGY_PATH)
+        return True, f"{name}: policy → {policy}  (saved)"
+    except PermissionError:
+        ok = _sudo_write_topology(topo, TOPOLOGY_PATH)
+        if ok:
+            return True, f"{name}: policy → {policy}  (saved via sudo)"
+        from ...paths import TOPOLOGY_PATH as _TP
+        return False, f"Permission denied writing {_TP}"
+    except Exception as exc:
+        return False, f"Error saving policy: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# UpdateOutputModal
+# ---------------------------------------------------------------------------
+
 class UpdateOutputModal(ModalScreen):
     """Scrollable output modal for long-running smd update commands."""
 
@@ -401,6 +518,219 @@ class UpdateOutputModal(ModalScreen):
             self.dismiss(True)
 
 
+# ---------------------------------------------------------------------------
+# ComponentDetailModal
+# ---------------------------------------------------------------------------
+
+class ComponentDetailModal(ModalScreen):
+    """Per-component detail: git log, version policy controls, and update."""
+
+    BINDINGS = [Binding("escape", "dismiss_modal", "Close")]
+
+    DEFAULT_CSS = """
+    ComponentDetailModal { align: center middle; }
+    ComponentDetailModal > Vertical {
+        width: 90%;
+        height: 88%;
+        padding: 1 2;
+        background: $panel;
+        border: thick $primary;
+    }
+    ComponentDetailModal #cdm-header {
+        height: auto;
+        margin-bottom: 1;
+        border-bottom: solid $primary-background;
+        padding-bottom: 1;
+    }
+    ComponentDetailModal #cdm-title {
+        text-style: bold;
+        margin-bottom: 0;
+    }
+    ComponentDetailModal #cdm-scroll {
+        height: 1fr;
+        border: solid $surface;
+        padding: 0 1;
+        background: $background;
+        margin-bottom: 1;
+    }
+    ComponentDetailModal #cdm-btn-row {
+        height: auto;
+        margin-bottom: 1;
+    }
+    ComponentDetailModal #cdm-btn-row Button {
+        margin-right: 1;
+    }
+    ComponentDetailModal #cdm-status {
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, row: _ComponentRow, topo_components: dict, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._row = row
+        self._topo_components = topo_components
+        self._changed = False
+
+    def compose(self) -> ComposeResult:
+        row = self._row
+        with Vertical():
+            with Vertical(id="cdm-header"):
+                yield Static(
+                    f"[bold]{row.name}[/]  [dim]({row.kind})[/]",
+                    id="cdm-title",
+                )
+                if row.description:
+                    yield Static(f"[dim]{row.description}[/]")
+                if row.repo:
+                    yield Static(f"[dim]repo:[/] {row.repo}")
+                yield Static(
+                    f"[dim]ref:[/] {row.current_ref}  "
+                    f"[dim]last commit:[/] {row.last_commit_date}  "
+                    f"[dim]installed:[/] "
+                    + ("[green]yes[/]" if row.installed else "[red]no[/]"),
+                )
+                yield Static(
+                    f"[dim]policy:[/] {self._policy_markup(row.version_policy)}",
+                    id="cdm-policy",
+                )
+            with ScrollableContainer(id="cdm-scroll"):
+                yield Static("", id="cdm-log")
+            with Horizontal(id="cdm-btn-row"):
+                yield Button(
+                    "↑ Update this",
+                    id="cdm-update",
+                    variant="success",
+                    disabled=not row.installed,
+                )
+                yield Button("↑ Set: latest",    id="cdm-latest",  variant="success")
+                yield Button("⊙ Pin to current", id="cdm-pin",     variant="warning",
+                             disabled=(row.current_ref == "—"))
+                yield Button("✕ Set: ignore",    id="cdm-ignore",  variant="error")
+                yield Button("Close",            id="cdm-close",   variant="default")
+            yield Static("", id="cdm-status")
+
+    def on_mount(self) -> None:
+        self._render_log()
+
+    def _policy_markup(self, policy: str) -> str:
+        if policy == "latest":
+            return "[green]latest[/]"
+        if policy == "ignore":
+            return "[dim]ignore[/]"
+        return f"[yellow]pin: {policy}[/]"
+
+    def _render_log(self) -> None:
+        row = self._row
+        lines: list[str] = []
+        if row.ahead_log_lines:
+            lines.append(
+                f"[yellow]↑ {len(row.ahead_log_lines)} commit(s) on remote, not yet pulled:[/]"
+            )
+            for entry in row.ahead_log_lines[:20]:
+                safe = entry.replace('[', r'\[')
+                lines.append(f"  [yellow]{safe}[/]")
+            lines.append("[dim]  — click 'Update this' to pull these[/]")
+            lines.append("")
+        if row.log_lines:
+            label = "[dim]local commits:[/]" if row.ahead_log_lines else "[dim]recent commits:[/]"
+            lines.append(label)
+            for entry in row.log_lines:
+                safe = entry.replace('[', r'\[')
+                lines.append(f"  [cyan]{safe}[/]")
+        elif row.installed and row.repo_dir:
+            lines.append("[dim](git history unavailable — may need root)[/]")
+        elif not row.installed:
+            lines.append("[dim](not installed — no git history)[/]")
+        self.query_one("#cdm-log", Static).update("\n".join(lines))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id
+        if bid == "cdm-close":
+            self.dismiss(self._changed)
+        elif bid == "cdm-update":
+            self._do_update()
+        elif bid in ("cdm-latest", "cdm-pin", "cdm-ignore"):
+            self._set_policy(bid)
+
+    def _set_policy(self, button_id: str) -> None:
+        row = self._row
+        if button_id == "cdm-latest":
+            new_policy = "latest"
+        elif button_id == "cdm-ignore":
+            new_policy = "ignore"
+        else:  # cdm-pin
+            sha = row.current_ref.split("@")[-1] if "@" in row.current_ref else row.current_ref
+            new_policy = sha
+
+        ok, msg = _apply_version_policy(row.name, new_policy, self._topo_components)
+        status = self.query_one("#cdm-status", Static)
+        if ok:
+            row.version_policy = new_policy
+            self._changed = True
+            self.query_one("#cdm-policy", Static).update(
+                f"[dim]policy:[/] {self._policy_markup(new_policy)}"
+            )
+            status.update(f"[green]✔[/]  {msg}")
+        else:
+            status.update(f"[red]{msg}[/]")
+
+    def _do_update(self) -> None:
+        row = self._row
+        if not row.installed:
+            self.query_one("#cdm-status", Static).update(
+                f"[yellow]{row.name} is not installed — nothing to update.[/]"
+            )
+            return
+        if row.version_policy == "ignore":
+            self.query_one("#cdm-status", Static).update(
+                f"[yellow]{row.name} has policy=ignore — set policy to 'latest' first.[/]"
+            )
+            return
+
+        smd = _smd_binary()
+        behind_str = (
+            f"  ({row.behind} commits behind)"
+            if row.behind not in ("—", "0") else ""
+        )
+
+        def _after_confirm(confirmed: bool) -> None:
+            if not confirmed:
+                return
+
+            def _after_modal(_result: object) -> None:
+                self._changed = True
+                self.query_one("#cdm-status", Static).update(
+                    f"[dim]{row.name}: update complete.[/]"
+                )
+
+            self.app.push_screen(
+                UpdateOutputModal(
+                    title=f"Updating {row.name}",
+                    cmd=['sudo', smd, 'update', '--components', row.name],
+                ),
+                _after_modal,
+            )
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"Update {row.name}?",
+                body=(
+                    f"Pull the latest commits for [bold]{row.name}[/] and re-apply.\n\n"
+                    f"Current ref: {row.current_ref}{behind_str}"
+                ),
+                cmd_preview=f"sudo {smd} update --components {row.name}",
+            ),
+            _after_confirm,
+        )
+
+    def action_dismiss_modal(self) -> None:
+        self.dismiss(self._changed)
+
+
+# ---------------------------------------------------------------------------
+# ComponentsScreen
+# ---------------------------------------------------------------------------
+
 class ComponentsScreen(Vertical):
     """Software versions — component install status, git refs, and version policy."""
 
@@ -421,14 +751,7 @@ class ComponentsScreen(Vertical):
         margin-bottom: 1;
     }
     ComponentsScreen #cv-table {
-        height: 14;
-        margin-bottom: 1;
-    }
-    ComponentsScreen #cv-detail {
-        height: auto;
-        min-height: 6;
-        border: solid $primary-background;
-        padding: 1;
+        height: 1fr;
         margin-bottom: 1;
     }
     ComponentsScreen #cv-actions {
@@ -437,16 +760,6 @@ class ComponentsScreen(Vertical):
     }
     ComponentsScreen #cv-actions Button {
         margin-right: 1;
-    }
-    ComponentsScreen #cv-refresh {
-        border: tall $primary;
-        color: $primary-lighten-2;
-        background: $panel;
-    }
-    ComponentsScreen #cv-latest {
-        border: tall $success;
-        color: $success-lighten-2;
-        background: $panel;
     }
     ComponentsScreen #cv-last {
         color: $text-muted;
@@ -457,31 +770,29 @@ class ComponentsScreen(Vertical):
         super().__init__(**kwargs)
         self._topo_components = topology_components  # name → Component
         self._rows: list[_ComponentRow] = []
-        self._detail_name: Optional[str] = None   # name of row shown in detail panel
+        self._last_click_name: Optional[str] = None
+        self._last_click_time: float = 0.0
 
-    def compose(self):
+    def compose(self) -> ComposeResult:
         yield Static("Software Versions", classes="cv-title")
         yield Static(
-            "Select a row to see its git history. "
-            "Use the buttons below to set the version policy for that component.",
+            "Double-click a row to view details, set policy, or update that component.",
             id="cv-hint",
         )
-        yield Static("[dim]loading…[/]", id="cv-status")
+        yield Static("[dim]fetching from remote…[/]", id="cv-status")
         table = DataTable(id="cv-table", cursor_type="row", zebra_stripes=True)
-        table.add_columns("Name", "Kind", "Installed", "Current Ref", "Commit #", "Last Commit", "Policy")
+        table.add_columns(
+            "Name", "Kind", "Installed", "Current Ref", "Commit #", "Last Commit", "Policy"
+        )
         yield table
-        yield Static("(select a row to see git history)", id="cv-detail")
         with Horizontal(id="cv-actions"):
-            yield Button("↑ Update now",           id="cv-update",  variant="success")
-            yield Button("⊙ Pin to current",       id="cv-pin",     variant="warning")
-            yield Button("⟳ Fetch + Refresh",      id="cv-fetch",   variant="primary")
-            yield Button("⟳ Refresh (local)",      id="cv-refresh", variant="default")
-            yield Button("↑ Set policy: latest",   id="cv-latest",  variant="default")
-            yield Button("✕ Set policy: ignore",   id="cv-ignore",  variant="error")
+            yield Button("↑ Update All Now",  id="cv-update-all", variant="success")
+            yield Button("⟳ Fetch + Refresh", id="cv-fetch",      variant="primary")
         yield Static("", id="cv-last")
 
     def on_mount(self) -> None:
-        self._refresh()
+        # Auto-fetch on first load so the table shows remote-ahead state immediately.
+        self._refresh(do_fetch=True)
 
     # ------------------------------------------------------------------
     # data loading
@@ -527,8 +838,11 @@ class ComponentsScreen(Vertical):
             policy_cell = self._policy_markup(row.version_policy)
             ref_cell    = Text(row.current_ref, no_wrap=True)
             idx_cell    = self._commit_idx_markup(row.commit_idx, row.behind)
-            date_cell   = f"[dim]{row.last_commit_date}[/]" if row.last_commit_date == "—" \
-                          else row.last_commit_date
+            date_cell   = (
+                f"[dim]{row.last_commit_date}[/]"
+                if row.last_commit_date == "—"
+                else row.last_commit_date
+            )
             table.add_row(
                 row.name, row.kind, inst_cell,
                 ref_cell, idx_cell, date_cell, policy_cell,
@@ -555,7 +869,7 @@ class ComponentsScreen(Vertical):
             return f"#{idx}"
 
     # ------------------------------------------------------------------
-    # row selection → detail panel
+    # row selection — double-click opens detail modal
     # ------------------------------------------------------------------
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -563,247 +877,67 @@ class ComponentsScreen(Vertical):
         row = next((r for r in self._rows if r.name == name), None)
         if row is None:
             return
-        self._detail_name = name
-        self._show_detail(row)
 
-    def _show_detail(self, row: _ComponentRow) -> None:
-        detail = self.query_one("#cv-detail", Static)
-        lines: list[str] = []
-        lines.append(f"[bold]{row.name}[/]  ({row.kind})")
-        lines.append(f"[dim]{row.description}[/]")
-        if row.repo:
-            lines.append(f"[dim]repo:[/] {row.repo}")
-        lines.append(f"[dim]installed:[/] {'yes' if row.installed else 'no'}")
-        lines.append(f"[dim]current ref:[/] {row.current_ref}")
-        lines.append(f"[dim]version policy:[/] {self._policy_markup(row.version_policy)}")
-        if row.ahead_log_lines:
-            lines.append("")
-            lines.append(f"[yellow]↑ on remote, not yet pulled ({len(row.ahead_log_lines)}):[/]")
-            for log_entry in row.ahead_log_lines[:15]:
-                safe = log_entry.replace('[', r'\[')
-                lines.append(f"  [yellow]{safe}[/]")
-            lines.append("[dim]  — run 'Update now' to pull these[/]")
-        if row.log_lines:
-            lines.append("")
-            label = "[dim]local commits:[/]" if row.ahead_log_lines else "[dim]recent commits:[/]"
-            lines.append(label)
-            for log_entry in row.log_lines[:10]:
-                safe = log_entry.replace('[', r'\[')
-                lines.append(f"  [cyan]{safe}[/]")
-        elif row.installed and row.repo_dir:
-            lines.append("[dim](git history unavailable — may need root)[/]")
-        elif not row.installed:
-            lines.append("[dim](not installed — no git history)[/]")
-        detail.update("\n".join(lines))
+        now = _time.monotonic()
+        if name == self._last_click_name and (now - self._last_click_time) < 0.6:
+            # Double-click detected — open modal.
+            self._last_click_name = None
+            self._last_click_time = 0.0
+            self._open_detail_modal(row)
+        else:
+            self._last_click_name = name
+            self._last_click_time = now
+
+    def _open_detail_modal(self, row: _ComponentRow) -> None:
+        def _after_modal(changed: bool) -> None:
+            if changed:
+                self._refresh()
+
+        self.app.push_screen(
+            ComponentDetailModal(row=row, topo_components=self._topo_components),
+            _after_modal,
+        )
 
     # ------------------------------------------------------------------
-    # version policy buttons
+    # button handlers
     # ------------------------------------------------------------------
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
-        if bid == "cv-refresh":
-            self._refresh()
-        elif bid == "cv-fetch":
+        if bid == "cv-fetch":
             self._refresh(do_fetch=True)
-        elif bid == "cv-update":
-            self._update_selected()
-        elif bid in ("cv-latest", "cv-pin", "cv-ignore"):
-            self._set_policy(bid)
+        elif bid == "cv-update-all":
+            self._update_all()
 
-    def _update_selected(self) -> None:
-        row = self._selected_row()
-        last = self.query_one("#cv-last", Static)
-        if row is None:
-            last.update("[yellow]Select a component row first.[/]")
-            return
-        if not row.installed:
-            last.update(f"[yellow]{row.name} is not installed — nothing to update.[/]")
-            return
-        if row.version_policy == "ignore":
-            last.update(f"[yellow]{row.name} has policy=ignore — set policy to 'latest' first.[/]")
-            return
-
+    def _update_all(self) -> None:
         smd = _smd_binary()
-        behind_str = f"  ({row.behind} commits behind)" if row.behind not in ("—", "0") else ""
 
         def _after_confirm(confirmed: bool) -> None:
             if not confirmed:
                 return
 
             def _after_modal(_result: object) -> None:
-                last.update(f"[dim]{row.name}: update complete — refreshing…[/]")
+                self.query_one("#cv-last", Static).update(
+                    "[dim]update complete — refreshing…[/]"
+                )
                 self._refresh()
 
             self.app.push_screen(
                 UpdateOutputModal(
-                    title=f"Updating {row.name}",
-                    cmd=['sudo', smd, 'update', '--components', row.name],
+                    title="Update All Components",
+                    cmd=['sudo', smd, 'update'],
                 ),
                 _after_modal,
             )
 
         self.app.push_screen(
             ConfirmModal(
-                title=f"Update {row.name}?",
+                title="Update All Components?",
                 body=(
-                    f"Pull the latest commits for [bold]{row.name}[/] and re-apply.\n\n"
-                    f"Current ref: {row.current_ref}{behind_str}"
+                    "Pull the latest commits for all managed components and re-apply.\n\n"
+                    "Components with policy=[bold]ignore[/] will be skipped."
                 ),
-                cmd_preview=f"sudo {smd} update --components {row.name}",
+                cmd_preview=f"sudo {smd} update",
             ),
             _after_confirm,
         )
-
-    def _selected_row(self) -> Optional[_ComponentRow]:
-        # The detail panel tracks the last explicitly selected row.
-        # cursor_row resets to 0 after every table.clear(), so it can't be
-        # used reliably — the detail panel is the authoritative "selection".
-        if self._detail_name:
-            row = next((r for r in self._rows if r.name == self._detail_name), None)
-            if row is not None:
-                return row
-        # Fall back to cursor position if nothing has been shown yet.
-        table = self.query_one("#cv-table", DataTable)
-        if table.row_count == 0 or table.cursor_row is None:
-            return None
-        idx = table.cursor_row
-        if not 0 <= idx < len(self._rows):
-            return None
-        return self._rows[idx]
-
-    def _set_policy(self, button_id: str) -> None:
-        row = self._selected_row()
-        if row is None:
-            self.query_one("#cv-last", Static).update(
-                "[yellow]Select a component row first.[/]")
-            return
-
-        if button_id == "cv-latest":
-            new_policy = "latest"
-        elif button_id == "cv-ignore":
-            new_policy = "ignore"
-        else:  # cv-pin
-            if row.current_ref == "—":
-                self.query_one("#cv-last", Static).update(
-                    "[yellow]Cannot pin — component not installed or git ref unavailable.[/]")
-                return
-            # Strip branch prefix if present (main@abc1234 → abc1234)
-            sha = row.current_ref.split("@")[-1] if "@" in row.current_ref else row.current_ref
-            new_policy = sha
-
-        # Write to topology.toml
-        self._write_version_policy(row.name, new_policy)
-
-    def _write_version_policy(self, name: str, policy: str) -> None:
-        """Persist the version policy for one component to topology.toml."""
-        from ...paths import TOPOLOGY_PATH
-        from ...topology import load_topology
-
-        last = self.query_one("#cv-last", Static)
-        try:
-            # Reload from disk so we don't overwrite concurrent changes.
-            topo = load_topology(TOPOLOGY_PATH)
-            comp = topo.components.get(name)
-            if comp is None:
-                last.update(f"[yellow]{name} not in topology — policy not saved.[/]")
-                return
-            comp.version = policy
-            # Re-use the topology screen's writer via the same logic.
-            self._write_topology_toml(topo, TOPOLOGY_PATH)
-            # Update our local cache so the table refreshes without a full reload.
-            local_comp = self._topo_components.get(name)
-            if local_comp is not None:
-                local_comp.version = policy
-            row = next((r for r in self._rows if r.name == name), None)
-            if row is not None:
-                row.version_policy = policy
-                table = self.query_one("#cv-table", DataTable)
-                try:
-                    table.update_cell(name, table.columns[5].key,
-                                      self._policy_markup(policy))
-                except Exception:
-                    pass
-            last.update(
-                f"[green]✔[/]  {name}: version policy set to "
-                f"[bold]{policy}[/]  (saved to {TOPOLOGY_PATH})"
-            )
-        except PermissionError:
-            ok = self._sudo_write_topology(topo, TOPOLOGY_PATH)
-            if ok:
-                last.update(
-                    f"[green]✔[/]  {name}: version policy set to "
-                    f"[bold]{policy}[/]  (saved via sudo to {TOPOLOGY_PATH})"
-                )
-            else:
-                last.update(
-                    f"[red]Permission denied writing {TOPOLOGY_PATH}.[/]  "
-                    f"Fix with: [bold]sudo chown $(whoami) {TOPOLOGY_PATH}[/]"
-                )
-        except Exception as exc:
-            last.update(f"[red]Error saving policy: {exc}[/]")
-
-    def _write_topology_toml(self, topo, path: Path) -> None:
-        """Minimal topology.toml writer (mirrors topology screen's writer)."""
-        lines = [
-            "# /etc/sigmond/topology.toml",
-            "# Managed by smd tui. Manual edits are fine too.",
-            "",
-        ]
-        for comp_name in sorted(topo.components):
-            comp = topo.components[comp_name]
-            lines.append(f"[component.{comp_name}]")
-            lines.append(f'enabled = {"true" if comp.enabled else "false"}')
-            if not comp.managed:
-                lines.append("managed = false")
-            if comp.version and comp.version != "latest":
-                lines.append(f'version = "{comp.version}"')
-            if comp.description:
-                lines.append(f'description = "{comp.description}"')
-            if comp.rac_id:
-                lines.append(f'rac_id = "{comp.rac_id}"')
-            if comp.rac_number >= 0:
-                lines.append(f'rac_number = {comp.rac_number}')
-            lines.append("")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines) + "\n")
-
-    def _sudo_write_topology(self, topo, path: Path) -> bool:
-        """Fall back to writing topology.toml via sudo tee (no TUI suspend needed)."""
-        import os, tempfile, subprocess as sp
-        lines = [
-            "# /etc/sigmond/topology.toml",
-            "# Managed by smd tui. Manual edits are fine too.",
-            "",
-        ]
-        for comp_name in sorted(topo.components):
-            comp = topo.components[comp_name]
-            lines.append(f"[component.{comp_name}]")
-            lines.append(f'enabled = {"true" if comp.enabled else "false"}')
-            if not comp.managed:
-                lines.append("managed = false")
-            if comp.version and comp.version != "latest":
-                lines.append(f'version = "{comp.version}"')
-            if comp.description:
-                lines.append(f'description = "{comp.description}"')
-            if comp.rac_id:
-                lines.append(f'rac_id = "{comp.rac_id}"')
-            if comp.rac_number >= 0:
-                lines.append(f'rac_number = {comp.rac_number}')
-            lines.append("")
-        content = "\n".join(lines) + "\n"
-        tmp = None
-        try:
-            fd, tmp = tempfile.mkstemp(suffix='.toml')
-            os.write(fd, content.encode())
-            os.close(fd)
-            r = sp.run(['sudo', 'cp', tmp, str(path)], capture_output=True)
-            return r.returncode == 0
-        except Exception:
-            return False
-        finally:
-            if tmp:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
