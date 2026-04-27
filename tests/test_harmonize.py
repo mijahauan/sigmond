@@ -20,6 +20,7 @@ from sigmond.harmonize import (
     ALL_RULES, ALL_RUNTIME_RULES, _parse_cores,
     rule_cpu_isolation, rule_cpu_isolation_runtime,
     rule_frequency_coverage, rule_gpsdo_governor_coverage,
+    rule_kernel_rcvbuf_adequate,
     rule_radiod_resolution, rule_timing_chain,
     run_all, worst_severity,
 )
@@ -246,7 +247,11 @@ class TestRuleCpuIsolationRuntime(unittest.TestCase):
         # this test along with ALL_RUNTIME_RULES if you change the set.
         self.assertEqual(
             [r.__name__ for r in ALL_RUNTIME_RULES],
-            ["rule_cpu_isolation_runtime", "rule_gpsdo_governor_coverage"],
+            [
+                "rule_cpu_isolation_runtime",
+                "rule_gpsdo_governor_coverage",
+                "rule_kernel_rcvbuf_adequate",
+            ],
         )
 
 
@@ -406,6 +411,90 @@ class TestRuleGpsdoGovernorCoverage(unittest.TestCase):
         r = rule_gpsdo_governor_coverage(_make_view(coord))
         # Treated as no governor → warn.
         self.assertEqual(r.severity, "warn")
+
+
+class TestRuleKernelRcvbufAdequate(unittest.TestCase):
+    """Cross-client kernel net.core.rmem_max sizing rule.
+
+    Tests build a tmp file standing in for /proc/sys/net/core/rmem_max
+    with controlled byte counts so the rule's verdict is deterministic
+    regardless of host kernel state.
+    """
+
+    def _redirect_proc_path(self, tmp_file: Path) -> None:
+        original = harmonize.RCVBUF_PROC_PATH
+        harmonize.RCVBUF_PROC_PATH = tmp_file
+        self.addCleanup(
+            lambda: setattr(harmonize, "RCVBUF_PROC_PATH", original)
+        )
+
+    def _tmp_file_with(self, contents: str) -> Path:
+        import shutil
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        f = d / "rmem_max"
+        f.write_text(contents)
+        return f
+
+    def _coord_with_clients(self, *types: str):
+        return Coordination(
+            clients=[
+                ClientInstance(client_type=t, instance="main", radiod_id="rx")
+                for t in types
+            ],
+        )
+
+    def test_pass_at_recommended_value(self):
+        f = self._tmp_file_with(str(harmonize.RCVBUF_RECOMMENDED_BYTES))
+        self._redirect_proc_path(f)
+        r = rule_kernel_rcvbuf_adequate(_make_view(Coordination()))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("MiB", r.message)
+
+    def test_warn_below_recommended_above_floor(self):
+        # Exactly at the floor (16 MiB): adequate for one client but
+        # multi-client stations should raise. → warn.
+        f = self._tmp_file_with(str(harmonize.RCVBUF_FLOOR_BYTES))
+        self._redirect_proc_path(f)
+        coord = self._coord_with_clients("psk-recorder", "hfdl-recorder")
+        r = rule_kernel_rcvbuf_adequate(_make_view(coord))
+        self.assertEqual(r.severity, "warn")
+        # Affected list surfaces the clients so the operator sees who's at risk.
+        self.assertIn("psk-recorder", r.affected)
+        self.assertIn("hfdl-recorder", r.affected)
+        # Remediation command appears in the message.
+        self.assertIn("/etc/sysctl.d/99-sigmond-multicast.conf", r.message)
+
+    def test_fail_below_floor(self):
+        # Debian default ~212 KB — every multicast subscriber drops.
+        f = self._tmp_file_with("212992")
+        self._redirect_proc_path(f)
+        r = rule_kernel_rcvbuf_adequate(_make_view(Coordination()))
+        self.assertEqual(r.severity, "fail")
+        self.assertIn("212992", r.message)
+        self.assertIn("/etc/sysctl.d/99-sigmond-multicast.conf", r.message)
+
+    def test_skipped_when_proc_unreadable(self):
+        # Point at a path that doesn't exist; rule should pass-skip.
+        self._redirect_proc_path(Path("/nonexistent/rmem_max"))
+        r = rule_kernel_rcvbuf_adequate(_make_view(Coordination()))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("skipped", r.message)
+
+    def test_skipped_when_proc_contents_garbage(self):
+        f = self._tmp_file_with("not-a-number\n")
+        self._redirect_proc_path(f)
+        r = rule_kernel_rcvbuf_adequate(_make_view(Coordination()))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("skipped", r.message)
+
+    def test_strips_whitespace_from_proc_value(self):
+        # /proc files usually trail with a newline.
+        f = self._tmp_file_with(f"  {harmonize.RCVBUF_RECOMMENDED_BYTES}\n")
+        self._redirect_proc_path(f)
+        r = rule_kernel_rcvbuf_adequate(_make_view(Coordination()))
+        self.assertEqual(r.severity, "pass")
 
 
 if __name__ == "__main__":

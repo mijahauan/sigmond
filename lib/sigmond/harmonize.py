@@ -31,6 +31,26 @@ from .sysview import SystemView
 # module-level constant so tests can redirect it to a tmp dir.
 GPSDO_RUN_DIR = Path("/run/gpsdo")
 
+# Path to net.core.rmem_max.  Module-level so tests can redirect it to
+# a tmp file with controlled contents.
+RCVBUF_PROC_PATH = Path("/proc/sys/net/core/rmem_max")
+
+# ka9q-python's per-socket SO_RCVBUF request (ka9q/multi_stream.py:264 in
+# ka9q-python upstream).  Linux silently doubles SO_RCVBUF on success,
+# so an 8 MiB request becomes a 16 MiB buffer iff rmem_max permits.
+KA9Q_PYTHON_SO_RCVBUF_REQUEST = 8 * 1024 * 1024     # 8 MiB
+
+# Smallest rmem_max that lets ka9q-python's request through after the
+# kernel-side doubling.  Below this, every multicast subscriber drops.
+RCVBUF_FLOOR_BYTES = 2 * KA9Q_PYTHON_SO_RCVBUF_REQUEST              # 16 MiB
+
+# Headroom for a multi-client station (3+ clients sharing one radiod
+# multicast group).  At Debian 12 defaults (~212 KB) any HamSCI client
+# drops; at the floor a single client survives but adding a second
+# starts dropping; at the recommended value the trio + hfdl-recorder
+# fit comfortably.
+RCVBUF_RECOMMENDED_BYTES = 64 * 1024 * 1024                         # 64 MiB
+
 
 @dataclass
 class RuleResult:
@@ -402,6 +422,75 @@ def rule_gpsdo_governor_coverage(view: SystemView) -> RuleResult:
                       "; ".join(issues), sorted(affected))
 
 
+def rule_kernel_rcvbuf_adequate(view: SystemView) -> RuleResult:
+    """Check that net.core.rmem_max is large enough for ka9q-python's
+    SO_RCVBUF request to be honoured by the kernel.
+
+    Several HamSCI clients (psk-recorder, wspr-recorder, hf-timestd,
+    hfdl-recorder, ka9q-web) subscribe to the same radiod multicast
+    group via ka9q-python, which calls ``setsockopt(SO_RCVBUF, 8 MiB)``
+    per UDP socket.  Linux doubles SO_RCVBUF on success, so the kernel
+    actually allocates 16 MiB iff ``rmem_max`` permits.
+
+    On a stock Debian 12 host ``rmem_max`` defaults to 212 992 bytes —
+    far below ka9q-python's request — so per-socket buffers fill within
+    seconds under aggregate radiod load (60+ channels at ~30 MB/s) and
+    the kernel drops packets.  ka9q-python's resequencer surfaces the
+    drops as ``"Lost packet recovery: skip to seq=…"``.  No single
+    client can safely raise ``rmem_max`` from its own systemd unit, so
+    sigmond owns the cross-client kernel parameter.
+
+    The remediation in the message field is exact and copy-paste-able;
+    a future ``smd apply`` extension can write the drop-in itself.
+    """
+    try:
+        rmem_max = int(RCVBUF_PROC_PATH.read_text().strip())
+    except (OSError, ValueError):
+        return RuleResult(
+            "kernel_rcvbuf_adequate", "pass",
+            f"skipped: cannot read {RCVBUF_PROC_PATH}", [],
+        )
+
+    affected = sorted({c.client_type for c in view.coordination.clients})
+    remediation = (
+        f"echo 'net.core.rmem_max = {RCVBUF_RECOMMENDED_BYTES}' "
+        f"| sudo tee /etc/sysctl.d/99-sigmond-multicast.conf "
+        f"&& sudo sysctl --load=/etc/sysctl.d/99-sigmond-multicast.conf "
+        f"&& sudo systemctl restart 'hfdl-recorder@*' 'psk-recorder@*' "
+        f"'wspr-recorder@*' timestd-core-recorder.service"
+    )
+
+    if rmem_max < RCVBUF_FLOOR_BYTES:
+        return RuleResult(
+            "kernel_rcvbuf_adequate", "fail",
+            f"net.core.rmem_max={rmem_max} bytes "
+            f"({rmem_max // (1024*1024)} MiB) is below the floor of "
+            f"{RCVBUF_FLOOR_BYTES // (1024*1024)} MiB; ka9q-python's "
+            f"{KA9Q_PYTHON_SO_RCVBUF_REQUEST // (1024*1024)} MiB "
+            f"per-socket request will be clamped and any multicast "
+            f"subscriber will drop packets.  Remediate: {remediation}",
+            affected,
+        )
+
+    if rmem_max < RCVBUF_RECOMMENDED_BYTES:
+        return RuleResult(
+            "kernel_rcvbuf_adequate", "warn",
+            f"net.core.rmem_max={rmem_max // (1024*1024)} MiB is "
+            f"adequate for one client but multi-client stations should "
+            f"raise to {RCVBUF_RECOMMENDED_BYTES // (1024*1024)} MiB "
+            f"for headroom across the suite "
+            f"(psk-recorder, wspr-recorder, hf-timestd, hfdl-recorder).  "
+            f"Remediate: {remediation}",
+            affected,
+        )
+
+    return RuleResult(
+        "kernel_rcvbuf_adequate", "pass",
+        f"net.core.rmem_max={rmem_max // (1024*1024)} MiB",
+        [],
+    )
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_frequency_coverage,
@@ -416,6 +505,7 @@ ALL_RULES = [
 ALL_RUNTIME_RULES = [
     rule_cpu_isolation_runtime,
     rule_gpsdo_governor_coverage,
+    rule_kernel_rcvbuf_adequate,
 ]
 
 
