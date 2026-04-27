@@ -32,7 +32,7 @@ KNOWN_SDR_DEVICES: dict[tuple[str, str], tuple[str, str]] = {
     ("0bda", "2840"): ("RTL-SDR",   "RTL2840"),
     ("04b4", "00bc"): ("RX-888",    "Cypress FX3"),    # RX-888 operating mode
     ("04b4", "00f1"): ("RX-888 Mk2","Cypress FX3"),   # RX-888 Mk2 operating mode
-    ("04b4", "00f3"): ("FX3 SDR",   "Cypress FX3"),   # RX-888 DFU/pre-firmware mode
+    ("04b4", "00f3"): ("RX-888 DFU","Cypress FX3"),   # RX-888 pre-firmware (DFU mode; radiod loads firmware)
     ("1d50", "6089"): ("HackRF",    "HackRF One"),
     ("1d50", "60a1"): ("Airspy",    "Airspy R2"),
     ("03eb", "800c"): ("Airspy HF+","Airspy HF+"),

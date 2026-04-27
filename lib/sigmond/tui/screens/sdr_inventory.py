@@ -346,8 +346,20 @@ def _gather_all() -> list[SdrEntry]:
                 grid=meta.grid,   ttl=meta.ttl,
             ))
 
+    # Find absent labelled non-DFU USB devices for DFU probable-match
+    dfu_entries = [e for e in all_entries
+                   if e.source == "usb_sdr" and "DFU" in e.sdr_type]
+    op_keys = {e.key for e in all_entries
+               if e.source == "usb_sdr" and "DFU" not in e.sdr_type}
+    absent_labelled = {k: v for k, v in devices.items()
+                       if k.startswith("usb:") and k not in op_keys and v.label
+                       and not any(e.key == k for e in dfu_entries)}
+
     changed = False
     for e in all_entries:
+        # DFU keys are non-deterministic — skip label store; match probabilistically below
+        if e.source == "usb_sdr" and "DFU" in e.sdr_type:
+            continue
         meta = devices.get(e.key)
         if meta:
             e.label = meta.label
@@ -359,6 +371,15 @@ def _gather_all() -> list[SdrEntry]:
                 changed = True
             elif e.channels == 0 and meta.channels > 0:
                 e.channels = meta.channels
+
+    # Probable-match: if exactly 1 DFU device and 1 absent labelled operating-mode
+    # device, that DFU is almost certainly the same hardware waiting for firmware.
+    if len(dfu_entries) == 1 and len(absent_labelled) == 1:
+        absent_meta = next(iter(absent_labelled.values()))
+        dfu_entries[0].label = f"? {absent_meta.label}"
+        dfu_entries[0].call  = absent_meta.call
+        dfu_entries[0].grid  = absent_meta.grid
+
     if changed:
         try:
             from ...sdr_labels import save_devices
@@ -608,7 +629,7 @@ def _build_rx888_conf(config_name: str, device_index: int, ttl: int = 0) -> str:
         f"\n"
         f"[rx888]\n"
         f"device = \"rx888\"\n"
-        f"number = {device_index}\n"
+        f"#number = {device_index}    # index when multiple RX-888s share a host\n"
         f"gain = 0\n"
         f"samprate = 129m600000\n"
         f"#samprate = 64m800000\n"
@@ -688,15 +709,20 @@ class SdrInventoryScreen(Vertical):
     SdrInventoryScreen { padding: 1; }
     SdrInventoryScreen .sdr-title { text-style: bold; margin-bottom: 1; }
     SdrInventoryScreen #sdr-status { margin-bottom: 1; }
+    SdrInventoryScreen #sdr-status.scanning { text-style: bold; color: green; }
     SdrInventoryScreen #sdr-btn-row { height: 3; margin-top: 1; }
     SdrInventoryScreen #sdr-btn-row Button { margin-right: 1; }
     """
+
+    _SPINNERS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._entries: list[SdrEntry] = []
         self._last_click_row: int = -1
         self._last_click_time: float = 0.0
+        self._scan_timer = None
+        self._spinner_idx = 0
 
     def compose(self) -> ComposeResult:
         yield Static("SDR Inventory — USB, KiwiSDR LAN, ka9q-radio", classes="sdr-title")
@@ -746,10 +772,21 @@ class SdrInventoryScreen(Vertical):
             self._open_add_remote_modal()
 
     def _rescan(self) -> None:
-        self.query_one("#sdr-status", Static).update(
-            "[dim]scanning USB bus, LAN port 8073, ka9q-radio…[/]")
+        if self._scan_timer is not None:
+            self._scan_timer.stop()
+        self._spinner_idx = 0
+        status = self.query_one("#sdr-status", Static)
+        status.add_class("scanning")
+        status.update(f"{self._SPINNERS[0]} scanning USB bus, LAN port 8073, ka9q-radio…")
+        self._scan_timer = self.set_interval(0.1, self._tick_spinner)
         self.query_one("#sdr-table", DataTable).clear()
         self.run_worker(_gather_all, thread=True, name="sdr-gather")
+
+    def _tick_spinner(self) -> None:
+        self._spinner_idx = (self._spinner_idx + 1) % len(self._SPINNERS)
+        self.query_one("#sdr-status", Static).update(
+            f"{self._SPINNERS[self._spinner_idx]} scanning USB bus, LAN port 8073, ka9q-radio…"
+        )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != "sdr-gather":
@@ -764,18 +801,44 @@ class SdrInventoryScreen(Vertical):
         self._render_entries()
 
     def _render_entries(self) -> None:
+        if self._scan_timer is not None:
+            self._scan_timer.stop()
+            self._scan_timer = None
+        status = self.query_one("#sdr-status", Static)
+        status.remove_class("scanning")
+
         table = self.query_one("#sdr-table", DataTable)
         table.clear()
 
         usb_ok  = sum(1 for e in self._entries if e.source == "usb_sdr" and e.status == "ok")
         kiwi_ok = sum(1 for e in self._entries if e.source == "kiwisdr" and e.status == "ok")
         ka9q_ok = sum(1 for e in self._entries if e.source == "ka9q_fe"  and e.status == "ok")
-        self.query_one("#sdr-status", Static).update(
-            f"USB: [bold]{usb_ok}[/]  ·  "
-            f"KiwiSDR: [bold]{kiwi_ok}[/]  ·  "
-            f"ka9q frontends: [bold]{ka9q_ok}[/]  "
-            f"[dim]— press e to label selected row[/]"
-        )
+        dfu_entries = [e for e in self._entries
+                       if e.source == "usb_sdr" and "DFU" in e.sdr_type]
+        if dfu_entries:
+            # Check if there's a configured (labelled) RX-888 that isn't currently
+            # detected in operating mode — if so, the DFU device is likely that one.
+            op_keys = {e.key for e in self._entries
+                       if e.source == "usb_sdr" and "DFU" not in e.sdr_type}
+            labelled_usb = {k for k in load_devices()
+                            if k.startswith("usb:") and k not in op_keys
+                            and not any("DFU" in e.sdr_type
+                                        for e in self._entries if e.key == k)}
+            if len(dfu_entries) == 1 and len(labelled_usb) == 1:
+                hint = f"[yellow]⚠ {dfu_entries[0].sdr_type}: firmware not yet loaded — " \
+                       f"start radiod to load firmware; device will then match its config[/]"
+            else:
+                n = len(dfu_entries)
+                hint = f"[yellow]⚠ {n} device(s) in DFU mode — " \
+                       f"start radiod to load firmware and reveal serial numbers[/]"
+            status.update(hint)
+        else:
+            status.update(
+                f"[green]✔ USB: [bold]{usb_ok}[/]  ·  "
+                f"KiwiSDR: [bold]{kiwi_ok}[/]  ·  "
+                f"ka9q frontends: [bold]{ka9q_ok}[/][/]  "
+                f"[dim]— press e to label, d to delete[/]"
+            )
 
         src_labels = {
             "usb_sdr":    "[cyan]USB local[/]",
@@ -786,9 +849,16 @@ class SdrInventoryScreen(Vertical):
         for e in self._entries:
             src_cell = src_labels.get(e.source, e.source)
             type_cell = e.sdr_type
-            if e.status not in ("ok", "none"):
+            if "DFU" in e.sdr_type:
+                type_cell = f"[yellow]{e.sdr_type}[/]"
+            elif e.status not in ("ok", "none"):
                 type_cell = f"[red]{e.sdr_type}[/]"
-            name_cell   = f"[green]{e.label}[/]" if e.label else "[dim]—[/]"
+            if e.label.startswith("? "):
+                name_cell = f"[yellow]{e.label}[/]"
+            elif e.label:
+                name_cell = f"[green]{e.label}[/]"
+            else:
+                name_cell = "[dim]—[/]"
             call_cell   = f"[cyan]{e.call}[/]"   if e.call  else "[dim]—[/]"
             grid_cell   = e.grid if e.grid else "[dim]—[/]"
             serial_cell = f"[dim]{e.serial}[/]"  if e.serial else "[dim]—[/]"

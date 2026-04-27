@@ -12,7 +12,10 @@ selected component and save it back to topology.toml.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -21,6 +24,15 @@ from rich.text import Text
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Static
 from textual.worker import Worker, WorkerState
+
+from ..mutation import confirm_and_run
+
+
+def _smd_binary() -> str:
+    argv0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
+        return argv0
+    return shutil.which('smd') or '/usr/local/sbin/smd'
 
 
 _OPT_GIT = Path('/opt/git')
@@ -57,6 +69,7 @@ class _ComponentRow:
     commit_idx: str = "—"   # total commit count, e.g. "247"
     behind: str = "—"       # commits behind origin/main, e.g. "3" or "0"
     log_lines: list[str] = field(default_factory=list)
+    ahead_log_lines: list[str] = field(default_factory=list)  # remote-only commits not yet pulled
 
 
 @dataclass
@@ -109,19 +122,62 @@ def _git_ref(repo_dir: Path) -> str:
         return '—'
 
 
-def _git_log(repo_dir: Path, n: int = 10) -> list[str]:
-    """Return the last n one-line log entries, or [] on failure."""
+def _git_log(repo_dir: Path, n: int = 15) -> list[str]:
+    """Return the last n log entries prefixed with their sequential commit index."""
     try:
-        r = subprocess.run(
-            ['git', '-c', f'safe.directory={repo_dir}',
-             '-C', str(repo_dir), 'log', f'-{n}', '--format=%h  %s  (%as)'],
-            capture_output=True, text=True, timeout=8,
-        )
-        if r.returncode == 0:
-            return [line for line in r.stdout.splitlines() if line.strip()]
-        return []
+        r_count = _git(repo_dir, 'rev-list', '--count', 'HEAD')
+        total = (int(r_count.stdout.strip())
+                 if r_count.returncode == 0 and r_count.stdout.strip().isdigit()
+                 else 0)
+        r = _git(repo_dir, 'log', f'-{n}', '--format=%h %s (%as)', timeout=8)
+        if r.returncode != 0:
+            return []
+        result = []
+        for i, line in enumerate(r.stdout.splitlines()):
+            if not line.strip():
+                continue
+            idx = total - i
+            parts = line.split(' ', 1)
+            sha  = parts[0]
+            rest = parts[1] if len(parts) > 1 else ''
+            result.append(f"#{idx:<5} {sha}  {rest}")
+        return result
     except Exception:
         return []
+
+
+def _git_log_ahead(repo_dir: Path, n: int = 20) -> list[str]:
+    """Return commits on origin/main that are ahead of local HEAD (not yet pulled)."""
+    try:
+        r_count = _git(repo_dir, 'rev-list', '--count', 'origin/main')
+        total = (int(r_count.stdout.strip())
+                 if r_count.returncode == 0 and r_count.stdout.strip().isdigit()
+                 else 0)
+        r = _git(repo_dir, 'log', f'-{n}', 'HEAD..origin/main',
+                 '--format=%h %s (%as)', timeout=8)
+        if r.returncode != 0 or not r.stdout.strip():
+            return []
+        result = []
+        for i, line in enumerate(r.stdout.splitlines()):
+            if not line.strip():
+                continue
+            idx = total - i
+            parts = line.split(' ', 1)
+            sha  = parts[0]
+            rest = parts[1] if len(parts) > 1 else ''
+            result.append(f"#{idx:<5} {sha}  {rest}")
+        return result
+    except Exception:
+        return []
+
+
+def _git_fetch(repo_dir: Path) -> bool:
+    """Run git fetch origin in the background, return True on success."""
+    try:
+        r = _git(repo_dir, 'fetch', 'origin', '--prune', timeout=30)
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def _git_commit_idx(repo_dir: Path) -> str:
@@ -144,7 +200,7 @@ def _git_behind(repo_dir: Path) -> str:
         return "—"
 
 
-def _gather(topology_components: dict) -> _ComponentsView:
+def _gather(topology_components: dict, do_fetch: bool = False) -> _ComponentsView:
     """Worker: load catalog + topology, scan /opt/git, collect git refs."""
     view = _ComponentsView()
     try:
@@ -157,6 +213,23 @@ def _gather(topology_components: dict) -> _ComponentsView:
         view.error = str(exc)
         return view
 
+    # Collect repo dirs first so we can batch-fetch before reading state.
+    repo_dirs: list[tuple[str, Path]] = []
+    for name in sorted(catalog):
+        entry = catalog[name]
+        if not entry.repo:
+            continue
+        repo_dir = _find_repo_dir(name, entry.repo)
+        if repo_dir:
+            repo_dirs.append((name, repo_dir))
+
+    if do_fetch:
+        seen: set[Path] = set()
+        for _, rd in repo_dirs:
+            if rd not in seen:
+                seen.add(rd)
+                _git_fetch(rd)
+
     for name in sorted(catalog):
         entry = catalog[name]
         if not entry.repo:
@@ -164,10 +237,11 @@ def _gather(topology_components: dict) -> _ComponentsView:
         repo_dir = _find_repo_dir(name, entry.repo)
         installed = repo_dir is not None or entry.is_installed()
 
-        current_ref = _git_ref(repo_dir)        if repo_dir else '—'
-        commit_idx  = _git_commit_idx(repo_dir) if repo_dir else '—'
-        behind      = _git_behind(repo_dir)     if repo_dir else '—'
-        log_lines   = _git_log(repo_dir)        if repo_dir else []
+        current_ref    = _git_ref(repo_dir)        if repo_dir else '—'
+        commit_idx     = _git_commit_idx(repo_dir) if repo_dir else '—'
+        behind         = _git_behind(repo_dir)     if repo_dir else '—'
+        log_lines      = _git_log(repo_dir)        if repo_dir else []
+        ahead_log_lines = _git_log_ahead(repo_dir) if repo_dir else []
 
         comp = topology_components.get(name)
         policy = (comp.version if comp else 'latest') or 'latest'
@@ -184,6 +258,7 @@ def _gather(topology_components: dict) -> _ComponentsView:
             commit_idx=commit_idx,
             behind=behind,
             log_lines=log_lines,
+            ahead_log_lines=ahead_log_lines,
         ))
 
     return view
@@ -226,6 +301,16 @@ class ComponentsScreen(Vertical):
     ComponentsScreen #cv-actions Button {
         margin-right: 1;
     }
+    ComponentsScreen #cv-refresh {
+        border: tall $primary;
+        color: $primary-lighten-2;
+        background: $panel;
+    }
+    ComponentsScreen #cv-latest {
+        border: tall $success;
+        color: $success-lighten-2;
+        background: $panel;
+    }
     ComponentsScreen #cv-last {
         color: $text-muted;
     }
@@ -235,6 +320,7 @@ class ComponentsScreen(Vertical):
         super().__init__(**kwargs)
         self._topo_components = topology_components  # name → Component
         self._rows: list[_ComponentRow] = []
+        self._detail_name: Optional[str] = None   # name of row shown in detail panel
 
     def compose(self):
         yield Static("Software Versions", classes="cv-title")
@@ -249,10 +335,12 @@ class ComponentsScreen(Vertical):
         yield table
         yield Static("(select a row to see git history)", id="cv-detail")
         with Horizontal(id="cv-actions"):
-            yield Button("↑ Set Latest",          id="cv-latest",  variant="success")
-            yield Button("⊙ Pin to current commit", id="cv-pin",    variant="warning")
-            yield Button("✕ Ignore (don't update)", id="cv-ignore", variant="default")
-            yield Button("⟳ Refresh",              id="cv-refresh", variant="default")
+            yield Button("↑ Update now",           id="cv-update",  variant="success")
+            yield Button("⊙ Pin to current",       id="cv-pin",     variant="warning")
+            yield Button("⟳ Fetch + Refresh",      id="cv-fetch",   variant="primary")
+            yield Button("⟳ Refresh (local)",      id="cv-refresh", variant="default")
+            yield Button("↑ Set policy: latest",   id="cv-latest",  variant="default")
+            yield Button("✕ Set policy: ignore",   id="cv-ignore",  variant="error")
         yield Static("", id="cv-last")
 
     def on_mount(self) -> None:
@@ -262,10 +350,14 @@ class ComponentsScreen(Vertical):
     # data loading
     # ------------------------------------------------------------------
 
-    def _refresh(self) -> None:
-        self.query_one("#cv-status", Static).update("[dim]loading…[/]")
+    def _refresh(self, do_fetch: bool = False) -> None:
+        msg = "[dim]fetching from remote, then loading…[/]" if do_fetch else "[dim]loading…[/]"
+        self.query_one("#cv-status", Static).update(msg)
         topo = dict(self._topo_components)
-        self.run_worker(lambda: _gather(topo), thread=True, name="cv-gather")
+        self.run_worker(
+            lambda: _gather(topo, do_fetch=do_fetch),
+            thread=True, name="cv-gather",
+        )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != "cv-gather":
@@ -332,6 +424,7 @@ class ComponentsScreen(Vertical):
         row = next((r for r in self._rows if r.name == name), None)
         if row is None:
             return
+        self._detail_name = name
         self._show_detail(row)
 
     def _show_detail(self, row: _ComponentRow) -> None:
@@ -344,11 +437,18 @@ class ComponentsScreen(Vertical):
         lines.append(f"[dim]installed:[/] {'yes' if row.installed else 'no'}")
         lines.append(f"[dim]current ref:[/] {row.current_ref}")
         lines.append(f"[dim]version policy:[/] {self._policy_markup(row.version_policy)}")
+        if row.ahead_log_lines:
+            lines.append("")
+            lines.append(f"[yellow]↑ on remote, not yet pulled ({len(row.ahead_log_lines)}):[/]")
+            for log_entry in row.ahead_log_lines[:15]:
+                safe = log_entry.replace('[', r'\[')
+                lines.append(f"  [yellow]{safe}[/]")
+            lines.append("[dim]  — run 'Update now' to pull these[/]")
         if row.log_lines:
             lines.append("")
-            lines.append("[dim]recent commits:[/]")
+            label = "[dim]local commits:[/]" if row.ahead_log_lines else "[dim]recent commits:[/]"
+            lines.append(label)
             for log_entry in row.log_lines[:10]:
-                # Escape brackets so commit subjects like "fix [timing]" render verbatim.
                 safe = log_entry.replace('[', r'\[')
                 lines.append(f"  [cyan]{safe}[/]")
         elif row.installed and row.repo_dir:
@@ -365,11 +465,60 @@ class ComponentsScreen(Vertical):
         bid = event.button.id
         if bid == "cv-refresh":
             self._refresh()
-            return
-        if bid in ("cv-latest", "cv-pin", "cv-ignore"):
+        elif bid == "cv-fetch":
+            self._refresh(do_fetch=True)
+        elif bid == "cv-update":
+            self._update_selected()
+        elif bid in ("cv-latest", "cv-pin", "cv-ignore"):
             self._set_policy(bid)
 
+    def _update_selected(self) -> None:
+        row = self._selected_row()
+        last = self.query_one("#cv-last", Static)
+        if row is None:
+            last.update("[yellow]Select a component row first.[/]")
+            return
+        if not row.installed:
+            last.update(f"[yellow]{row.name} is not installed — nothing to update.[/]")
+            return
+        if row.version_policy == "ignore":
+            last.update(f"[yellow]{row.name} has policy=ignore — set policy to 'latest' first.[/]")
+            return
+
+        smd = _smd_binary()
+
+        def _after_update(result) -> None:
+            if result is None or result.returncode != 0:
+                last.update(
+                    f"[yellow]⚠ {row.name}: update finished with errors — "
+                    f"scroll up in your terminal (outside the TUI) to read the output.[/]"
+                )
+            else:
+                last.update(f"[green]✔ {row.name} updated.[/]")
+            self._refresh()
+
+        behind_str = f"  ({row.behind} commits behind)" if row.behind not in ("—", "0") else ""
+        confirm_and_run(
+            self.app,
+            title=f"Update {row.name}?",
+            body=(
+                f"Pull the latest commits for [bold]{row.name}[/] and re-apply.\n\n"
+                f"Current ref: {row.current_ref}{behind_str}"
+            ),
+            cmd=[smd, 'update', '--components', row.name],
+            sudo=True,
+            on_complete=_after_update,
+        )
+
     def _selected_row(self) -> Optional[_ComponentRow]:
+        # The detail panel tracks the last explicitly selected row.
+        # cursor_row resets to 0 after every table.clear(), so it can't be
+        # used reliably — the detail panel is the authoritative "selection".
+        if self._detail_name:
+            row = next((r for r in self._rows if r.name == self._detail_name), None)
+            if row is not None:
+                return row
+        # Fall back to cursor position if nothing has been shown yet.
         table = self.query_one("#cv-table", DataTable)
         if table.row_count == 0 or table.cursor_row is None:
             return None

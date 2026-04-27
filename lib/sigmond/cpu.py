@@ -52,6 +52,12 @@ AFFINITY_UNITS = {
     'wd-upload-wsprdaemon@.service':     'other',
     'wd-ka9q-web@.service':              'other',
     'wd-spool-clean.service':            'other',
+    # sigmond infra group
+    'wd-rac.service':           'other',
+    'wd-remote-access.service': 'other',
+    'igmp-querier.service':     'other',
+    'gpsdo-monitor.service':    'other',
+    'ka9q-web.service':         'other',
     # hf-timestd / grape group
     'timestd-core-recorder.service':     'other',
     'timestd-fusion.service':            'other',

@@ -112,7 +112,7 @@ def _build_rows(
     rows: list[ReceiverRow] = []
     used_names: set[str] = set()
 
-    # Build address → WdReceiver map for fast lookup
+    # Build address → WdReceiver map for fast lookup (addressed receivers only)
     addr_to_rx: dict[str, WdReceiver] = {}
     for rx in existing_conf.receivers.values():
         if rx.address:
@@ -121,6 +121,8 @@ def _build_rows(
     # --- Inventory entries only (conf receivers with no matching inventory entry
     #     are intentionally dropped — user should add them to SDR inventory first) ---
     for meta in inventory.values():
+        if meta.key in existing_conf.excluded_keys:
+            continue   # explicitly hidden by the user
         # Derive address from the inventory key
         if meta.key.startswith("kiwisdr:"):
             address = meta.key.replace("kiwisdr:", "")  # "ip:port"
@@ -132,8 +134,15 @@ def _build_rows(
         else:
             address = ""   # USB SDR — address set by user
 
-        # Match to existing conf receiver
-        existing_rx = addr_to_rx.get(address)
+        # Match to existing conf receiver.
+        # For USB SDRs (no address) match by the name that would be generated
+        # (KA9Q_0, KA9Q_1, …) so that an already-configured receiver isn't lost
+        # when the screen is reloaded.
+        if address:
+            existing_rx = addr_to_rx.get(address)
+        else:
+            existing_rx = existing_conf.receivers.get(_make_wd_name(meta, used_names))
+
         if existing_rx:
             rx = existing_rx
             used_names.add(rx.name)
@@ -312,6 +321,7 @@ class WdClientScreen(Vertical):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._rows: list[ReceiverRow] = []
+        self._excluded_keys: set[str] = set()
         self._dirty = False
         self._last_cell: tuple[int, int] = (-1, -1)
         self._last_cell_time: float = 0.0
@@ -347,6 +357,7 @@ class WdClientScreen(Vertical):
         if event.worker.name == "wd-load":
             if event.state == WorkerState.SUCCESS:
                 inventory, conf = event.worker.result
+                self._excluded_keys = set(conf.excluded_keys)
                 self._rows = _build_rows(inventory, conf)
                 self._dirty = False
                 self._refresh_table()
@@ -524,11 +535,12 @@ class WdClientScreen(Vertical):
             return
         row = self._rows[row_idx]
         name = row.display_name
+        self._excluded_keys.add(row.meta.key)
         self._rows.pop(row_idx)
         self._dirty = True
         self._refresh_table()
         self.query_one("#wd-status", Static).update(
-            f"[yellow]Deleted {name} — save to write to conf[/]")
+            f"[yellow]Deleted {name} — save to hide permanently[/]")
 
     def action_reload(self) -> None:
         self._dirty = False
@@ -558,6 +570,7 @@ class WdClientScreen(Vertical):
         existing = load_config()
         wdc.ka9q_conf_name = existing.ka9q_conf_name
         wdc.rac = existing.rac
+        wdc.excluded_keys = set(self._excluded_keys)
         for row in self._rows:
             if not row.rx.bands or not row.enabled:
                 continue   # skip unconfigured or disabled receivers

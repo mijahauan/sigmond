@@ -210,6 +210,8 @@ def _component_status(units: list, unit_states: dict) -> str:
 class OverviewScreen(Vertical):
     """Service health + client inventory + CPU-affinity summary."""
 
+    _SPINNERS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
     DEFAULT_CSS = """
     OverviewScreen {
         padding: 1;
@@ -229,6 +231,7 @@ class OverviewScreen(Vertical):
     OverviewScreen #ov-summary {
         margin-bottom: 0;
     }
+    OverviewScreen #ov-summary.loading { text-style: bold; color: green; }
     OverviewScreen #ov-actions {
         margin-bottom: 1;
     }
@@ -243,9 +246,14 @@ class OverviewScreen(Vertical):
     }
     """
 
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._load_timer = None
+        self._spinner_idx = 0
+
     def compose(self):
         yield Static("Overview", classes="ov-title")
-        yield Static("[dim]loading…[/]", id="ov-summary")
+        yield Static("loading…", id="ov-summary")
         yield Static("", id="ov-actions")
         yield Static("Service health", classes="ov-section")
         table = DataTable(id="ov-services")
@@ -265,11 +273,29 @@ class OverviewScreen(Vertical):
             self._refresh()
 
     def _refresh(self) -> None:
-        self.query_one("#ov-summary", Static).update("[dim]loading…[/]")
+        if self._load_timer is not None:
+            self._load_timer.stop()
+        self._spinner_idx = 0
+        summary = self.query_one("#ov-summary", Static)
+        summary.add_class("loading")
+        summary.update(f"{self._SPINNERS[0]} loading…")
+        self._load_timer = self.set_interval(0.1, self._tick_spinner)
         self.query_one("#ov-actions", Static).update("")
-        self.run_worker(_gather_overview, thread=True)
+        self.run_worker(_gather_overview, thread=True, name="ov-gather")
+
+    def _tick_spinner(self) -> None:
+        self._spinner_idx = (self._spinner_idx + 1) % len(self._SPINNERS)
+        self.query_one("#ov-summary", Static).update(
+            f"{self._SPINNERS[self._spinner_idx]} loading…"
+        )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name != "ov-gather":
+            return
+        if self._load_timer is not None:
+            self._load_timer.stop()
+            self._load_timer = None
+        self.query_one("#ov-summary", Static).remove_class("loading")
         if event.state != WorkerState.SUCCESS:
             return
         data = event.worker.result

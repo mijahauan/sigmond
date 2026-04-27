@@ -1506,9 +1506,37 @@ def cmd_apply(args) -> int:
     topology = _load_topology(
         Path(args.topology) if args.topology else TOPOLOGY_PATH,
     )
+    dry_run = getattr(args, 'dry_run', False)
     _heading('apply')
     _netdiag_auto_refresh('apply')
-    ok = _run_wd_ctl_apply(topology['client_dir'], getattr(args, 'dry_run', False))
+
+    # Ensure deploy.toml link-kind install steps are present for all installed
+    # catalog components.  This catches unit files that install.sh omitted or
+    # that were accidentally removed.
+    if _HAS_SIGMOND_LIB:
+        try:
+            from sigmond.installer import apply_deploy_toml_links
+            from sigmond.catalog import load_catalog
+            catalog = load_catalog()
+            reloaded = False
+            for name, entry in sorted(catalog.items()):
+                repo_dir = Path('/opt/git') / name
+                if not repo_dir.exists():
+                    continue
+                msgs = apply_deploy_toml_links(repo_dir, dry_run=dry_run)
+                for msg in msgs:
+                    if msg.startswith('  warning'):
+                        _warn(msg.strip())
+                    elif not msg.startswith('  (dry'):
+                        _ok(f'deploy links: {msg.strip()}')
+                        if '/etc/systemd' in msg:
+                            reloaded = True
+            if reloaded and not dry_run:
+                _run(['systemctl', 'daemon-reload'], sudo=True)
+        except Exception:
+            pass  # non-fatal
+
+    ok = _run_wd_ctl_apply(topology['client_dir'], dry_run)
     return 0 if ok else 1
 
 
@@ -2419,6 +2447,10 @@ def cmd_update(args) -> int:
     errors   = 0
     opt_git  = Path('/opt/git')
 
+    # Load topology once using the library object API (version field required).
+    from sigmond.topology import load_topology as _lib_load_topology
+    _topo_obj = _lib_load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+
     # --- sigmond self-update (only on full update, not component-targeted) ---
     if not components_filter:
         sigmond_dir = Path(__file__).resolve().parent.parent
@@ -2451,8 +2483,7 @@ def cmd_update(args) -> int:
             continue
 
         # Respect the per-component version policy from topology.toml.
-        topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-        comp = topology.components.get(name)
+        comp = _topo_obj.components.get(name)
         comp_version = (comp.version if comp else 'latest') or 'latest'
         effective_ref = ref  # --ref flag overrides topology setting
         if effective_ref is None:
@@ -2516,10 +2547,10 @@ def _netdiag_auto_refresh(verb: str) -> None:
     the classification so the operator sees the network verdict every
     time they mutate state.
 
-    Only does a live run if the cache is stale or missing. A live run
-    with root will perform a 130 s passive listen; a live run without
-    root is still useful (tier 1 can classify single-host-safe /
-    lan-unsafe / multicast-blocked definitively).
+    When the cache is stale and we are root, the Tier-2 passive IGMP
+    listen (~130 s) is launched as a detached background process so it
+    never blocks the calling verb.  Results are written to the cache and
+    also logged to /var/log/sigmond/net-diag.log.
     """
     if not _HAS_SIGMOND_LIB:
         return
@@ -2535,18 +2566,39 @@ def _netdiag_auto_refresh(verb: str) -> None:
                   f'(cached {int(cache["age_s"]/60)}m ago)')
             return
         if os.geteuid() != 0:
-            # Can't do the definitive listen; do tier 1 only.
+            # Tier-1 only (no raw socket), completes quickly.
             report, _from_cache = net_diag.run_cached(
                 listen_seconds=0, force=True)
+            _info(f'network: {report.classification}')
+            if report.classification in ('lan-needs-querier', 'lan-unsafe'):
+                for line in report.recommendation.split('. '):
+                    line = line.strip().rstrip('.')
+                    if line:
+                        _warn(line)
         else:
-            _info(f'network: refreshing diagnosis (~130 s passive IGMP listen)...')
-            report, _from_cache = net_diag.run_cached(force=True)
-        _info(f'network: {report.classification}')
-        if report.classification in ('lan-needs-querier', 'lan-unsafe'):
-            for line in report.recommendation.split('. '):
-                line = line.strip().rstrip('.')
-                if line:
-                    _warn(line)
+            # Tier-2 passive IGMP listen takes ~130 s — never block the
+            # calling verb.  Spawn a detached child to run it in the
+            # background; results land in the cache for the next invocation.
+            import datetime
+            log_path = Path('/var/log/sigmond/net-diag.log')
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                lf = open(log_path, 'a')
+                lf.write(f'\n# {datetime.datetime.now().isoformat()} '
+                         f'— triggered by smd {verb}\n')
+                lf.flush()
+                smd_bin = sys.argv[0] if (sys.argv and
+                                          os.path.isfile(sys.argv[0])) else 'smd'
+                subprocess.Popen(
+                    [smd_bin, 'diag', 'net'],
+                    stdout=lf, stderr=lf,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+                _info(f'network: IGMP diagnosis running in background '
+                      f'→ {log_path}')
+            except Exception as bg_exc:
+                _warn(f'network: could not launch background diagnosis: {bg_exc}')
     except Exception as exc:
         # Diagnosis must never block a mutating verb.
         _warn(f'network diagnosis skipped: {exc}')

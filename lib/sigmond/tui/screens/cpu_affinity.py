@@ -128,8 +128,8 @@ class CPUAffinityScreen(Vertical):
         radiod_cpus = report.radiod_cpus
         lines = [
             "[bold]Core map[/]  "
-            "[red]\u25cf[/] radiod  "
-            "[green]\u25cb[/] other  "
+            "[green]\u25cf[/] radiod  "
+            "[green]\u25cb[/] available  "
             "\u00b7 unused",
             "",
         ]
@@ -164,7 +164,7 @@ class CPUAffinityScreen(Vertical):
     def _core_row(self, core: set, radiod_cpus: set) -> str:
         sorted_cpus = sorted(core)
         is_radiod = bool(core & radiod_cpus)
-        glyph = "[red]\u25cf[/]" if is_radiod else "[green]\u25cb[/]"
+        glyph = "[green]\u25cf[/]" if is_radiod else "[green]\u25cb[/]"
         role = "radiod" if is_radiod else "other"
         siblings = " ".join(f"{c:>2}" for c in sorted_cpus)
         return (f"    core  CPUs [{siblings}]  "

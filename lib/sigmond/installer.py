@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import Optional
 
@@ -91,13 +92,40 @@ def clone_repo(
                         f"git checkout {ref!r} failed in {repo_dir}: {r.stderr.strip()}"
                     )
             else:
+                # Fetch first, then reset to origin's default branch.
+                # git pull --ff-only fails when HEAD is detached (e.g. after
+                # a previous pinned-ref checkout), so we use fetch + checkout -B.
                 r = subprocess.run(
-                    ['git', '-C', str(repo_dir), 'pull', '--ff-only'],
+                    ['git', '-C', str(repo_dir), 'fetch', 'origin'],
                     capture_output=True, text=True,
                 )
                 if r.returncode != 0:
                     raise RuntimeError(
-                        f"git pull failed in {repo_dir}: {r.stderr.strip()}"
+                        f"git fetch failed in {repo_dir}: {r.stderr.strip()}"
+                    )
+                # Discover the remote's default branch (usually main).
+                sym = subprocess.run(
+                    ['git', '-C', str(repo_dir), 'symbolic-ref',
+                     '--short', 'refs/remotes/origin/HEAD'],
+                    capture_output=True, text=True,
+                )
+                if sym.returncode == 0 and sym.stdout.strip():
+                    remote_branch = sym.stdout.strip()           # e.g. origin/main
+                    local_branch  = remote_branch.split('/', 1)[-1]   # e.g. main
+                else:
+                    remote_branch = 'origin/main'
+                    local_branch  = 'main'
+                # checkout -B resets the local branch to match origin whether
+                # we're currently on a branch or in detached HEAD.
+                r = subprocess.run(
+                    ['git', '-C', str(repo_dir),
+                     'checkout', '-B', local_branch, remote_branch],
+                    capture_output=True, text=True,
+                )
+                if r.returncode != 0:
+                    raise RuntimeError(
+                        f"git checkout {local_branch} failed in {repo_dir}: "
+                        f"{r.stderr.strip()}"
                     )
         return repo_dir
 
@@ -169,6 +197,53 @@ def run_install_script(
     return r.returncode == 0
 
 
+def apply_deploy_toml_links(repo_dir: Path, dry_run: bool = False) -> list[str]:
+    """Execute 'link' kind install steps from deploy.toml that are missing or wrong.
+
+    Creates symlinks declared in [[install.steps]] with kind="link".  Skips
+    steps where the symlink already points at the correct target.  Returns a
+    list of human-readable messages (one per action taken or error).
+
+    Safe to call on every apply — link creation is idempotent.
+    """
+    deploy_toml = repo_dir / 'deploy.toml'
+    if not deploy_toml.exists():
+        return []
+    try:
+        with open(deploy_toml, 'rb') as f:
+            config = tomllib.load(f)
+    except Exception as exc:
+        return [f"warning: could not read {deploy_toml}: {exc}"]
+
+    msgs: list[str] = []
+    for step in config.get('install', {}).get('steps', []):
+        if step.get('kind') != 'link':
+            continue
+        src_rel = step.get('src', '')
+        dst_str = step.get('dst', '')
+        if not src_rel or not dst_str:
+            continue
+        src  = (repo_dir / src_rel).resolve()
+        dst  = Path(dst_str)
+        if not src.exists():
+            continue
+        # Already correct?
+        if dst.is_symlink() and dst.resolve() == src:
+            continue
+        if dry_run:
+            msgs.append(f"  (dry-run) would link {dst} → {src}")
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists() or dst.is_symlink():
+                dst.unlink()
+            dst.symlink_to(src)
+            msgs.append(f"  linked {dst.name} → {src}")
+        except OSError as exc:
+            msgs.append(f"  warning: could not link {dst}: {exc}")
+    return msgs
+
+
 def install_client(
     entry: CatalogEntry,
     *,
@@ -176,7 +251,7 @@ def install_client(
     yes: bool = False,
     pull: bool = False,
 ) -> bool:
-    """Full install flow: clone repo + run install.sh.
+    """Full install flow: clone repo + run install.sh + deploy.toml link steps.
 
     Returns True on success, False if the client can't be installed this way.
     """
@@ -184,4 +259,15 @@ def install_client(
         return False
 
     repo_dir = clone_repo(entry, pull_if_exists=pull)
-    return run_install_script(entry, repo_dir, dry_run=dry_run, yes=yes)
+    ok = run_install_script(entry, repo_dir, dry_run=dry_run, yes=yes)
+    # Apply any deploy.toml link steps not covered by install.sh (idempotent).
+    link_msgs = apply_deploy_toml_links(repo_dir, dry_run=dry_run)
+    if link_msgs:
+        for msg in link_msgs:
+            print(msg)
+        # Reload systemd if we wrote any new unit files.
+        if not dry_run and any('/etc/systemd' in m for m in link_msgs
+                               if not m.startswith('  warning')):
+            subprocess.run(['systemctl', 'daemon-reload'],
+                           capture_output=True)
+    return ok

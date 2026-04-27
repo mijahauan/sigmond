@@ -82,6 +82,8 @@ class WdConfig:
     rac:           str = ""
     schedule:      dict[str, dict[str, str]] = field(default_factory=dict)
     # slot label -> {receiver_name: "band1 band2 ..."}
+    excluded_keys: set = field(default_factory=set)
+    # SDR inventory keys explicitly hidden from this WD config
 
 
 def load_config(path: Path = WD_CONF_PATH) -> WdConfig:
@@ -148,6 +150,11 @@ def load_config(path: Path = WD_CONF_PATH) -> WdConfig:
                 slot[key.upper()] = val.strip()
             result.schedule[label] = slot
 
+    # Excluded SDR inventory keys (hidden from this WD config)
+    if cfg.has_section('wd_excluded'):
+        keys_str = cfg.get('wd_excluded', 'keys', fallback='')
+        result.excluded_keys = set(k.strip() for k in keys_str.split() if k.strip())
+
     return result
 
 
@@ -203,6 +210,12 @@ def save_config(wdc: WdConfig, path: Path = WD_CONF_PATH) -> None:
         lines.append("time = 00:00\n")
         for rx_name, bands_str in slot.items():
             lines.append(f"{rx_name} = {bands_str}\n")
+        lines.append("\n")
+
+    # Excluded SDR inventory keys
+    if wdc.excluded_keys:
+        lines.append("[wd_excluded]\n")
+        lines.append(f"keys = {' '.join(sorted(wdc.excluded_keys))}\n")
         lines.append("\n")
 
     content = "".join(lines)
