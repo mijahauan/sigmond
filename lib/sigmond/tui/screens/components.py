@@ -25,12 +25,12 @@ from typing import Optional
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Static
 from textual.worker import Worker, WorkerState
 
-from ..mutation import ConfirmModal
+from ..mutation import ConfirmModal, UpdateOutputModal
 
 
 def _smd_binary() -> str:
@@ -412,119 +412,6 @@ def _apply_version_policy(
         return False, f"Permission denied writing {_TP}"
     except Exception as exc:
         return False, f"Error saving policy: {exc}"
-
-
-# ---------------------------------------------------------------------------
-# UpdateOutputModal
-# ---------------------------------------------------------------------------
-
-class UpdateOutputModal(ModalScreen):
-    """Scrollable output modal for long-running smd update commands."""
-
-    BINDINGS = [Binding("escape", "try_dismiss", "Dismiss (when done)")]
-
-    DEFAULT_CSS = """
-    UpdateOutputModal { align: center middle; }
-    UpdateOutputModal > Vertical {
-        width: 92%;
-        height: 88%;
-        padding: 1 2;
-        background: $panel;
-        border: thick $primary;
-    }
-    UpdateOutputModal #uom-title { text-style: bold; margin-bottom: 0; }
-    UpdateOutputModal #uom-cmd   { color: $text-muted; margin-bottom: 1; }
-    UpdateOutputModal #uom-status { margin-bottom: 1; }
-    UpdateOutputModal #uom-scroll {
-        height: 1fr;
-        border: solid $surface;
-        padding: 0 1;
-        background: $background;
-    }
-    UpdateOutputModal #uom-btn-row { height: auto; margin-top: 1; }
-    """
-
-    _SPINNERS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-    def __init__(self, title: str, cmd: list[str], **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._title  = title
-        self._cmd    = cmd
-        self._done   = False
-        self._spin_idx = 0
-        self._spin_timer = None
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Static(f"[bold]{self._title}[/]", id="uom-title")
-            yield Static(f"[dim]$ {' '.join(self._cmd)}[/]", id="uom-cmd")
-            yield Static(f"{self._SPINNERS[0]} running…", id="uom-status")
-            with ScrollableContainer(id="uom-scroll"):
-                yield Static("", id="uom-output")
-            with Horizontal(id="uom-btn-row"):
-                yield Button("Dismiss", id="uom-dismiss",
-                             variant="primary", disabled=True)
-
-    def on_mount(self) -> None:
-        self._spin_timer = self.set_interval(0.1, self._tick_spinner)
-        self.run_worker(self._run_cmd, thread=True, name="uom-run")
-
-    def _tick_spinner(self) -> None:
-        self._spin_idx = (self._spin_idx + 1) % len(self._SPINNERS)
-        self.query_one("#uom-status", Static).update(
-            f"{self._SPINNERS[self._spin_idx]} running…")
-
-    def _run_cmd(self) -> tuple[str, int]:
-        """Stream command output, updating the UI every 10 lines."""
-        try:
-            proc = subprocess.Popen(
-                self._cmd,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
-            )
-            lines: list[str] = []
-            for raw in proc.stdout:
-                lines.append(raw.rstrip())
-                if len(lines) % 10 == 0:
-                    self.app.call_from_thread(self._update_output, list(lines))
-            proc.wait()
-            return '\n'.join(lines), proc.returncode
-        except Exception as exc:
-            return str(exc), 1
-
-    def _update_output(self, lines: list[str]) -> None:
-        safe = '\n'.join(l.replace('[', r'\[') for l in lines)
-        self.query_one("#uom-output", Static).update(safe)
-        self.query_one("#uom-scroll", ScrollableContainer).scroll_end(animate=False)
-
-    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        if event.worker.name != "uom-run":
-            return
-        if self._spin_timer:
-            self._spin_timer.stop()
-            self._spin_timer = None
-        self._done = True
-        status = self.query_one("#uom-status", Static)
-        if event.state == WorkerState.SUCCESS:
-            output, rc = event.worker.result
-            self._update_output(output.splitlines())
-            if rc == 0:
-                status.update("[green]✔ completed successfully[/]")
-            else:
-                status.update(f"[yellow]⚠ finished with errors (exit {rc}) — scroll up to review[/]")
-        else:
-            status.update(f"[red]✘ failed: {event.worker.error}[/]")
-        btn = self.query_one("#uom-dismiss", Button)
-        btn.disabled = False
-        btn.focus()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "uom-dismiss":
-            self.dismiss(self._done)
-
-    def action_try_dismiss(self) -> None:
-        if self._done:
-            self.dismiss(True)
 
 
 # ---------------------------------------------------------------------------

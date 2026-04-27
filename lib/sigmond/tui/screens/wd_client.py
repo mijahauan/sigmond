@@ -28,6 +28,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, DataTable, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
+from ..mutation import UpdateOutputModal
+
 from ...wd_client_config import (
     ALL_BANDS, ALL_MODES, KIWI_DEFAULT_BANDS, WD_CONF_PATH,
     WdConfig, WdReceiver,
@@ -362,15 +364,6 @@ class WdClientScreen(Vertical):
                 self._dirty = False
                 self._refresh_table()
                 self._refresh_status()
-        elif event.worker.name == "wd-apply-run":
-            if event.state == WorkerState.SUCCESS:
-                rc, out = event.worker.result
-                if rc == 0:
-                    self.query_one("#wd-status", Static).update(
-                        "[green]wd-ctl apply succeeded[/]")
-                else:
-                    self.query_one("#wd-status", Static).update(
-                        f"[red]wd-ctl apply exited {rc}[/]  {out[:120]}")
 
     def _refresh_status(self) -> None:
         if is_v3_format():
@@ -621,12 +614,15 @@ class WdClientScreen(Vertical):
     def action_apply(self) -> None:
         if self._dirty:
             self.action_save()
-        self.query_one("#wd-status", Static).update("[dim]running wd-ctl apply…[/]")
-        self.run_worker(self._worker_apply, thread=True, name="wd-apply-run")
 
-    def _worker_apply(self) -> tuple[int, str]:
-        r = subprocess.run(
-            ['sudo', 'wd-ctl', 'apply'],
-            capture_output=True, text=True, timeout=120,
+        def _after_modal(_result: object) -> None:
+            self.query_one("#wd-status", Static).update("[dim]apply complete — reloading…[/]")
+            self._load()
+
+        self.app.push_screen(
+            UpdateOutputModal(
+                title="Apply wsprdaemon-client configuration",
+                cmd=['sudo', 'wd-ctl', 'apply'],
+            ),
+            _after_modal,
         )
-        return r.returncode, (r.stdout + r.stderr)[-500:]
