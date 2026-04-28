@@ -710,6 +710,7 @@ class SdrInventoryScreen(Vertical):
     SdrInventoryScreen .sdr-title { text-style: bold; margin-bottom: 1; }
     SdrInventoryScreen #sdr-status { margin-bottom: 1; }
     SdrInventoryScreen #sdr-status.scanning { text-style: bold; color: green; }
+    SdrInventoryScreen #sdr-wisdom-warn { margin-bottom: 1; }
     SdrInventoryScreen #sdr-btn-row { height: 3; margin-top: 1; }
     SdrInventoryScreen #sdr-btn-row Button { margin-right: 1; }
     """
@@ -727,6 +728,7 @@ class SdrInventoryScreen(Vertical):
     def compose(self) -> ComposeResult:
         yield Static("SDR Inventory — USB, KiwiSDR LAN, ka9q-radio", classes="sdr-title")
         yield Static("[dim]scanning…[/]", id="sdr-status")
+        yield Static("", id="sdr-wisdom-warn")
 
         table = DataTable(id="sdr-table", zebra_stripes=True, cursor_type="row")
         table.add_columns("Source", "Type", "Location", "Detail", "Serial", "Users", "GPS", "Config name", "Reporter ID", "Grid")
@@ -806,6 +808,20 @@ class SdrInventoryScreen(Vertical):
             self._scan_timer = None
         status = self.query_one("#sdr-status", Static)
         status.remove_class("scanning")
+
+        # Wisdom warning: local USB SDR present but wisdom file missing
+        local_usb = any(e.source == "usb_sdr" and e.status == "ok"
+                        for e in self._entries)
+        wisdom_missing = not Path('/etc/fftw/wisdomf').exists()
+        warn_w = self.query_one("#sdr-wisdom-warn", Static)
+        if local_usb and wisdom_missing:
+            warn_w.update(
+                "[yellow]⚠ FFT wisdom file missing — radiod cannot start. "
+                "Go to Operate → FFT Wisdom to generate it (may take hours "
+                "for RX888 @ 129.6 MHz on first run).[/]"
+            )
+        else:
+            warn_w.update("")
 
         table = self.query_one("#sdr-table", DataTable)
         table.clear()

@@ -58,6 +58,7 @@ class ComponentTree(Tree):
         operate = self.root.add("Operate", expand=True)
         operate.add_leaf("\u21bb Lifecycle", data={"screen": "lifecycle"})
         operate.add_leaf("\u21c4 Apply",     data={"screen": "apply"})
+        operate.add_leaf("\u2a09 FFT Wisdom", data={"screen": "fft_wisdom"})
         operate.add_leaf("+ Software install", data={"screen": "install"})
         operate.add_leaf("\u2191 Software update", data={"screen": "update"})
 
@@ -104,6 +105,8 @@ class ComponentTree(Tree):
             self.app.action_show_restore()
         elif screen == "apply":
             self.app.action_show_apply()
+        elif screen == "fft_wisdom":
+            self.app.action_show_fft_wisdom()
         elif screen == "config_show":
             self.app.action_show_config()
         elif screen == "diag_net":

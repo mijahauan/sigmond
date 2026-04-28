@@ -610,6 +610,26 @@ class SigmondApp(App):
             "Safe to re-run — the CLI is idempotent.",
         )
 
+    def action_show_fft_wisdom(self) -> None:
+        from .screens.fft_wisdom import FFTWisdomScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(FFTWisdomScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "FFT Wisdom",
+            "Generates the FFTW wisdom file that radiod needs to plan "
+            "its FFT transforms efficiently.\n\n"
+            "Small channel-inverse transforms (cob*) finish in seconds. "
+            "The large forward real transforms (rof3240000 for an RX888 "
+            "@ 129.6 MHz) can take hours on the first run.\n\n"
+            "All managed services are stopped while planning runs so "
+            "they don't compete for CPU.  The planner is pinned to one "
+            "CPU core to prevent migration.\n\n"
+            "Once wisdom is built, run Apply to start radiod and the "
+            "decoder chain.",
+        )
+
     def action_show_config(self) -> None:
         from .screens.config_show import ConfigShowScreen
         center = self.query_one("#center")

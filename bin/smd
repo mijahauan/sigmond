@@ -1599,9 +1599,13 @@ def cmd_apply(args) -> int:
             ]
             if radiod_units:
                 _ensure_radiod_affinity_drop_ins(radiod_units, topology.get('cpu_affinity'))
-                # Stop all managed services, generate/verify FFTW wisdom, then
-                # start radiod.  Returns False if wisdom is still in progress.
-                wisdom_ready = _ensure_fft_wisdom(radiod_units, all_units)
+                # Check wisdom file — generation is now a deliberate user
+                # action via 'smd tui → Operate → FFT Wisdom' (or the CLI
+                # equivalent).  We don't block apply to run it.
+                wisdom_ready = _WISDOM_FILE.exists()
+                if not wisdom_ready:
+                    _warn('FFT wisdom file missing — radiod cannot start cleanly')
+                    _warn(f'  Run:  smd tui  → Operate → FFT Wisdom')
                 if wisdom_ready:
                     for u in radiod_units:
                         if _run(['systemctl', 'is-enabled', '--quiet', u.unit]).returncode != 0:
