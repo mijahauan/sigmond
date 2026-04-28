@@ -16,6 +16,8 @@ This screen:
 
 from __future__ import annotations
 
+import datetime
+import re
 import shutil
 import subprocess
 import time
@@ -106,6 +108,38 @@ def _pin_to_current_cpu(pid: int) -> None:
                        capture_output=True, timeout=2)
     except Exception:
         pass
+
+
+def _size_of(profile: str) -> int:
+    """Extract the numeric transform size from a profile name like 'rof3240000'."""
+    m = re.search(r'\d+', profile)
+    return int(m.group()) if m else 1
+
+
+def _fmt_dur(seconds: float) -> str:
+    """Format a duration as '2.3s', '4m12s', or '1h23m45s'."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m = int(seconds // 60)
+    s = seconds % 60
+    if m < 60:
+        return f"{m}m{int(s)}s"
+    return f"{m // 60}h{m % 60}m{int(s)}s"
+
+
+# Pre-compute profile matching: sorted longest-first so 'cob162000' matches
+# before 'cob1620' before 'cob160' (avoids substring false-positives).
+_PROFILES_BY_LEN = sorted(_FFT_WISDOM_PROFILES, key=len, reverse=True)
+_PROFILE_SET     = set(_FFT_WISDOM_PROFILES)
+_PROFILE_INDEX   = {p: i for i, p in enumerate(_FFT_WISDOM_PROFILES)}
+
+
+def _match_profile(line: str) -> str | None:
+    """Return the first profile name that appears as a whole word in line."""
+    for profile in _PROFILES_BY_LEN:
+        if re.search(rf'\b{re.escape(profile)}\b', line):
+            return profile
+    return None
 
 
 def _install_wisdom_tui() -> str:
@@ -285,17 +319,61 @@ class FFTWisdomScreen(Vertical):
         time.sleep(0.05)   # give OS a moment to schedule it
         _pin_to_current_cpu(proc.pid)
 
-        # Step 3 — stream log output to the RichLog widget
+        # Step 3 — stream log output with timestamps and profile predictions
+        #
+        # Each line is prefixed:  HH:MM:SS  +MM:SS.s  <content>
+        #   HH:MM:SS  = wall-clock time the line appeared
+        #   +MM:SS.s  = seconds since the previous output line
+        #
+        # When a profile name is first seen in the output, a prediction line
+        # is emitted for the next profile based on the size-ratio rule:
+        #   planning time ∝ (n_next / n_prev)²   (user-observed heuristic)
+        last_line_mono  = time.monotonic()
+        seen_profiles: set = set()
+        profile_events: list = []   # [(profile_name, monotonic_time), ...]
+
+        def _emit_timestamped(raw: str) -> None:
+            nonlocal last_line_mono
+            now  = time.monotonic()
+            wall = datetime.datetime.now().strftime('%H:%M:%S')
+            delta = now - last_line_mono
+            dm, ds = int(delta // 60), delta % 60
+            last_line_mono = now
+            emit(f"{wall}  +{dm:02d}:{ds:04.1f}  {raw.rstrip()}")
+
         try:
             with open(_WISDOM_LOG, 'r') as lf:
                 while True:
-                    line = lf.readline()
-                    if line:
-                        emit(line.rstrip())
+                    raw = lf.readline()
+                    if raw:
+                        _emit_timestamped(raw)
+
+                        # Profile first-appearance detection
+                        profile = _match_profile(raw)
+                        if profile and profile not in seen_profiles:
+                            seen_profiles.add(profile)
+                            profile_events.append((profile, time.monotonic()))
+
+                            if len(profile_events) >= 2:
+                                prev_name, prev_t = profile_events[-2]
+                                cur_name,  cur_t  = profile_events[-1]
+                                duration = cur_t - prev_t
+
+                                # Predict the profile after the current one
+                                cur_idx = _PROFILE_INDEX.get(cur_name, -1)
+                                if cur_idx >= 0 and cur_idx + 1 < len(_FFT_WISDOM_PROFILES):
+                                    nxt = _FFT_WISDOM_PROFILES[cur_idx + 1]
+                                    ratio = _size_of(nxt) / max(_size_of(cur_name), 1)
+                                    pred  = duration * ratio ** 2
+                                    emit(
+                                        f"{'':>22}  ↳ {prev_name} took "
+                                        f"{_fmt_dur(duration)}  |  "
+                                        f"next: {nxt}  ~{_fmt_dur(pred)}"
+                                    )
+
                     elif proc.poll() is not None:
-                        # drain any remaining output
-                        for line in lf:
-                            emit(line.rstrip())
+                        for raw in lf:
+                            _emit_timestamped(raw)
                         break
                     else:
                         time.sleep(0.15)
