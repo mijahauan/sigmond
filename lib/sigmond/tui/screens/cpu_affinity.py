@@ -33,6 +33,85 @@ def _format_cpu_list(cpus) -> str:
     return ", ".join(parts)
 
 
+_SERVICE_FAMILY_PREFIXES = (
+    'timestd-',   # all hf-timestd sub-services collapse under 'timestd'
+)
+
+
+def _unit_group_key(unit_name: str) -> str:
+    """Return a grouping key for a unit name.
+
+    - Service families (e.g. 'timestd-*') collapse to their prefix stem.
+    - Templated instances like 'wd-decode@KA9Q_0-10.service' group under
+      'wd-decode@KA9Q_0' (prefix up to the last '-' before the band suffix).
+    - Concrete units return the name itself.
+    """
+    for prefix in _SERVICE_FAMILY_PREFIXES:
+        if unit_name.startswith(prefix):
+            return prefix.rstrip('-')
+    if '@' not in unit_name:
+        return unit_name
+    at_part = unit_name.split('@', 1)[1]          # 'KA9Q_0-10.service'
+    stem = at_part.rsplit('.', 1)[0]              # 'KA9Q_0-10'
+    # Strip trailing '-<band>' to get the receiver prefix
+    dash = stem.rfind('-')
+    if dash > 0:
+        return unit_name.split('@')[0] + '@' + stem[:dash]
+    return unit_name
+
+
+def _ua_row(ua) -> tuple:
+    pid  = ua.main_pid or "—"
+    sysd = _format_cpu_list(ua.systemd_mask) if ua.systemd_mask else "—"
+    obs  = _format_cpu_list(ua.observed_mask) if ua.observed_mask else "—"
+    if ua.mask_mismatch:
+        obs = f"[yellow]{obs}[/]"
+    drop = "smd" if ua.drop_in_present else (
+        "[yellow]foreign[/]" if ua.foreign_drop_ins else "[dim]none[/]")
+    return (ua.unit, pid, ua.role, sysd, obs, drop)
+
+
+def _summarise_units(units: list) -> list[tuple]:
+    """Return table rows for the observed-units DataTable.
+
+    Instances of the same receiver/band-group (e.g. all wd-decode@KA9Q_0-*)
+    are collapsed to three rows — first band, a count summary, last band —
+    when the group has more than 3 members and all share the same affinity.
+    Groups with mismatches or foreign drop-ins are always expanded so the
+    operator can see which instance has the problem.
+    """
+    from itertools import groupby
+
+    # Stable grouping preserving original order
+    rows: list[tuple] = []
+    keyed = [(ua, _unit_group_key(ua.unit)) for ua in units]
+    for key, group_iter in groupby(keyed, key=lambda x: x[1]):
+        group = [ua for ua, _ in group_iter]
+        # Always expand: radiod, single items, groups with any CPU mask
+        # mismatch.  Foreign drop-ins (uniform or not) don't block collapse
+        # since they still show on the first/last rows via the drop-in column.
+        has_problem = any(ua.mask_mismatch for ua in group)
+        if len(group) <= 3 or has_problem or group[0].role == 'radiod':
+            for ua in group:
+                rows.append(_ua_row(ua))
+            continue
+        # Collapsed: first, summary line, last
+        first, *middle, last = group
+        rows.append(_ua_row(first))
+        # Summary row — use the shared affinity values from the first member
+        sysd = _format_cpu_list(first.systemd_mask) if first.systemd_mask else "—"
+        obs  = _format_cpu_list(first.observed_mask) if first.observed_mask else "—"
+        drop = "smd" if first.drop_in_present else "[dim]none[/]"
+        suffix = "-*" if key in {p.rstrip('-') for p in _SERVICE_FAMILY_PREFIXES} else "*"
+        rows.append((
+            f"[dim]  … {len(middle)} more {key}{suffix} (same affinity)[/]",
+            "[dim]—[/]", "[dim]other[/]", f"[dim]{sysd}[/]",
+            f"[dim]{obs}[/]", f"[dim]{drop}[/]",
+        ))
+        rows.append(_ua_row(last))
+    return rows
+
+
 def _load_cpu_affinity_config() -> Optional[dict]:
     """Return [cpu_affinity] from topology.toml via the library loader."""
     try:
@@ -187,15 +266,8 @@ class CPUAffinityScreen(Vertical):
     def _render_observed(self, report) -> None:
         table = self.query_one("#cpu-observed", DataTable)
         table.clear()
-        for ua in report.units:
-            pid = ua.main_pid or "—"
-            sysd = _format_cpu_list(ua.systemd_mask) if ua.systemd_mask else "—"
-            obs  = _format_cpu_list(ua.observed_mask) if ua.observed_mask else "—"
-            if ua.mask_mismatch:
-                obs = f"[yellow]{obs}[/]"
-            drop = "smd" if ua.drop_in_present else (
-                "[yellow]foreign[/]" if ua.foreign_drop_ins else "[dim]none[/]")
-            table.add_row(ua.unit, pid, ua.role, sysd, obs, drop)
+        for row in _summarise_units(report.units):
+            table.add_row(*row)
 
     def _render_contention(self, report) -> None:
         total = len(report.contention)

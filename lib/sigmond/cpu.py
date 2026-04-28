@@ -53,7 +53,6 @@ AFFINITY_UNITS = {
     'wd-ka9q-web@.service':              'other',
     'wd-spool-clean.service':            'other',
     # sigmond infra group
-    'wd-rac.service':           'other',
     'wd-remote-access.service': 'other',
     'igmp-querier.service':     'other',
     'gpsdo-monitor.service':    'other',
@@ -908,12 +907,33 @@ def build_affinity_report(
             f"(isolated={sorted(isol)})"
         )
 
+    # Foreign drop-in warnings, deduplicated by path.
+    # Skip entirely when smd's own drop-in (smd-cpu-affinity.conf, which sorts
+    # after 99-wdctl-cpu-affinity.conf) is already in place on every affected
+    # unit — CPU affinity is correct; the leftover file is harmless dead weight
+    # that will be removed on the next smd apply.
+    _foreign_paths: dict = {}          # path -> list[UnitAffinity]
     for ua in units:
         for path in ua.foreign_drop_ins:
+            _foreign_paths.setdefault(path, []).append(ua)
+    for path, affected_uas in sorted(_foreign_paths.items()):
+        if all(ua.drop_in_present for ua in affected_uas):
+            continue  # smd drop-in overrides this; no action needed
+        affected_names = [ua.unit for ua in affected_uas]
+        if len(affected_names) == 1:
             warnings.append(
-                f"foreign drop-in on {ua.unit}: {path} "
-                "— smd will remove on --apply"
+                f"foreign drop-in on {affected_names[0]}: {path} "
+                "— run: sudo smd apply"
             )
+        else:
+            dir_name = Path(path).parent.name
+            tmpl = dir_name[:-2] if dir_name.endswith('.d') else dir_name
+            warnings.append(
+                f"foreign drop-in affects {len(affected_names)} {tmpl} instances: "
+                f"{path} — run: sudo smd apply"
+            )
+
+    for ua in units:
         if ua.role == 'radiod' and ua.main_pid and not ua.drop_in_present:
             warnings.append(
                 f"{ua.unit} running without smd drop-in — affinity not enforced"
