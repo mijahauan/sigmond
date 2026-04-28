@@ -71,7 +71,9 @@ def _print_human(view: EnvironmentView, wanted_kind: Optional[str]) -> None:
     for d in view.deltas:
         by_kind.setdefault(d.kind, []).append(d)
 
-    order = ("radiod", "kiwisdr", "gpsdo", "time_source")
+    order = ("radiod", "kiwisdr", "gpsdo", "time_source",
+             "ka9q_web", "gnss_vtec", "network_device",
+             "igmp_querier", "igmp_snooper", "local_system")
     for kind in order:
         if wanted_kind and kind != wanted_kind:
             continue
@@ -116,7 +118,7 @@ def cmd_environment_probe(args) -> int:
     info(f"sources: {', '.join(sources)}")
 
     for src in sources:
-        module = _module_for_source(src)
+        module = discovery.module_for_source(src)
         if module is None:
             warn(f"unknown source {src!r}, skipping")
             continue
@@ -284,48 +286,20 @@ def _fmt_value(v) -> str:
     return str(v)
 
 
-def _module_for_source(src: str):
-    if src == "mdns":
-        from ..discovery import mdns
-        return mdns
-    if src == "multicast":
-        from ..discovery import multicast
-        return multicast
-    if src == "ntp":
-        from ..discovery import ntp
-        return ntp
-    if src == "http_kiwisdr":
-        from ..discovery import http_kiwisdr
-        return http_kiwisdr
-    if src == "gpsdo":
-        from ..discovery import gpsdo
-        return gpsdo
-    return None
-
-
 def _limiter_allows(limiter, src: str, env: Environment, force: bool) -> bool:
-    targets = _targets_for_source(src, env)
+    targets = discovery.targets_for_source(src, env)
     # Probe runs if *any* target is allowed; per-target throttling happens
     # in the probe itself if it wants more granular behaviour.  In v1 we
     # run or skip the whole source.
+    if not targets:
+        # No declared targets for this source.  For active probes (e.g.
+        # http_ka9q with no ka9q_webs declared) there's nothing to do.
+        # For passive/broadcast probes (mdns) the helper returns "_site".
+        return False
     for tgt in targets:
         if limiter.allow(src, tgt, force=force):
             return True
     return False
-
-
-def _targets_for_source(src: str, env: Environment) -> list:
-    if src == "mdns":
-        return ["_site"]                         # single broadcast target
-    if src == "multicast":
-        return [r.status_dns or r.host for r in env.radiods]
-    if src == "ntp":
-        return [t.host for t in env.time_sources]
-    if src == "http_kiwisdr":
-        return [k.host for k in env.kiwisdrs]
-    if src == "gpsdo":
-        return [g.host or "localhost" for g in env.gpsdos]
-    return []
 
 
 def _target_of(obs_dict: dict) -> str:

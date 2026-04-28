@@ -32,6 +32,10 @@ DEFAULT_CADENCE = {
     "ntp":           300.0,
     "http_kiwisdr":  300.0,
     "gpsdo":         30.0,
+    "http_ka9q":     300.0,
+    "http_gnss":     300.0,
+    "snmp":          300.0,
+    "usb_sdr":       60.0,
 }
 
 # Minimum gap between two probes of the same (source, target) even when
@@ -39,9 +43,72 @@ DEFAULT_CADENCE = {
 # retry loop.
 HARD_FLOOR = 5.0
 
-ALL_SOURCES = ("mdns", "multicast", "ntp", "http_kiwisdr", "gpsdo")
-ACTIVE_SOURCES = ("ntp", "http_kiwisdr")
+ALL_SOURCES = ("mdns", "multicast", "ntp", "http_kiwisdr", "gpsdo",
+               "http_ka9q", "http_gnss", "snmp", "usb_sdr")
+ACTIVE_SOURCES = ("ntp", "http_kiwisdr", "http_ka9q", "http_gnss", "snmp", "usb_sdr")
 PASSIVE_SOURCES = ("mdns", "multicast", "gpsdo")
+
+
+# ---------------------------------------------------------------------------
+# Source -> probe module dispatch.  Single source of truth used by both the
+# CLI (`smd environment probe`) and the TUI Environment screen.
+# ---------------------------------------------------------------------------
+
+def module_for_source(src: str):
+    """Return the discovery probe module for a source name, or None."""
+    if src == "mdns":
+        from . import mdns
+        return mdns
+    if src == "multicast":
+        from . import multicast
+        return multicast
+    if src == "ntp":
+        from . import ntp
+        return ntp
+    if src == "http_kiwisdr":
+        from . import http_kiwisdr
+        return http_kiwisdr
+    if src == "gpsdo":
+        from . import gpsdo
+        return gpsdo
+    if src == "http_ka9q":
+        from . import http_ka9q
+        return http_ka9q
+    if src == "http_gnss":
+        from . import http_gnss
+        return http_gnss
+    if src == "snmp":
+        from . import snmp
+        return snmp
+    if src == "usb_sdr":
+        from . import usb_sdr
+        return usb_sdr
+    return None
+
+
+def targets_for_source(src: str, env: "Environment") -> list:
+    """Return the list of declared targets a given source will probe.
+    Used by the rate limiter to decide whether to skip an entire source
+    when no target is due."""
+    if src == "mdns":
+        return ["_site"]                         # single broadcast target
+    if src == "multicast":
+        return [r.status_dns or r.host for r in env.radiods]
+    if src == "ntp":
+        return [t.host for t in env.time_sources]
+    if src == "http_kiwisdr":
+        return [k.host for k in env.kiwisdrs]
+    if src == "gpsdo":
+        return [g.host or "localhost" for g in env.gpsdos]
+    if src == "http_ka9q":
+        return [w.host for w in env.ka9q_webs]
+    if src == "http_gnss":
+        return [v.host for v in env.gnss_vtecs]
+    if src == "snmp":
+        return [n.host for n in env.network_devices]
+    if src == "usb_sdr":
+        return ["localhost"]                     # local-only probe
+    return []
 
 
 # ---------------------------------------------------------------------------

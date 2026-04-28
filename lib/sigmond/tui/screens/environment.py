@@ -40,7 +40,7 @@ def _run_probe(sources: list, timeout: float,
     observations: list[Observation] = []
     errors: list[str] = []
     for src in actual:
-        module = _module_for_source(src)
+        module = discovery.module_for_source(src)
         if module is None:
             continue
         try:
@@ -62,17 +62,6 @@ def _run_probe(sources: list, timeout: float,
     return {"view": view, "errors": errors, "sources": actual}
 
 
-def _module_for_source(src: str):
-    from ...discovery import mdns, multicast, ntp, http_kiwisdr, gpsdo
-    return {
-        "mdns":         mdns,
-        "multicast":    multicast,
-        "ntp":          ntp,
-        "http_kiwisdr": http_kiwisdr,
-        "gpsdo":        gpsdo,
-    }.get(src)
-
-
 def _load_cached() -> EnvironmentView:
     env = load_environment()
     cache = discovery.load_cache()
@@ -90,6 +79,10 @@ class EnvironmentScreen(Vertical):
         ("m", "probe_mdns",       "mDNS only"),
         ("n", "probe_ntp",        "NTP only"),
         ("k", "probe_kiwi",       "KiwiSDR only"),
+        ("w", "probe_ka9q_web",   "ka9q-web only"),
+        ("v", "probe_gnss",       "GNSS-VTEC only"),
+        ("s", "probe_snmp",       "Network (SNMP) only"),
+        ("u", "probe_usb",        "USB SDR only"),
         ("r", "reload_manifest",  "Reload manifest"),
     ]
 
@@ -140,8 +133,10 @@ class EnvironmentScreen(Vertical):
                 xt.add_columns("Status", "Kind", "Id", "Detail")
                 yield xt
 
-        yield Static("[dim]p=probe all  m/n/k=source-only  r=reload manifest[/]",
-                     id="env-hint")
+        yield Static(
+            "[dim]p=all  m=mdns  n=ntp  k=kiwi  w=ka9q-web  v=gnss-vtec  "
+            "s=snmp  u=usb  r=reload[/]",
+            id="env-hint")
 
     def on_mount(self) -> None:
         self._render_view(_load_cached(), banner="cached")
@@ -159,6 +154,18 @@ class EnvironmentScreen(Vertical):
 
     def action_probe_kiwi(self) -> None:
         self._kick(sources=["http_kiwisdr"], label="kiwi")
+
+    def action_probe_ka9q_web(self) -> None:
+        self._kick(sources=["http_ka9q"], label="ka9q-web")
+
+    def action_probe_gnss(self) -> None:
+        self._kick(sources=["http_gnss"], label="gnss-vtec")
+
+    def action_probe_snmp(self) -> None:
+        self._kick(sources=["snmp"], label="snmp")
+
+    def action_probe_usb(self) -> None:
+        self._kick(sources=["usb_sdr"], label="usb_sdr")
 
     def action_reload_manifest(self) -> None:
         self._render_view(_load_cached(), banner="manifest reloaded")
@@ -250,5 +257,30 @@ def _declared_extra(kind: str, d) -> str:
         bits = [d.kind]
         if d.stratum_max:
             bits.append(f"≤S{d.stratum_max}")
+        return " ".join(bits) or "—"
+    if kind == "ka9q_web":
+        bits = [f"port {d.port}"]
+        if d.role:
+            bits.append(d.role)
+        return " ".join(bits)
+    if kind == "gnss_vtec":
+        bits = [f"port {d.port}"]
+        if d.source:
+            bits.append(d.source)
+        return " ".join(bits)
+    if kind == "network_device":
+        return d.kind or "—"
+    if kind == "igmp_querier":
+        return d.version or "—"
+    if kind == "igmp_snooper":
+        if d.vlans:
+            return f"vlans={','.join(str(v) for v in d.vlans)}"
+        return d.interface or "—"
+    if kind == "local_system":
+        bits = []
+        if d.cpu_governor:
+            bits.append(d.cpu_governor)
+        if d.sdrs:
+            bits.append(f"{len(d.sdrs)} sdr(s)")
         return " ".join(bits) or "—"
     return "—"
