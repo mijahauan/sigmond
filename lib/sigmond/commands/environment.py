@@ -71,10 +71,8 @@ def _print_human(view: EnvironmentView, wanted_kind: Optional[str]) -> None:
     for d in view.deltas:
         by_kind.setdefault(d.kind, []).append(d)
 
-    order = ("radiod", "kiwisdr", "gpsdo", "time_source",
-             "ka9q_web", "gnss_vtec", "network_device",
-             "igmp_querier", "igmp_snooper", "local_system")
-    for kind in order:
+    from ..environment_kinds import DISPLAY_ORDER
+    for kind in DISPLAY_ORDER:
         if wanted_kind and kind != wanted_kind:
             continue
         items = by_kind.get(kind, [])

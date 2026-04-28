@@ -5,10 +5,6 @@ from __future__ import annotations
 from typing import Iterable
 
 from ..environment import (
-    DeclaredGpsdo,
-    DeclaredKiwi,
-    DeclaredRadiod,
-    DeclaredTimeSource,
     Delta,
     Environment,
     Observation,
@@ -101,69 +97,15 @@ def _host_from_endpoint(endpoint: str) -> str:
 
 
 def _classify_hints(kind: str, declared, good_obs: list) -> tuple:
-    """Apply per-kind `expect.*` hints.  Returns (status, detail)."""
-    if kind == "radiod" and isinstance(declared, DeclaredRadiod):
-        expect = declared.expect or {}
-        # Merge observed fields from all successful observations; later
-        # observations win.  Typical sources: mdns, multicast.
-        merged: dict = {}
-        for o in good_obs:
-            merged.update(o.fields)
-        for dotted_key, wanted in _flatten(expect).items():
-            actual = _dig(merged, dotted_key)
-            if actual is None:
-                continue                        # no signal either way; don't flag
-            if actual != wanted:
-                return "degraded", f"expect {dotted_key}={wanted!r} but observed {actual!r}"
+    """Apply per-kind `expect.*` hints.  Returns (status, detail).
+
+    Per-kind classifier logic now lives in ``environment_kinds.KindSpec``
+    next to the dataclass and TUI rendering for the same kind.  Kinds
+    without a registered classifier (or unknown kinds) default to
+    "healthy", "" — same as the old fall-through.
+    """
+    from ..environment_kinds import REGISTRY
+    spec = REGISTRY.get(kind)
+    if spec is None or spec.expect_classifier is None:
         return "healthy", ""
-
-    if kind == "kiwisdr" and isinstance(declared, DeclaredKiwi):
-        if declared.gps_expected:
-            merged = {}
-            for o in good_obs:
-                merged.update(o.fields)
-            gps = merged.get("gps_fix")
-            if gps is False:
-                return "degraded", "gps_expected=true but observed gps_fix=false"
-        return "healthy", ""
-
-    if kind == "time_source" and isinstance(declared, DeclaredTimeSource):
-        if declared.stratum_max:
-            merged = {}
-            for o in good_obs:
-                merged.update(o.fields)
-            stratum = merged.get("stratum")
-            if isinstance(stratum, int) and stratum > declared.stratum_max:
-                return "degraded", f"stratum {stratum} exceeds max {declared.stratum_max}"
-        return "healthy", ""
-
-    if kind == "gpsdo" and isinstance(declared, DeclaredGpsdo):
-        merged = {}
-        for o in good_obs:
-            merged.update(o.fields)
-        if merged.get("locked") is False:
-            return "degraded", "GPSDO reports unlocked"
-        return "healthy", ""
-
-    return "healthy", ""
-
-
-def _flatten(d: dict, prefix: str = "") -> dict:
-    """Flatten {'frontend': {'gpsdo_lock': True}} -> {'frontend.gpsdo_lock': True}."""
-    out: dict = {}
-    for k, v in (d or {}).items():
-        key = f"{prefix}.{k}" if prefix else k
-        if isinstance(v, dict):
-            out.update(_flatten(v, key))
-        else:
-            out[key] = v
-    return out
-
-
-def _dig(d: dict, dotted: str):
-    cur = d
-    for part in dotted.split("."):
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(part)
-    return cur
+    return spec.expect_classifier(declared, good_obs)

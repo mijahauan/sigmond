@@ -149,27 +149,26 @@ class Environment:
     def iter_declared(self):
         """Yield (kind, declared) for every declared peer.
 
-        local_system is only yielded when the operator has actually
-        declared something for it (a non-empty [local_system] block in
-        environment.toml).  An empty default DeclaredLocalSystem is
-        treated as "no local declaration" so it doesn't show up as a
-        phantom missing delta on every host.
+        Order and content are driven by the ``environment_kinds.REGISTRY``;
+        kinds with an ``iter_filter`` (currently only ``local_system``)
+        are skipped when the filter returns False.
         """
-        if _local_system_is_declared(self.local_system):
-            yield ("local_system", self.local_system)
-        for r in self.radiods:      yield ("radiod",      r)
-        for k in self.kiwisdrs:     yield ("kiwisdr",     k)
-        for g in self.gpsdos:       yield ("gpsdo",       g)
-        for t in self.time_sources: yield ("time_source", t)
-        for w in self.ka9q_webs:    yield ("ka9q_web",    w)
-        for v in self.gnss_vtecs:   yield ("gnss_vtec",   v)
-        for n in self.network_devices: yield ("network_device", n)
-        for q in self.igmp_queriers: yield ("igmp_querier", q)
-        for s in self.igmp_snoopers: yield ("igmp_snooper", s)
+        # Lazy import to avoid a circular import at module load time —
+        # environment_kinds imports from environment for the dataclasses.
+        from .environment_kinds import REGISTRY, ITER_ORDER
 
-
-def _local_system_is_declared(ls: "DeclaredLocalSystem") -> bool:
-    return bool(ls.cpu_affinity or ls.cpu_governor or ls.sdrs or ls.expect)
+        for kind_name in ITER_ORDER:
+            spec = REGISTRY[kind_name]
+            attr = getattr(self, spec.plural, None)
+            if attr is None:
+                continue
+            if spec.list_form:
+                for item in attr:
+                    yield (spec.name, item)
+            else:
+                # Single-table form (e.g. local_system).
+                if spec.iter_filter is None or spec.iter_filter(attr):
+                    yield (spec.name, attr)
 
 
 @dataclass
@@ -207,8 +206,20 @@ class EnvironmentView:
 # ---------------------------------------------------------------------------
 
 def load_environment(path: Path = ENVIRONMENT_PATH) -> Environment:
-    """Load environment.toml, or return an empty manifest when absent."""
+    """Load environment.toml, or return an empty manifest when absent.
+
+    Per-kind parsing is driven by ``environment_kinds.REGISTRY`` — each
+    spec carries the dict→dataclass parser, the TOML key, and whether the
+    section is array-of-tables (most kinds) or a single table
+    (``local_system``).  Adding a new kind no longer requires editing
+    this loader; just add a ``KindSpec`` entry.
+    """
     import tomllib
+
+    # Lazy import to avoid the circular dependency at module-import time
+    # (environment_kinds parsers reference Declared* dataclasses defined
+    # above in this module).
+    from .environment_kinds import REGISTRY
 
     if not path.exists():
         warn(f'No environment manifest at {path} — using empty manifest')
@@ -223,120 +234,19 @@ def load_environment(path: Path = ENVIRONMENT_PATH) -> Environment:
         description=str(site_raw.get('description', '') or ''),
     )
 
-    radiods = [
-        DeclaredRadiod(
-            id=str(r.get('id', '') or ''),
-            host=str(r.get('host', '') or ''),
-            status_dns=str(r.get('status_dns', '') or ''),
-            role=str(r.get('role', '') or ''),
-            expect=dict(r.get('expect', {}) or {}),
-        )
-        for r in (raw.get('radiod', []) or [])
-        if r.get('id')
-    ]
-
-    kiwis = [
-        DeclaredKiwi(
-            id=str(k.get('id', '') or ''),
-            host=str(k.get('host', '') or ''),
-            port=int(k.get('port', 8073) or 8073),
-            gps_expected=bool(k.get('gps_expected', False)),
-        )
-        for k in (raw.get('kiwisdr', []) or [])
-        if k.get('id')
-    ]
-
-    gpsdos = [
-        DeclaredGpsdo(
-            id=str(g.get('id', '') or ''),
-            kind=str(g.get('kind', '') or ''),
-            host=str(g.get('host', '') or ''),
-            authority_json=str(g.get('authority_json', '') or ''),
-            serves=list(g.get('serves', []) or []),
-        )
-        for g in (raw.get('gpsdo', []) or [])
-        if g.get('id')
-    ]
-
-    time_sources = [
-        DeclaredTimeSource(
-            id=str(t.get('id', '') or ''),
-            kind=str(t.get('kind', '') or ''),
-            host=str(t.get('host', '') or ''),
-            authority_json=str(t.get('authority_json', '') or ''),
-            stratum_max=int(t.get('stratum_max', 0) or 0),
-        )
-        for t in (raw.get('time_source', []) or [])
-        if t.get('id')
-    ]
-
-    ka9q_webs = [
-        DeclaredKa9qWeb(
-            id=str(w.get('id', '') or ''),
-            host=str(w.get('host', '') or ''),
-            port=int(w.get('port', 8080) or 8080),
-            role=str(w.get('role', '') or ''),
-            expect=dict(w.get('expect', {}) or {}),
-        )
-        for w in (raw.get('ka9q_web', []) or [])
-        if w.get('id')
-    ]
-
-    gnss_vtecs = [
-        DeclaredGnssVtec(
-            id=str(v.get('id', '') or ''),
-            host=str(v.get('host', '') or ''),
-            port=int(v.get('port', 8080) or 8080),
-            source=str(v.get('source', '') or ''),
-            expect=dict(v.get('expect', {}) or {}),
-        )
-        for v in (raw.get('gnss_vtec', []) or [])
-        if v.get('id')
-    ]
-
-    network_devices = [
-        DeclaredNetworkDevice(
-            id=str(n.get('id', '') or ''),
-            kind=str(n.get('kind', '') or ''),
-            host=str(n.get('host', '') or ''),
-            community=str(n.get('community', '') or ''),
-            expect=dict(n.get('expect', {}) or {}),
-        )
-        for n in (raw.get('network_device', []) or [])
-        if n.get('id')
-    ]
-
-    igmp_queriers = [
-        DeclaredIgmpQuerier(
-            id=str(q.get('id', '') or ''),
-            host=str(q.get('host', '') or ''),
-            interface=str(q.get('interface', '') or ''),
-            version=str(q.get('version', 'IGMPv3') or 'IGMPv3'),
-            expect=dict(q.get('expect', {}) or {}),
-        )
-        for q in (raw.get('igmp_querier', []) or [])
-        if q.get('id')
-    ]
-
-    igmp_snoopers = [
-        DeclaredIgmpSnooper(
-            id=str(s.get('id', '') or ''),
-            host=str(s.get('host', '') or ''),
-            interface=str(s.get('interface', '') or ''),
-            vlans=list(s.get('vlans', []) or []),
-            expect=dict(s.get('expect', {}) or {}),
-        )
-        for s in (raw.get('igmp_snooper', []) or [])
-        if s.get('id')
-    ]
-
-    local_system = DeclaredLocalSystem(
-        id="localhost",
-        cpu_affinity=list(raw.get('local_system', {}).get('cpu_affinity', []) or []),
-        cpu_governor=str(raw.get('local_system', {}).get('cpu_governor', '') or ''),
-        sdrs=list(raw.get('local_system', {}).get('sdrs', []) or []),
-        expect=dict(raw.get('local_system', {}).get('expect', {}) or {}),
-    )
+    # Drive every kind's parser from the registry.  Result lands in a
+    # by-plural dict so we can splat it into Environment(**kwargs) at the
+    # end without naming each plural here.
+    parsed: dict = {}
+    for spec in REGISTRY.values():
+        if spec.list_form:
+            rows = raw.get(spec.toml_key, []) or []
+            items = [obj for obj in (spec.parse(row) for row in rows)
+                     if obj is not None]
+            parsed[spec.plural] = items
+        else:
+            # Single-table form — pass the whole dict (or {} if absent).
+            parsed[spec.plural] = spec.parse(raw.get(spec.toml_key, {}) or {})
 
     d = raw.get('discovery', {}) or {}
     discovery = DiscoveryCfg(
@@ -348,16 +258,7 @@ def load_environment(path: Path = ENVIRONMENT_PATH) -> Environment:
 
     return Environment(
         site=site,
-        radiods=radiods,
-        kiwisdrs=kiwis,
-        gpsdos=gpsdos,
-        time_sources=time_sources,
-        ka9q_webs=ka9q_webs,
-        gnss_vtecs=gnss_vtecs,
-        network_devices=network_devices,
-        igmp_queriers=igmp_queriers,
-        igmp_snoopers=igmp_snoopers,
-        local_system=local_system,
         discovery=discovery,
         source_path=path,
+        **parsed,
     )

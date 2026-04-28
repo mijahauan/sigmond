@@ -247,40 +247,15 @@ class EnvironmentScreen(Vertical):
 
 
 def _declared_extra(kind: str, d) -> str:
-    if kind == "radiod":
-        return d.status_dns or "—"
-    if kind == "kiwisdr":
-        return f"port {d.port}"
-    if kind == "gpsdo":
-        return d.kind or "—"
-    if kind == "time_source":
-        bits = [d.kind]
-        if d.stratum_max:
-            bits.append(f"≤S{d.stratum_max}")
-        return " ".join(bits) or "—"
-    if kind == "ka9q_web":
-        bits = [f"port {d.port}"]
-        if d.role:
-            bits.append(d.role)
-        return " ".join(bits)
-    if kind == "gnss_vtec":
-        bits = [f"port {d.port}"]
-        if d.source:
-            bits.append(d.source)
-        return " ".join(bits)
-    if kind == "network_device":
-        return d.kind or "—"
-    if kind == "igmp_querier":
-        return d.version or "—"
-    if kind == "igmp_snooper":
-        if d.vlans:
-            return f"vlans={','.join(str(v) for v in d.vlans)}"
-        return d.interface or "—"
-    if kind == "local_system":
-        bits = []
-        if d.cpu_governor:
-            bits.append(d.cpu_governor)
-        if d.sdrs:
-            bits.append(f"{len(d.sdrs)} sdr(s)")
-        return " ".join(bits) or "—"
-    return "—"
+    """Render the per-kind extras column in the TUI.
+
+    Per-kind formatting now lives in
+    ``environment_kinds.REGISTRY[kind].tui_extra``; this function is
+    just a registry lookup.  Unknown kinds (or kinds without a TUI
+    renderer) fall back to the historical "—" placeholder.
+    """
+    from ...environment_kinds import REGISTRY
+    spec = REGISTRY.get(kind)
+    if spec is None or spec.tui_extra is None:
+        return "—"
+    return spec.tui_extra(d)
