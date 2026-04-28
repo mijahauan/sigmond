@@ -209,47 +209,14 @@ def _expand_template(
 
 
 def _find_deploy_toml(component: str) -> Optional[Path]:
-    """Find the deploy.toml for a component.
+    """Locate a component's deploy.toml.
 
-    Search order:
-    1. Via `<component> inventory --json` → deploy_toml_path field (v0.5)
-    2. Pattern A canonical: /opt/git/<component>/deploy.toml
-    3. None (use fallback)
+    Wave 2 promoted this lookup into ``sigmond.discover``; this thin
+    wrapper preserves the in-module symbol so existing tests that
+    monkeypatch ``sigmond.lifecycle._find_deploy_toml`` keep working.
     """
-    # Try via inventory first
-    try:
-        binary = shutil.which(component)
-        if binary:
-            result = subprocess.run(
-                [binary, "inventory", "--json"],
-                capture_output=True,
-                text=True,
-                timeout=5.0,
-                check=False,
-            )
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                if deploy_path := data.get('deploy_toml_path'):
-                    p = Path(deploy_path)
-                    if p.exists():
-                        return p
-    except (json.JSONDecodeError, subprocess.SubprocessError, OSError):
-        pass
-
-    # Try canonical location. Catch PermissionError so a component
-    # whose /opt/git/<name>/ is behind a restrictive permission mask
-    # (e.g. wsprdaemon-client -> /home/wsprdaemon/... at mode 700)
-    # doesn't abort the whole `smd list` for every other component.
-    # Returning None falls through to the shim fallback, which is the
-    # right answer when we can't read the install tree ourselves.
-    canonical = Path(f"/opt/git/{component}/deploy.toml")
-    try:
-        if canonical.exists():
-            return canonical
-    except PermissionError:
-        pass
-
-    return None
+    from .discover import find_deploy_toml
+    return find_deploy_toml(component)
 
 
 def _has_fallback_shim(component: str) -> bool:
@@ -351,56 +318,98 @@ def lifecycle_lock(reason: str = ""):
 # Start ordering (CONTRACT §5.4)
 # ---------------------------------------------------------------------------
 
+# Baseline priorities sigmond can rely on when the catalog is unreachable
+# or doesn't declare a value.  ``radiod`` has to start first regardless —
+# every other client multicasts off it.  An explicit ``start_priority`` in
+# any catalog entry (operator override or discovered deploy.toml) wins
+# against the baseline.
+_BASELINE_PRIORITIES: dict[str, int] = {
+    'radiod':     0,
+    'ka9q-radio': 0,
+}
+_DEFAULT_PRIORITY = 100
+
+
+def _component_priorities() -> dict[str, int]:
+    """Look up ``start_priority`` for every known component.
+
+    For each catalog entry, an explicit ``start_priority`` wins; otherwise
+    the baseline applies (radiod=0); otherwise the default (100).  Catalog
+    failures degrade gracefully — ordering still produces a sensible
+    result via the baseline.
+    """
+    priorities: dict[str, int] = dict(_BASELINE_PRIORITIES)
+    try:
+        from .catalog import load_catalog
+        catalog = load_catalog()
+    except Exception:
+        return priorities
+
+    for entry in catalog.values():
+        if entry.start_priority is None:
+            # Catalog didn't declare one — only the baseline (if it exists)
+            # carries weight here.  Anything outside the baseline gets the
+            # default at lookup time via dict.get(name, _DEFAULT_PRIORITY).
+            continue
+        priorities[entry.name] = entry.start_priority
+        if entry.topology_alias:
+            priorities[entry.topology_alias] = entry.start_priority
+    return priorities
+
+
 def order_units(
     units: list[UnitRef],
     coordination=None,
+    priorities: Optional[dict[str, int]] = None,
 ) -> list[UnitRef]:
-    """Order units for start: radiod first (if present), then clients in
-    coordination.toml declaration order.
+    """Order units for start, driven by per-component ``start_priority``.
+
+    Each component's priority comes from the catalog (which Wave 2 sources
+    primarily from each client's ``deploy.toml [client.lifecycle]
+    start_priority`` field).  ``radiod`` ships priority 0 (always first);
+    uploaders like ``wsprdaemon-client`` ship 900 (always last); everything
+    else defaults to 100.
 
     Args:
         units: Flat list of resolved UnitRefs (already orphan-filtered).
         coordination: A ``Coordination`` object (from coordination.py).
-            If provided, client ordering follows the ``clients`` list.
-            If None, non-radiod components sort alphabetically.
+            When two components share a priority, this provides a stable
+            tiebreaker — declaration order from coordination.toml wins
+            over alphabetical.
+        priorities: Optional explicit priority map (component name → int).
+            Tests pass this to avoid touching the on-disk catalog.
 
     Returns:
         New list with the same elements, reordered.
     """
+    if not units:
+        return []
+
+    if priorities is None:
+        priorities = _component_priorities()
+
     # Bucket units by component name.
     buckets: dict[str, list[UnitRef]] = {}
     for u in units:
         buckets.setdefault(u.component, []).append(u)
 
-    # Build the component ordering.
-    ordered_names: list[str] = []
-
-    # ka9q-radio always first (if present).
-    if 'ka9q-radio' in buckets:
-        ordered_names.append('ka9q-radio')
-
-    # Clients in coordination.toml declaration order.
+    # Tiebreaker order: components named in coordination.toml first
+    # (declaration order), then alphabetical.
+    coord_order: dict[str, int] = {}
     if coordination is not None and hasattr(coordination, 'clients'):
-        seen = set(ordered_names)
-        for ci in coordination.clients:
-            name = ci.client_type
-            if name not in seen and name in buckets:
-                ordered_names.append(name)
-                seen.add(name)
+        for idx, ci in enumerate(coordination.clients):
+            coord_order.setdefault(ci.client_type, idx)
 
-    # Anything remaining (not in coordination) goes last, alphabetically.
-    remaining = sorted(n for n in buckets if n not in set(ordered_names))
-    ordered_names.extend(remaining)
+    def _sort_key(name: str) -> tuple[int, int, str]:
+        priority = priorities.get(name, _DEFAULT_PRIORITY)
+        # Coordination-declared components win the secondary tier; they
+        # get index 0..N. Anything else gets a sentinel after them.
+        secondary = coord_order.get(name, len(coord_order) + 1)
+        return (priority, secondary, name)
 
-    # Flatten buckets in order.
+    ordered_names = sorted(buckets.keys(), key=_sort_key)
+
     result: list[UnitRef] = []
     for name in ordered_names:
         result.extend(buckets[name])
-
-    # Upload services (wd-upload-*) depend on decoders being active and must
-    # start last — systemd's resource checks fail if they race their producers.
-    upload = [u for u in result if u.unit.startswith('wd-upload-')]
-    if upload:
-        result = [u for u in result if not u.unit.startswith('wd-upload-')] + upload
-
     return result

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .clients import REGISTRY, load_adapter
+from .clients import load_adapter
 from .clients.base import ClientView
 from .coordination import Coordination, load_coordination
 from .environment import EnvironmentView
@@ -49,10 +49,10 @@ def build_system_view(topology: Optional[Topology] = None,
 
     client_views: dict = {}
     for comp in topo.enabled_components():
-        if comp not in REGISTRY:
-            continue
-        # hf-timestd appears under both 'grape' (legacy) and 'hf-timestd' keys;
-        # dedupe by reading each client type only once.
+        # load_adapter consults the bespoke REGISTRY first, then falls
+        # through to a generic ContractAdapter for any catalog entry with
+        # `contract` set — that's how Wave 2 clients get a ClientView
+        # without a per-name adapter module.
         adapter = load_adapter(comp)
         if adapter is None:
             continue

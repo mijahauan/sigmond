@@ -1,18 +1,30 @@
-"""Sigmond static catalog of known HamSCI clients.
+"""Sigmond catalog of known HamSCI clients.
 
 Answers "what clients could be installed on this host?" — independent of
 topology (what IS enabled) and lifecycle (what units resolve to what).
 
-The catalog is intentionally small and bounded.  Add a new entry to
-etc/catalog.toml when a new client joins the suite.
+Wave 2 architecture: the catalog has two sources.
+
+* **Primary — discovery.** ``load_catalog()`` (no path) globs every
+  ``/opt/git/*/deploy.toml`` and synthesizes a ``CatalogEntry`` from each
+  client's own manifest.  This is how a drop-in client author gets sigmond
+  to know about their client without editing any sigmond-side file.
+* **Override — etc/catalog.toml.** Layered on top of discovery so operators
+  can pin descriptions, repo URLs, or policy fields without editing a
+  clone.  Pre-clone descriptions (the "what could I install?" question) also
+  live here.
+
+Tests pass an explicit ``path=`` to read a single file; the
+``/opt/git`` glob only fires for the no-arg call.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import tomllib
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -29,7 +41,7 @@ DEFAULT_CATALOG_PATHS: tuple[Path, ...] = (
 class CatalogEntry:
     """A known client or server in the HamSCI suite."""
     name: str                                 # "psk-recorder"
-    kind: str                                 # "client" | "server"
+    kind: str                                 # "client" | "server" | "infra" | "library" | "manager"
     description: str
     repo: str                                 # git URL
     uses: tuple[str, ...] = ()                # shared Python/library deps
@@ -37,6 +49,10 @@ class CatalogEntry:
     contract: Optional[str] = None            # min contract version, None if N/A
     install_script: Optional[str] = None      # canonical installer path
     topology_alias: Optional[str] = None      # old topology name, e.g. "grape"
+    # Lifecycle start priority (smaller = earlier).  None means "not declared
+    # in the source TOML" — order_units then falls back to its baseline.
+    # 0 = radiod (always first), 100 = default, 900 = uploaders (last).
+    start_priority: Optional[int] = None
 
     def is_installed(self) -> bool:
         """Best-effort check that this entry is installed on the local host.
@@ -54,8 +70,7 @@ class CatalogEntry:
         # installed. Path.exists() would raise PermissionError from stat()
         # and abort the whole `smd list --available` before the Infra
         # section ever prints.
-        import os
-        if os.path.lexists(Path('/opt/git') / self.name):
+        if os.path.lexists(str(Path('/opt/git') / self.name)):
             return True
         if self.kind == 'library':
             # Importability from the current Python wins: sigmond runs
@@ -70,9 +85,13 @@ class CatalogEntry:
             except (ImportError, ValueError):
                 pass
             # Dev siblings: `git clone` location before packaging.
-            home = Path(os.path.expanduser('~'))
-            for candidate in (home / self.name, Path('/opt') / self.name):
-                if candidate.exists():
+            # Use os.path.lexists so test monkeypatches that stub out
+            # filesystem presence cover this branch consistently with
+            # the canonical /opt/git check above.
+            home = os.path.expanduser('~')
+            for candidate in (os.path.join(home, self.name),
+                              os.path.join('/opt', self.name)):
+                if os.path.lexists(candidate):
                     return True
         if self.install_script:
             return Path(self.install_script).exists()
@@ -103,39 +122,88 @@ def find_catalog_file() -> Optional[Path]:
     return None
 
 
+def _entry_from_toml_block(name: str, cfg: dict) -> CatalogEntry:
+    """Build a CatalogEntry from a ``[client.<name>]`` TOML block."""
+    raw_priority = cfg.get('start_priority')
+    return CatalogEntry(
+        name=name,
+        kind=cfg.get('kind', 'client'),
+        description=cfg.get('description', ''),
+        repo=cfg.get('repo', ''),
+        uses=tuple(cfg.get('uses', ())),
+        requires=tuple(cfg.get('requires', ())),
+        contract=cfg.get('contract') or None,
+        install_script=cfg.get('install_script') or None,
+        topology_alias=cfg.get('topology_alias') or None,
+        start_priority=int(raw_priority) if raw_priority is not None else None,
+    )
+
+
+def _load_catalog_file(path: Path) -> dict[str, CatalogEntry]:
+    with open(path, 'rb') as f:
+        data = tomllib.load(f)
+    entries: dict[str, CatalogEntry] = {}
+    for name, cfg in (data.get('client') or {}).items():
+        entries[name] = _entry_from_toml_block(name, cfg)
+    return entries
+
+
+def _synthesized_library_entries() -> dict[str, CatalogEntry]:
+    """Library entries that aren't in catalog.toml but production code
+    still needs to look up — primarily ka9q-python, which is pip-installed
+    into the sigmond venv and not a topology component.
+    """
+    return {
+        'ka9q-python': CatalogEntry(
+            name='ka9q-python',
+            kind='library',
+            description='Python interface for ka9q-radio control and monitoring',
+            repo='https://github.com/mijahauan/ka9q-python',
+            uses=(),
+            requires=(),
+            contract=None,
+            install_script=None,
+        ),
+    }
+
+
 def load_catalog(path: Optional[Path] = None) -> dict[str, CatalogEntry]:
     """Load the catalog, keyed by client name.
 
-    Args:
-        path: Explicit path, or None to use the default search order.
+    With an explicit ``path``: reads that single TOML file (single source).
+    With no path: discovers entries from /opt/git/*/deploy.toml, then
+    layers ``etc/catalog.toml`` on top as an operator override, and
+    finally adds synthesized library entries (ka9q-python).
 
     Raises:
-        FileNotFoundError: No catalog file found at any search location.
+        FileNotFoundError: An explicit path was given but does not exist,
+        or no catalog file is reachable in the default search locations.
     """
-    if path is None:
-        path = find_catalog_file()
-    if path is None or not path.exists():
+    if path is not None:
+        if not path.exists():
+            raise FileNotFoundError(
+                f"sigmond catalog not found: {path}"
+            )
+        return _load_catalog_file(path)
+
+    # Discovery primary.
+    from .discover import discover_catalog_entries
+    entries = discover_catalog_entries()
+
+    # catalog.toml override (entries here win against discovery).
+    catalog_file = find_catalog_file()
+    if catalog_file is None:
         raise FileNotFoundError(
             "sigmond catalog not found in any of: "
             + ", ".join(str(p) for p in DEFAULT_CATALOG_PATHS)
         )
+    entries.update(_load_catalog_file(catalog_file))
 
-    with open(path, 'rb') as f:
-        data = tomllib.load(f)
+    # Synthesized library entries — only added if not already declared
+    # by discovery or override.
+    for name, entry in _synthesized_library_entries().items():
+        entries.setdefault(name, entry)
 
-    entries: dict[str, CatalogEntry] = {}
-    for name, cfg in data.get('client', {}).items():
-        entries[name] = CatalogEntry(
-            name=name,
-            kind=cfg.get('kind', 'client'),
-            description=cfg.get('description', ''),
-            repo=cfg.get('repo', ''),
-            uses=tuple(cfg.get('uses', ())),
-            requires=tuple(cfg.get('requires', ())),
-            contract=cfg.get('contract') or None,
-            install_script=cfg.get('install_script') or None,
-            topology_alias=cfg.get('topology_alias') or None,
-        )
     return entries
 
 

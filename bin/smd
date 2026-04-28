@@ -1201,8 +1201,16 @@ def _install_single_client(args) -> int:
 
     entry = get_entry(client, catalog)
     if entry is None:
-        _err(f"unknown client '{client}' — see: smd list --available")
-        return 1
+        # Wave 2 fall-through: discover from /opt/git/<client>/deploy.toml.
+        # A drop-in client author who's already cloned their repo gets
+        # auto-discovered without any sigmond-side catalog edit.
+        from sigmond.discover import find_deploy_toml, synthesize_catalog_entry
+        deploy_path = find_deploy_toml(client)
+        if deploy_path is not None:
+            entry = synthesize_catalog_entry(deploy_path)
+        if entry is None:
+            _err(f"unknown client '{client}' — see: smd list --available")
+            return 1
 
     if not entry.install_script:
         # wd-rac is handled natively (frpc binary + ini + service).

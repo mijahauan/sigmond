@@ -36,14 +36,19 @@ class TestCloneRepo:
             assert cmd[0] == 'git' and cmd[1] == 'clone'
 
     def test_pulls_when_exists_and_requested(self, tmp_path):
+        """When pull_if_exists is True, advance the local checkout to
+        match origin's default branch.  Implementation uses fetch +
+        checkout -B (rather than git pull) so it survives a previously
+        pinned-ref detached-HEAD state — see clone_repo() for details."""
         repo = tmp_path / 'fake-client'
         repo.mkdir()
         entry = _entry()
         with mock.patch('sigmond.installer.subprocess.run') as m:
-            m.return_value = mock.Mock(returncode=0)
+            m.return_value = mock.Mock(returncode=0, stdout='origin/main\n')
             clone_repo(entry, base=tmp_path, pull_if_exists=True)
-            cmd = m.call_args[0][0]
-            assert 'pull' in cmd
+            invoked = [call_args[0][0] for call_args in m.call_args_list]
+            assert any('fetch' in cmd for cmd in invoked)
+            assert any('checkout' in cmd for cmd in invoked)
 
     def test_skips_when_exists_no_pull(self, tmp_path):
         repo = tmp_path / 'fake-client'
