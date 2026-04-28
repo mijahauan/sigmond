@@ -1592,16 +1592,16 @@ def cmd_apply(args) -> int:
         try:
             enabled = _enabled_components(topology)
             from sigmond.lifecycle import resolve_units as _resolve_units
+            all_units = [u for u in _resolve_units(enabled, enabled) if not u.orphaned]
             radiod_units = [
-                u for u in _resolve_units(enabled, enabled)
-                if not u.orphaned and u.component == 'ka9q-radio' and u.kind == 'service'
+                u for u in all_units
+                if u.component == 'ka9q-radio' and u.kind == 'service'
             ]
             if radiod_units:
                 _ensure_radiod_affinity_drop_ins(radiod_units, topology.get('cpu_affinity'))
-                # Ensure FFTW wisdom is ready before starting radiod.
-                # Returns False if wisdom is still being generated — in that
-                # case radiod (and its dependents) cannot start yet.
-                wisdom_ready = _ensure_fft_wisdom(radiod_units)
+                # Stop all managed services, generate/verify FFTW wisdom, then
+                # start radiod.  Returns False if wisdom is still in progress.
+                wisdom_ready = _ensure_fft_wisdom(radiod_units, all_units)
                 if wisdom_ready:
                     for u in radiod_units:
                         if _run(['systemctl', 'is-enabled', '--quiet', u.unit]).returncode != 0:
@@ -1650,13 +1650,17 @@ def cmd_apply(args) -> int:
 # transforms, so running with the full list is safe and fast when wisdom
 # is already current.  Source: ka9q-radio docs/FFTW3.md
 _FFT_WISDOM_PROFILES = [
-    'rof3240000',  # RX888 MkII @ 129.6 MHz, 20 ms block, overlap 5
-    'rof1620000',  # RX888 MkII @  64.8 MHz, 20 ms block, overlap 5
-    'rof500000',   # Airspy R2  @  20.0 MHz, 20 ms block, overlap 5
-    'cof36480',    # Airspy HF+ @ 912 kHz,   20 ms block, overlap 2
-    # Inverse FFTs for demodulator channels (fast to plan)
-    'cob1920', 'cob1200', 'cob960', 'cob800', 'cob600',
-    'cob480',  'cob320',  'cob300', 'cob200', 'cob160', 'cob150',
+    # Inverse FFTs for demodulator channels — smallest first (fast to plan)
+    'cob15',   'cob45',   'cob85',
+    'cob160',  'cob200',  'cob205',  'cob300',   'cob320',
+    'cob400',  'cob405',  'cob480',  'cob600',   'cob800',  'cob810',
+    'cob960',  'cob1200', 'cob1600', 'cob1620',  'cob1920',
+    'cob3200', 'cob3240', 'cob4800', 'cob4860',  'cob6930',
+    'cob8100', 'cob9600', 'cob16200', 'cob32400', 'cob40500',
+    'cob81000', 'cob162000',
+    # Forward real FFTs — progressively larger, most expensive last
+    'rof1620000',   # RX888 MkII @  64.8 MHz, 20 ms block, overlap 5
+    'rof3240000',   # RX888 MkII @ 129.6 MHz, 20 ms block, overlap 5  ← hours
 ]
 
 _FFTWF_WISDOM_BIN = Path('/usr/bin/fftwf-wisdom')
@@ -1696,8 +1700,11 @@ def _install_wisdom() -> None:
         _WISDOM_TMP.unlink(missing_ok=True)
 
 
-def _ensure_fft_wisdom(radiod_units: list) -> bool:
+def _ensure_fft_wisdom(radiod_units: list, all_units: list) -> bool:
     """Ensure FFTW wisdom is current for all supported ka9q-radio profiles.
+
+    Stops all sigmond-managed services before running the planner so they
+    don't compete for CPU during the (potentially hours-long) planning pass.
 
     Uses fftwf-wisdom with the full standard profile list.  Since fftwf-wisdom
     reads the existing wisdomf before planning, only missing transforms are
@@ -1718,6 +1725,13 @@ def _ensure_fft_wisdom(radiod_units: list) -> bool:
         _info(f'  Monitor:  tail -f {_WISDOM_LOG}')
         _info(f'  Re-run    sudo smd apply   when it completes.')
         return False
+
+    # Stop all managed services so they don't compete for CPU during planning.
+    _info('FFT wisdom: stopping all managed services before planning pass')
+    for u in reversed(all_units):
+        r = _run(['systemctl', 'is-active', '--quiet', u.unit])
+        if r.returncode == 0:
+            _run(['systemctl', 'stop', u.unit], sudo=True)
 
     _info(f'FFT wisdom: checking {len(_FFT_WISDOM_PROFILES)} profiles '
           f'(skips already-planned transforms — fast if wisdom is current)')
