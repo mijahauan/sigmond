@@ -53,8 +53,8 @@ AFFINITY_UNITS = {
     'wd-ka9q-web@.service':              'other',
     'wd-spool-clean.service':            'other',
     # sigmond infra group
-    'wd-remote-access.service': 'other',
-    'igmp-querier.service':     'other',
+    'wd-rac.service':       'other',
+    'igmp-querier.service': 'other',
     'gpsdo-monitor.service':    'other',
     'ka9q-web.service':         'other',
     # hf-timestd / grape group
