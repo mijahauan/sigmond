@@ -497,5 +497,149 @@ class TestRuleKernelRcvbufAdequate(unittest.TestCase):
         self.assertEqual(r.severity, "pass")
 
 
+class TestRuleKa9qPythonCompat(unittest.TestCase):
+    """rule_ka9q_python_compat compares ka9q-python's pinned ka9q-radio
+    SHA against the local ka9q-radio source checkout's HEAD."""
+
+    PIN = "d39fea8edbcb6214a2d5c63776f80134c679b24e"
+    OTHER = "1234567890abcdef1234567890abcdef12345678"
+
+    def setUp(self):
+        # Save and restore sys.modules so each test starts clean.
+        self._saved = {k: sys.modules.get(k) for k in ('ka9q', 'ka9q.compat')}
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    def _install_compat(self, sha):
+        import types
+        ka9q_pkg = types.ModuleType("ka9q")
+        compat_mod = types.ModuleType("ka9q.compat")
+        compat_mod.KA9Q_RADIO_COMMIT = sha
+        sys.modules['ka9q'] = ka9q_pkg
+        sys.modules['ka9q.compat'] = compat_mod
+
+    def _uninstall_compat(self):
+        sys.modules.pop('ka9q.compat', None)
+        sys.modules.pop('ka9q', None)
+
+    def _fake_repo(self, tmp_path, sha):
+        """Lay out a minimal .git tree resolving HEAD → sha."""
+        repo = tmp_path / 'ka9q-radio'
+        (repo / '.git' / 'refs' / 'heads').mkdir(parents=True)
+        (repo / '.git' / 'HEAD').write_text("ref: refs/heads/main\n")
+        (repo / '.git' / 'refs' / 'heads' / 'main').write_text(sha + "\n")
+        return repo
+
+    def test_skipped_when_ka9q_python_not_importable(self):
+        from sigmond.harmonize import rule_ka9q_python_compat
+        self._uninstall_compat()
+        # Make sure no real ka9q is on the path either by ensuring the
+        # import attempt fails cleanly.  In dev envs ka9q may actually
+        # be importable — patch sys.modules to mask it.
+        sys.modules['ka9q.compat'] = None  # forces ImportError on import
+        try:
+            r = rule_ka9q_python_compat(_make_view(Coordination()))
+        finally:
+            sys.modules.pop('ka9q.compat', None)
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("not importable", r.message)
+
+    def test_skipped_when_pin_empty(self):
+        from sigmond.harmonize import rule_ka9q_python_compat
+        self._install_compat("")
+        r = rule_ka9q_python_compat(_make_view(Coordination()))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("empty", r.message)
+
+    def test_skipped_when_pin_unknown(self):
+        from sigmond.harmonize import rule_ka9q_python_compat
+        self._install_compat("unknown")
+        r = rule_ka9q_python_compat(_make_view(Coordination()))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("empty", r.message)
+
+    def test_skipped_when_no_source_dir(self):
+        from sigmond.harmonize import rule_ka9q_python_compat
+        import sigmond.harmonize as harm_mod
+        self._install_compat(self.PIN)
+        original = harm_mod._ka9q_radio_source_dir
+        harm_mod._ka9q_radio_source_dir = lambda: None
+        try:
+            r = rule_ka9q_python_compat(_make_view(Coordination()))
+        finally:
+            harm_mod._ka9q_radio_source_dir = original
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("no ka9q-radio source checkout", r.message)
+
+    def test_pass_when_pin_matches_head(self):
+        from sigmond.harmonize import rule_ka9q_python_compat
+        import sigmond.harmonize as harm_mod
+        import tempfile
+        self._install_compat(self.PIN)
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._fake_repo(Path(td), self.PIN)
+            original = harm_mod._ka9q_radio_source_dir
+            harm_mod._ka9q_radio_source_dir = lambda: repo
+            try:
+                r = rule_ka9q_python_compat(_make_view(Coordination()))
+            finally:
+                harm_mod._ka9q_radio_source_dir = original
+        self.assertEqual(r.severity, "pass")
+        self.assertIn(self.PIN[:12], r.message)
+
+    def test_warn_when_pin_drifts_from_head(self):
+        from sigmond.harmonize import rule_ka9q_python_compat
+        import sigmond.harmonize as harm_mod
+        import tempfile
+        self._install_compat(self.PIN)
+        coord = Coordination(
+            radiods={"k3lr": Radiod(id="k3lr")},
+            clients=[ClientInstance("hf-timestd", "default", radiod_id="k3lr"),
+                     ClientInstance("psk-recorder", "default", radiod_id="k3lr")],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._fake_repo(Path(td), self.OTHER)
+            original = harm_mod._ka9q_radio_source_dir
+            harm_mod._ka9q_radio_source_dir = lambda: repo
+            try:
+                r = rule_ka9q_python_compat(_make_view(coord))
+            finally:
+                harm_mod._ka9q_radio_source_dir = original
+        self.assertEqual(r.severity, "warn")
+        # Both SHAs (12-char prefixes) appear in the message.
+        self.assertIn(self.PIN[:12], r.message)
+        self.assertIn(self.OTHER[:12], r.message)
+        # Affected clients carry through to the rule result.
+        self.assertEqual(set(r.affected), {"hf-timestd", "psk-recorder"})
+
+    def test_git_head_handles_packed_refs(self):
+        """If refs/heads/<branch> isn't a loose file, fall back to packed-refs."""
+        from sigmond.harmonize import _git_head
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / 'r'
+            (repo / '.git').mkdir(parents=True)
+            (repo / '.git' / 'HEAD').write_text("ref: refs/heads/main\n")
+            (repo / '.git' / 'packed-refs').write_text(
+                f"# pack-refs with: peeled fully-peeled sorted\n"
+                f"{self.PIN} refs/heads/main\n"
+            )
+            self.assertEqual(_git_head(repo), self.PIN)
+
+    def test_git_head_handles_detached(self):
+        from sigmond.harmonize import _git_head
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / 'r'
+            (repo / '.git').mkdir(parents=True)
+            (repo / '.git' / 'HEAD').write_text(self.PIN + "\n")
+            self.assertEqual(_git_head(repo), self.PIN)
+
+
 if __name__ == "__main__":
     unittest.main()

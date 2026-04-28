@@ -122,8 +122,6 @@ smd environment list|probe|describe   Situational awareness of network peers
   settings editors with live probing.
 - **Start ordering validation** — warn if clients declare cross-client
   After=/Requires= systemd dependencies.
-- **ka9q-python compat tracking** — `smd validate` rule to check that
-  ka9q-python's `ka9q_radio_compat` hash matches the installed radiod version.
 
 ## Topology registry
 

@@ -491,6 +491,128 @@ def rule_kernel_rcvbuf_adequate(view: SystemView) -> RuleResult:
     )
 
 
+def _ka9q_radio_source_dir() -> Optional[Path]:
+    """Locate a ka9q-radio source checkout on the local host.
+
+    Tries the canonical Pattern A path first, then the per-user dev
+    sibling.  Returns the first one that contains a ``.git`` dir.
+    Returns None if neither is present (the rule then skips cleanly).
+    """
+    import os
+    home = os.path.expanduser('~')
+    for candidate in (Path('/opt/git/ka9q-radio'),
+                      Path(home) / 'ka9q-radio'):
+        if (candidate / '.git').exists():
+            return candidate
+    return None
+
+
+def _git_head(repo_dir: Path) -> Optional[str]:
+    """Read HEAD's full SHA from a git checkout without spawning git.
+
+    Pure-stdlib so this works in sigmond's headless-first environment
+    even if /usr/bin/git is missing.  Returns None on any error.
+    """
+    head_path = repo_dir / '.git' / 'HEAD'
+    try:
+        head_text = head_path.read_text().strip()
+    except OSError:
+        return None
+    if head_text.startswith('ref: '):
+        ref_path = repo_dir / '.git' / head_text[5:]
+        try:
+            return ref_path.read_text().strip()
+        except OSError:
+            # Packed refs fallback.
+            try:
+                packed = (repo_dir / '.git' / 'packed-refs').read_text()
+            except OSError:
+                return None
+            target_ref = head_text[5:]
+            for line in packed.splitlines():
+                if line.endswith(' ' + target_ref):
+                    return line.split(' ', 1)[0].strip()
+            return None
+    # Detached HEAD — text is the SHA itself.
+    if len(head_text) >= 40 and all(c in '0123456789abcdef' for c in head_text[:40]):
+        return head_text
+    return None
+
+
+def rule_ka9q_python_compat(view: SystemView) -> RuleResult:
+    """Verify ka9q-python's pinned ka9q-radio commit matches the local
+    ka9q-radio source HEAD.
+
+    ka9q-python ships ``ka9q.compat.KA9Q_RADIO_COMMIT`` — the SHA
+    against which ``ka9q/types.py`` was last validated by
+    ``scripts/sync_types.py --apply`` (parsing C enum headers from
+    ka9q-radio).  Drift here means Python clients (psk-recorder,
+    wspr-recorder, hf-timestd, hfdl-recorder) decode wire-protocol
+    enums against the wrong commit's headers — silent breakage at
+    decode time.
+
+    Both directions are real: an operator who ``git pull && make
+    install``s ka9q-radio without re-syncing ka9q-python, AND a
+    ka9q-python pin bump that hasn't been followed by a ka9q-radio
+    rebuild yet, both produce drift.  Severity is ``warn`` rather than
+    ``fail`` because operators are sometimes legitimately mid-upgrade.
+    """
+    try:
+        from ka9q.compat import KA9Q_RADIO_COMMIT  # noqa: F401
+    except ImportError:
+        return RuleResult(
+            "ka9q_python_compat", "pass",
+            "skipped: ka9q-python not importable from sigmond's Python", [],
+        )
+    expected = KA9Q_RADIO_COMMIT
+    if not expected or expected == "unknown":
+        return RuleResult(
+            "ka9q_python_compat", "pass",
+            "skipped: ka9q-python pin is empty/unknown", [],
+        )
+
+    source_dir = _ka9q_radio_source_dir()
+    if source_dir is None:
+        return RuleResult(
+            "ka9q_python_compat", "pass",
+            "skipped: no ka9q-radio source checkout found at "
+            "/opt/git/ka9q-radio or ~/ka9q-radio", [],
+        )
+    actual = _git_head(source_dir)
+    if actual is None:
+        return RuleResult(
+            "ka9q_python_compat", "pass",
+            f"skipped: cannot resolve HEAD of {source_dir}", [],
+        )
+
+    affected = sorted({c.client_type for c in view.coordination.clients})
+
+    if actual.startswith(expected) or expected.startswith(actual):
+        return RuleResult(
+            "ka9q_python_compat", "pass",
+            f"ka9q-radio HEAD {actual[:12]} matches ka9q-python pin",
+            [],
+        )
+
+    remediation = (
+        "If ka9q-radio is the source of truth: rerun "
+        "`ka9q-update/install-ka9q.sh` (it pins ka9q-radio to "
+        f"ka9q-python's expected commit {expected[:12]}). "
+        "If ka9q-python should advance: run "
+        "`python scripts/sync_types.py --apply` in ka9q-python against "
+        f"the new ka9q-radio at {actual[:12]}, commit, then "
+        "rerun the installer."
+    )
+    return RuleResult(
+        "ka9q_python_compat", "warn",
+        f"ka9q-python pin expects ka9q-radio at {expected[:12]} "
+        f"but {source_dir} HEAD is {actual[:12]}.  "
+        f"Python clients may decode wire-protocol enums against the "
+        f"wrong header revision.  {remediation}",
+        affected,
+    )
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_frequency_coverage,
@@ -498,6 +620,7 @@ ALL_RULES = [
     rule_timing_chain,
     rule_disk_budget,
     rule_channel_count,
+    rule_ka9q_python_compat,
 ]
 
 # Rules that read live /sys, /proc, and systemctl state.  Kept out of
