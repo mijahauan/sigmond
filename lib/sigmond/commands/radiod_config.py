@@ -150,16 +150,52 @@ def cmd_radiod_init(args) -> int:
     print()
     _append_coordination(coord_blocks, args)
 
+    # Auto-apply each enabled client's [[radiod.fragment]] block to the
+    # freshly-created instances (CONTRACT v0.5 §15).  Operators no longer
+    # have to remember "now drop psk-recorder/wspr-recorder/... fragments
+    # into .conf.d/"; sigmond stages them straight from each client's
+    # deploy.toml.  Best-effort — failures degrade to a warning.
+    print()
+    _apply_fragments_for_new_instances(written)
+
     print()
     ok(f"radiod ready: wrote {len(written)} config(s)")
     info("Next steps:")
-    info("  1. Drop client channel fragments into the .conf.d/ dirs above")
-    info("     (psk-recorder, wspr-recorder, hfdl-recorder, hf-timestd "
-         "each install their own).")
-    info("  2. Start radiod:  sudo systemctl enable --now "
+    info("  1. Start radiod:  sudo systemctl enable --now "
          "radiod@<id>.service")
-    info("  3. Configure clients:  smd config init <client> [<instance>]")
+    info("  2. Configure clients:  smd config init <client> [<instance>]")
     return 0
+
+
+def _apply_fragments_for_new_instances(written: list[Path]) -> None:
+    """For each radiod@<id>.conf just written, apply enabled clients'
+    [[radiod.fragment]] blocks scoped to that instance.  Quiet when no
+    fragments are declared anywhere — that's the common case today."""
+    try:
+        from .radiod_fragments import apply_fragments
+        from ..coordination import load_coordination
+        from ..paths import COORDINATION_PATH, TOPOLOGY_PATH
+        from ..topology import load_topology
+    except ImportError:
+        return
+
+    try:
+        coord = load_coordination(COORDINATION_PATH)
+        topology = load_topology(TOPOLOGY_PATH)
+        enabled = topology.enabled_components()
+    except (OSError, FileNotFoundError):
+        return
+
+    for target in written:
+        # target stem is "radiod@<id>"; pull the <id> back out
+        rid = target.stem.split('@', 1)[1] if '@' in target.stem else target.stem
+        msgs = apply_fragments(coord, list(enabled), radiod_id=rid)
+        for msg in msgs:
+            stripped = msg.strip()
+            if stripped.startswith('warning'):
+                warn(stripped)
+            else:
+                info(stripped)
 
 
 def cmd_radiod_edit(args) -> int:

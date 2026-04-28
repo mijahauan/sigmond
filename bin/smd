@@ -1565,6 +1565,26 @@ def cmd_apply(args) -> int:
         except Exception:
             pass  # non-fatal
 
+    # Apply radiod channel fragments declared by enabled clients before the
+    # ensure-running block — so fragments are in place when each radiod
+    # instance starts (or restarts) and picks up its conf.d/ contents.
+    if _HAS_SIGMOND_LIB:
+        try:
+            from sigmond.commands.radiod_fragments import apply_fragments
+            from sigmond.coordination import load_coordination
+            from sigmond.paths import COORDINATION_PATH
+            coord = load_coordination(COORDINATION_PATH)
+            enabled = _enabled_components(topology)
+            for msg in apply_fragments(coord, enabled, dry_run=dry_run):
+                if msg.lstrip().startswith('warning'):
+                    _warn(msg.lstrip())
+                elif not msg.lstrip().startswith('(dry'):
+                    _ok(f'radiod fragment: {msg.strip()}')
+                else:
+                    _info(f'radiod fragment: {msg.strip()}')
+        except Exception:
+            pass  # non-fatal — fragments are best-effort
+
     # Write radiod CPU affinity drop-ins and ensure radiod is running BEFORE
     # wd-ctl apply so radiod cores are reserved and streams are available
     # before decoders try to connect.

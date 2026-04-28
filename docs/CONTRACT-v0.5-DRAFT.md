@@ -587,6 +587,117 @@ to compose a sensible default.
 
 ---
 
+## §15. Radiod channel contributions (v0.5, NEW)
+
+Radiod is upstream of every HamSCI client: clients consume multicast
+streams from `radiod@<id>`, but they don't run radiod themselves. Most
+clients also need radiod to *create* a multicast channel for them
+(WSPR, FT4, FT8, HFDL, WWV/CHU, ...) — that's typically a small section
+appended to `radiod@<id>.conf` or, more cleanly, a fragment file in
+`radiod@<id>.conf.d/`.
+
+Before v0.5 each client's `install.sh` wrote its own fragment by hand.
+Conventions diverged, the operator had to re-run client installers
+whenever a new radiod instance was provisioned, and there was no
+sigmond-side awareness of who-contributes-what. v0.5 gives clients a
+declarative way to say "I need this channel on these radiods" — sigmond
+applies the result.
+
+### 15.1 Declaration
+
+A client author adds zero or more `[[radiod.fragment]]` blocks to its
+`deploy.toml`:
+
+```toml
+[[radiod.fragment]]
+priority = 30                                # NN in <NN>-<client>.conf (00-99)
+target   = "${RADIOD_ID}"                    # "*", a literal id, or ${VAR}
+template = "etc/radiod-fragment.conf"        # path inside the client repo
+```
+
+| Field      | Required | Notes                                                                      |
+|------------|----------|----------------------------------------------------------------------------|
+| `priority` | no       | Default 50. Smaller = earlier in radiod's load order.                      |
+| `target`   | no       | Default `"*"` (every declared radiod). May be a literal id or `${RADIOD_ID}`.|
+| `template` | yes      | Path inside the repo. `${VAR}` interpolation against the variable bag below. |
+
+The legacy spelling `content_template` is accepted as an alias for
+`template` so prototype clients don't have to flag-day rename.
+
+### 15.2 Variable bag
+
+Templates are rendered with stdlib `string.Template` (`${VAR}`
+interpolation). Unknown variables are left in place as literal
+`${UNKNOWN}` — `safe_substitute` semantics — so a typo is visible at the
+output rather than crashing the apply.
+
+| Variable          | Source                                       |
+|-------------------|----------------------------------------------|
+| `RADIOD_ID`       | the target radiod instance id                |
+| `RADIOD_HOST`     | `coordination.toml` `[[radiod]] host`        |
+| `RADIOD_STATUS`   | `coordination.toml` `[[radiod]] status_dns`  |
+| `RADIOD_SAMPRATE` | `coordination.toml` `[[radiod]] samprate_hz` |
+| `STATION_CALL`    | `coordination.toml` `[host] call`            |
+| `STATION_GRID`    | `coordination.toml` `[host] grid`            |
+| `STATION_LAT`     | `coordination.toml` `[host] lat`             |
+| `STATION_LON`     | `coordination.toml` `[host] lon`             |
+
+### 15.3 Apply path
+
+Sigmond writes each rendered fragment to:
+
+```
+/etc/radio/radiod@<id>.conf.d/<NN>-<client>.conf
+```
+
+The applier runs:
+
+1. During `smd apply`, before the radiod ensure-running block — so
+   fragments are in place when each radiod instance starts (or
+   restarts) and picks up its `conf.d/` contents.
+2. During `smd config init radiod`, scoped to the freshly-created
+   instance — so a brand-new radiod inherits every enabled client's
+   fragments without a separate command.
+
+The apply is idempotent (sha256 compare against existing content) and
+supports `--dry-run`. Failures (missing template, unparseable
+deploy.toml, target id not declared in coordination.toml) degrade into
+`warning:`-prefixed status lines; the rest of `smd apply` continues.
+
+### 15.4 Target resolution
+
+| `target`           | Behaviour                                              |
+|--------------------|--------------------------------------------------------|
+| `"*"`              | every declared radiod                                  |
+| `"${RADIOD_ID}"`   | every declared radiod (variable filled in per-write)   |
+| `"<literal-id>"`   | only that radiod, if declared in coordination.toml     |
+| anything else      | `warning:` line, no write                              |
+
+A fragment that does not resolve to any declared radiod produces a
+warning. This is intentional — silently dropping the contribution would
+mask a misconfigured client.
+
+### 15.5 Migration
+
+Clients that today install fragments via their own `install.sh` should:
+
+1. Move the fragment body to a template file in the repo (e.g.
+   `etc/radiod-fragment.conf`).
+2. Rewrite the parts that depend on `RADIOD_ID` / call / grid / etc. as
+   `${VAR}` placeholders.
+3. Add a `[[radiod.fragment]]` block to `deploy.toml`.
+4. Drop the fragment-write code from `install.sh` — it becomes
+   sigmond's responsibility.
+
+Sigmond's apply is idempotent, so a half-migrated client (`install.sh`
+still writes the same fragment that sigmond would write) keeps working
+during the transition. Once `install.sh` stops writing, future operator
+edits to the conf.d/ file will be replaced on the next `smd apply` —
+which is the right behaviour: the deploy.toml is now the source of
+truth.
+
+---
+
 ## §3 amendment (expanded)
 
 `<client> inventory --json` adds two new fields per instance:
