@@ -1598,23 +1598,27 @@ def cmd_apply(args) -> int:
             ]
             if radiod_units:
                 _ensure_radiod_affinity_drop_ins(radiod_units, topology.get('cpu_affinity'))
-                # Ensure each radiod instance is enabled (survives reboot) and
-                # currently running.  wd-ctl decoders need radiod streams to exist.
-                for u in radiod_units:
-                    if _run(['systemctl', 'is-enabled', '--quiet', u.unit]).returncode != 0:
-                        _run(['systemctl', 'enable', u.unit], sudo=True)
-                    r_active = _run(['systemctl', 'is-active', '--quiet', u.unit])
-                    if r_active.returncode != 0:
-                        r_start = _run(['systemctl', 'start', u.unit], sudo=True)
-                        if r_start.returncode == 0:
-                            _ok(f'{u.unit}: enabled and started')
+                # Ensure FFTW wisdom is ready before starting radiod.
+                # Returns False if wisdom is still being generated — in that
+                # case radiod (and its dependents) cannot start yet.
+                wisdom_ready = _ensure_fft_wisdom(radiod_units)
+                if wisdom_ready:
+                    for u in radiod_units:
+                        if _run(['systemctl', 'is-enabled', '--quiet', u.unit]).returncode != 0:
+                            _run(['systemctl', 'enable', u.unit], sudo=True)
+                        r_active = _run(['systemctl', 'is-active', '--quiet', u.unit])
+                        if r_active.returncode != 0:
+                            r_start = _run(['systemctl', 'start', u.unit], sudo=True)
+                            if r_start.returncode == 0:
+                                _ok(f'{u.unit}: enabled and started')
+                            else:
+                                _warn(f'{u.unit}: failed to start — {r_start.stderr.strip()}')
                         else:
-                            _warn(f'{u.unit}: failed to start — {r_start.stderr.strip()}')
-                    else:
-                        _info(f'{u.unit}: already running')
-                # Check fft.log for unplanned transforms and launch fft-gen
-                # in the background if needed.
-                _ensure_radiod_fft_wisdom(radiod_units)
+                            _info(f'{u.unit}: already running')
+                else:
+                    _warn('radiod not started — FFT wisdom not yet ready')
+                    _warn('wd-decode, wd-post, wd-upload will have no data until '
+                          'wisdom completes and you re-run: sudo smd apply')
         except Exception:
             pass  # non-fatal; affinity is best-effort
 
@@ -1637,77 +1641,154 @@ def cmd_apply(args) -> int:
     return 0 if ok else 1
 
 
-def _ensure_radiod_fft_wisdom(radiod_units: list) -> None:
-    """Check /var/lib/ka9q-radio/fft.log for unplanned FFT transforms and,
-    if any are found, launch ka9q-radio's fft-gen tool as a background
-    systemd transient service.  When generation completes the wisdom file
-    is updated and each radiod instance is restarted so it loads the new
-    plan on next startup.
+# ---------------------------------------------------------------------------
+# FFTW wisdom management
+# ---------------------------------------------------------------------------
 
-    fft.log is truncated after a successful run so subsequent apply calls
-    don't re-trigger generation unnecessarily.
+# Complete profile list for wsprdaemon/ka9q-radio SDR configurations.
+# fftwf-wisdom reads the existing wisdomf first and skips already-planned
+# transforms, so running with the full list is safe and fast when wisdom
+# is already current.  Source: ka9q-radio docs/FFTW3.md
+_FFT_WISDOM_PROFILES = [
+    'rof3240000',  # RX888 MkII @ 129.6 MHz, 20 ms block, overlap 5
+    'rof1620000',  # RX888 MkII @  64.8 MHz, 20 ms block, overlap 5
+    'rof500000',   # Airspy R2  @  20.0 MHz, 20 ms block, overlap 5
+    'cof36480',    # Airspy HF+ @ 912 kHz,   20 ms block, overlap 2
+    # Inverse FFTs for demodulator channels (fast to plan)
+    'cob1920', 'cob1200', 'cob960', 'cob800', 'cob600',
+    'cob480',  'cob320',  'cob300', 'cob200', 'cob160', 'cob150',
+]
+
+_FFTWF_WISDOM_BIN = Path('/usr/bin/fftwf-wisdom')
+_WISDOM_FILE      = Path('/etc/fftw/wisdomf')
+_WISDOM_TMP       = Path('/etc/fftw/wisdomf.new')
+_WISDOM_LOG       = Path('/tmp/ka9q-wisdom.log')
+_WISDOM_PID       = Path('/var/run/ka9q-fft-wisdom.pid')
+
+
+def _wisdom_already_running() -> bool:
+    """Return True if a fftwf-wisdom process from a previous smd run is still alive."""
+    if not _WISDOM_PID.exists():
+        return False
+    try:
+        pid = int(_WISDOM_PID.read_text().strip())
+        Path(f'/proc/{pid}').stat()   # raises OSError if gone
+        return True
+    except (ValueError, OSError):
+        _WISDOM_PID.unlink(missing_ok=True)
+        return False
+
+
+def _install_wisdom() -> None:
+    """Atomically install wisdomf.new → wisdomf if it grew (sanity check)."""
+    if not _WISDOM_TMP.exists():
+        return
+    new_size = _WISDOM_TMP.stat().st_size
+    if new_size == 0:
+        _WISDOM_TMP.unlink(missing_ok=True)
+        return
+    old_size = _WISDOM_FILE.stat().st_size if _WISDOM_FILE.exists() else 0
+    if new_size >= old_size:
+        _run(['mv', str(_WISDOM_TMP), str(_WISDOM_FILE)], sudo=True)
+        _ok(f'FFT wisdom: installed {new_size} bytes → {_WISDOM_FILE}')
+    else:
+        _warn(f'New wisdom ({new_size} B) smaller than existing ({old_size} B) — keeping old')
+        _WISDOM_TMP.unlink(missing_ok=True)
+
+
+def _ensure_fft_wisdom(radiod_units: list) -> bool:
+    """Ensure FFTW wisdom is current for all supported ka9q-radio profiles.
+
+    Uses fftwf-wisdom with the full standard profile list.  Since fftwf-wisdom
+    reads the existing wisdomf before planning, only missing transforms are
+    computed — already-planned ones complete in milliseconds.
+
+    Behavior:
+      • If all profiles finish within 5 s → installs wisdomf, returns True.
+      • If still running after 5 s → tails the log so the operator can watch.
+        Ctrl+C stops the tail; generation continues in background.
+        Returns False → caller must skip radiod and all dependent service starts.
+      • If called while a previous generation is still running → returns False.
     """
-    fft_log     = Path('/var/lib/ka9q-radio/fft.log')
-    fft_gen_bin = Path('/usr/local/bin/fft-gen')
-    UNIT_NAME   = 'ka9q-fft-wisdom'
+    if not _FFTWF_WISDOM_BIN.exists():
+        return True   # tool not present; don't block
 
-    if not fft_gen_bin.exists():
-        return
-    if not fft_log.exists() or fft_log.stat().st_size == 0:
-        return
+    if _wisdom_already_running():
+        _warn('FFT wisdom: generation still in progress from a previous run')
+        _info(f'  Monitor:  tail -f {_WISDOM_LOG}')
+        _info(f'  Re-run    sudo smd apply   when it completes.')
+        return False
+
+    _info(f'FFT wisdom: checking {len(_FFT_WISDOM_PROFILES)} profiles '
+          f'(skips already-planned transforms — fast if wisdom is current)')
+
+    with open(_WISDOM_LOG, 'w') as log_f:
+        proc = subprocess.Popen(
+            [str(_FFTWF_WISDOM_BIN), '-v', '-T', '1',
+             '-o', str(_WISDOM_TMP)] + _FFT_WISDOM_PROFILES,
+            stdout=log_f, stderr=subprocess.STDOUT,
+            start_new_session=True,   # insulate from terminal Ctrl+C
+        )
 
     try:
-        transforms = sorted({t.strip() for t in fft_log.read_text().splitlines()
-                              if t.strip()})
-    except Exception:
-        return
-    if not transforms:
-        return
+        _WISDOM_PID.write_text(str(proc.pid))
+    except OSError:
+        pass
 
-    # Don't start a second generation if one is already running.
-    if _run(['systemctl', 'is-active', '--quiet', f'{UNIT_NAME}.service']).returncode == 0:
-        _info(f'FFT wisdom: generation already in progress ({UNIT_NAME}.service)')
-        return
+    # Wait up to 5 s — fast if wisdom is already current
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
 
-    restart_cmd = ' && '.join(f'systemctl restart {u.unit}' for u in radiod_units)
-    shell = (
-        f'{fft_gen_bin} --patient {" ".join(transforms)}'
-        f' && truncate -s0 {fft_log}'
-        + (f' && {restart_cmd}' if restart_cmd else '')
-    )
+    if proc.returncode is not None:
+        # Completed within 5 s
+        _WISDOM_PID.unlink(missing_ok=True)
+        if proc.returncode == 0:
+            _install_wisdom()
+        else:
+            _warn(f'fftwf-wisdom exited {proc.returncode} — check {_WISDOM_LOG}')
+        return True
 
-    # Confine fft-gen to the non-radiod CPU pool so it doesn't compete with
-    # radiod on its reserved cores.
-    affinity_prop = []
-    if _HAS_SIGMOND_LIB:
+    # Still running — show live output until done or Ctrl+C
+    _warn('FFT wisdom planning is taking longer than 5 s '
+          '(normal for large transforms like rof3240000 on first run).')
+    _info(f'  This can take hours for the RX888 @ 129.6 MHz transform.')
+    _info(f'  Showing live output.  '
+          'Press Ctrl+C to stop watching — planning continues in background.')
+    _info(f'  Until complete, radiod and all dependent services cannot start.')
+    _info('')
+
+    tail = subprocess.Popen(['tail', '-f', str(_WISDOM_LOG)])
+    wisdom_done = False
+    try:
+        proc.wait()
+        wisdom_done = True
+    except KeyboardInterrupt:
+        pass
+    finally:
+        tail.terminate()
         try:
-            from sigmond.cpu import compute_affinity_plan as _cplan
-            plan = _cplan()
-            if plan.other_cpus:
-                cpus_str = ' '.join(str(c) for c in sorted(plan.other_cpus))
-                affinity_prop = [f'-p=CPUAffinity={cpus_str}']
-        except Exception:
-            pass
+            tail.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            tail.kill()
 
-    _warn(f'FFT wisdom: {len(transforms)} transform(s) need planning — '
-          f'{", ".join(transforms)}')
-    _info(f'  Launching fft-gen --patient in background (may take several minutes).')
-    _info(f'  Monitor:  journalctl -u {UNIT_NAME} -f')
-    _info(f'  radiod will restart automatically when wisdom is ready.')
+    if wisdom_done:
+        _WISDOM_PID.unlink(missing_ok=True)
+        if proc.returncode == 0:
+            _install_wisdom()
+            _ok('FFT wisdom: generation complete — restarting radiod')
+            for u in radiod_units:
+                _run(['systemctl', 'restart', u.unit], sudo=True)
+            return True
+        _warn(f'fftwf-wisdom failed (exit {proc.returncode})')
+        return True   # non-fatal; let radiod try anyway
 
-    r = _run([
-        'systemd-run', '--no-block',
-        f'--unit={UNIT_NAME}',
-        '--description=ka9q-radio FFT wisdom generation',
-        '--service-type=oneshot',
-        *affinity_prop,
-        'bash', '-c', shell,
-    ], sudo=True)
-
-    if r.returncode == 0:
-        _ok(f'FFT wisdom generation started ({UNIT_NAME}.service)')
-    else:
-        _warn(f'Failed to start wisdom generation: {(r.stderr or r.stdout).strip()}')
+    # Ctrl+C — wisdom still running in background
+    _warn('Ctrl+C: wisdom planning continues in background.')
+    _info(f'  Monitor:  tail -f {_WISDOM_LOG}')
+    _info(f'  Re-run:   sudo smd apply   once complete to start radiod and decoders.')
+    return False
 
 
 # ---------------------------------------------------------------------------
