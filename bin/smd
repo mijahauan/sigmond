@@ -1583,6 +1583,9 @@ def cmd_apply(args) -> int:
                             _warn(f'{u.unit}: failed to start — {r_start.stderr.strip()}')
                     else:
                         _info(f'{u.unit}: already running')
+                # Check fft.log for unplanned transforms and launch fft-gen
+                # in the background if needed.
+                _ensure_radiod_fft_wisdom(radiod_units)
         except Exception:
             pass  # non-fatal; affinity is best-effort
 
@@ -1603,6 +1606,65 @@ def cmd_apply(args) -> int:
         _restart_upload_services_last()
 
     return 0 if ok else 1
+
+
+def _ensure_radiod_fft_wisdom(radiod_units: list) -> None:
+    """Check /var/lib/ka9q-radio/fft.log for unplanned FFT transforms and,
+    if any are found, launch ka9q-radio's fft-gen tool as a background
+    systemd transient service.  When generation completes the wisdom file
+    is updated and each radiod instance is restarted so it loads the new
+    plan on next startup.
+
+    fft.log is truncated after a successful run so subsequent apply calls
+    don't re-trigger generation unnecessarily.
+    """
+    fft_log     = Path('/var/lib/ka9q-radio/fft.log')
+    fft_gen_bin = Path('/usr/local/bin/fft-gen')
+    UNIT_NAME   = 'ka9q-fft-wisdom'
+
+    if not fft_gen_bin.exists():
+        return
+    if not fft_log.exists() or fft_log.stat().st_size == 0:
+        return
+
+    try:
+        transforms = sorted({t.strip() for t in fft_log.read_text().splitlines()
+                              if t.strip()})
+    except Exception:
+        return
+    if not transforms:
+        return
+
+    # Don't start a second generation if one is already running.
+    if _run(['systemctl', 'is-active', '--quiet', f'{UNIT_NAME}.service']).returncode == 0:
+        _info(f'FFT wisdom: generation already in progress ({UNIT_NAME}.service)')
+        return
+
+    restart_cmd = ' && '.join(f'systemctl restart {u.unit}' for u in radiod_units)
+    shell = (
+        f'{fft_gen_bin} --patient {" ".join(transforms)}'
+        f' && truncate -s0 {fft_log}'
+        + (f' && {restart_cmd}' if restart_cmd else '')
+    )
+
+    _warn(f'FFT wisdom: {len(transforms)} transform(s) need planning — '
+          f'{", ".join(transforms)}')
+    _info(f'  Launching fft-gen --patient in background (may take several minutes).')
+    _info(f'  Monitor:  journalctl -u {UNIT_NAME} -f')
+    _info(f'  radiod will restart automatically when wisdom is ready.')
+
+    r = _run([
+        'systemd-run', '--no-block',
+        f'--unit={UNIT_NAME}',
+        '--description=ka9q-radio FFT wisdom generation',
+        '--service-type=oneshot',
+        'bash', '-c', shell,
+    ], sudo=True)
+
+    if r.returncode == 0:
+        _ok(f'FFT wisdom generation started ({UNIT_NAME}.service)')
+    else:
+        _warn(f'Failed to start wisdom generation: {(r.stderr or r.stdout).strip()}')
 
 
 # ---------------------------------------------------------------------------
