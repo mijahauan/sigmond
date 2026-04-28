@@ -1647,6 +1647,19 @@ def _ensure_radiod_fft_wisdom(radiod_units: list) -> None:
         + (f' && {restart_cmd}' if restart_cmd else '')
     )
 
+    # Confine fft-gen to the non-radiod CPU pool so it doesn't compete with
+    # radiod on its reserved cores.
+    affinity_prop = []
+    if _HAS_SIGMOND_LIB:
+        try:
+            from sigmond.cpu import compute_affinity_plan as _cplan
+            plan = _cplan()
+            if plan.other_cpus:
+                cpus_str = ' '.join(str(c) for c in sorted(plan.other_cpus))
+                affinity_prop = [f'-p=CPUAffinity={cpus_str}']
+        except Exception:
+            pass
+
     _warn(f'FFT wisdom: {len(transforms)} transform(s) need planning — '
           f'{", ".join(transforms)}')
     _info(f'  Launching fft-gen --patient in background (may take several minutes).')
@@ -1658,6 +1671,7 @@ def _ensure_radiod_fft_wisdom(radiod_units: list) -> None:
         f'--unit={UNIT_NAME}',
         '--description=ka9q-radio FFT wisdom generation',
         '--service-type=oneshot',
+        *affinity_prop,
         'bash', '-c', shell,
     ], sudo=True)
 
