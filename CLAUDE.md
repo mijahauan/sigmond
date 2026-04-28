@@ -32,6 +32,10 @@ smd list [--available]   List configured units, or catalog of known clients
 smd log <client>         Follow journal, tail file logs, or set log level
 smd status               Service health + client inventory enrichment
 smd config show|migrate  Inspect or migrate coordination config
+smd config init <c>      Invoke a client's first-run wizard (CONTRACT-v0.5 §14)
+smd config edit <c>      Invoke a client's edit flow, or $EDITOR fallback
+smd config init radiod   Sigmond-owned wizard: probe USB, render radiod@<id>.conf
+                         per SDR, register in coordination.toml (CONTRACT-v0.5 §14.4)
 smd validate             Cross-client harmonization rules (read-only)
 smd update               Pull latest code and re-apply
 smd diag                 Network + deps + client validation diagnostics
@@ -217,3 +221,11 @@ authoritative source for dependency commit pins.
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code.
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
+
+1. Don’t assume. Don’t hide confusion. Surface tradeoffs.
+
+2. Minimum code that solves the problem. Nothing speculative.
+
+3. Touch only what you must. Clean up only your own mess.
+
+4. Define success criteria. Loop until verified.

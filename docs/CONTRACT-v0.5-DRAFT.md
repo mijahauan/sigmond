@@ -378,6 +378,215 @@ internally — only what it exposes at the boundary.
 
 ---
 
+## §14. Configuration interview (v0.5, NEW)
+
+Each client owns its config schema and its config UX (a wizard, an
+interactive editor, a templated TOML — whatever the client author
+prefers).  Sigmond does not write inside a client's config files
+(reaffirming the existing rule).  But sigmond **does** know about
+values that span clients — the operator's callsign and grid square,
+which radiod a client should bind to, whether an `hf-timestd` instance
+is present that other clients can reference for timing — and it should
+offer those as defaults so the operator doesn't type the same callsign
+into five different wizards.
+
+This section adds two things:
+
+1. A `[contract.config]` block in `deploy.toml` that lets a client
+   advertise the entry points sigmond should invoke for guided
+   configuration.
+2. A stable **env var bag** sigmond passes to those entry points,
+   carrying the cross-client commons.
+
+### 14.1 `deploy.toml` block
+
+```toml
+[contract.config]
+init = "scripts/setup-station.sh"           # string form (single executable)
+edit = "scripts/config-review.sh"
+
+# OR — argv list form, for clients that route through subcommands:
+[contract.config]
+init = ["/usr/local/bin/psk-recorder", "config", "init"]
+edit = ["/usr/local/bin/psk-recorder", "config", "edit"]
+```
+
+- **String form**: a path to an executable in any language; sigmond
+  spawns it directly.  Paths are relative to the repo root, or absolute.
+- **Argv form**: a list whose first element is the executable and whose
+  remaining elements are pre-pended arguments.  Useful when a client
+  exposes its configurator as a subcommand of its main CLI rather than
+  as a separate script.
+- Both keys are optional.  A client may provide one and not the other
+  (e.g. only `init`, leaving subsequent edits to direct file editing).
+- When a key is absent, sigmond's fallback (§14.4) applies.
+
+### 14.2 Invocation surface
+
+Sigmond exposes:
+
+```
+smd config init <client> [<instance>]   invoke [contract.config].init
+smd config edit <client> [<instance>]   invoke [contract.config].edit
+```
+
+The optional `<instance>` argument names a specific instance for
+multi-source clients.  A station running, e.g., two `wspr-recorder`
+instances bound to different radiod sources can configure each
+independently:
+
+```
+smd config init wspr-recorder radiod-0    # bound to local radiod
+smd config init wspr-recorder radiod-1    # bound to remote radiod
+```
+
+When `<instance>` is omitted, sigmond does not set
+`SIGMOND_INSTANCE`; clients that don't model multi-instance can
+ignore the variable.  When provided, sigmond sets `SIGMOND_INSTANCE`
+to the literal name and resolves `SIGMOND_RADIOD_STATUS` from the
+specific `[[clients.<name>]]` entry whose `instance` field matches
+(via its `radiod_id`).  The client decides what to do with the value
+— some clients (e.g. `psk-recorder`) carry multiple `[[radiod]]`
+blocks in a single config file; others (e.g. `wspr-recorder`,
+`hfdl-recorder`) split per-instance config under
+`/etc/<client>/<instance>/`.
+
+The script inherits sigmond's stdin/stdout/stderr (no redirection),
+runs in the current TTY, and returns its exit code as the verb's exit
+code.  Clients SHOULD also accept `--non-interactive` so sigmond's TUI
+can drive the same script without a controlling terminal (TUI
+integration is post-v0.5).
+
+### 14.3 Env var bag
+
+When invoking `init` or `edit`, sigmond sets the following env vars
+in addition to the existing inherited environment.  All are
+**advisory**: the script SHOULD use them as prompt defaults, never as
+authoritative overrides.
+
+| Variable | Source | Meaning |
+|---|---|---|
+| `STATION_CALL`         | `coordination.toml [host].call`           | Operator callsign — bare, no suffix |
+| `STATION_GRID`         | `coordination.toml [host].grid`           | Maidenhead grid square |
+| `STATION_LAT`          | `coordination.toml [host].lat`            | Latitude (decimal degrees) |
+| `STATION_LON`          | `coordination.toml [host].lon`            | Longitude (decimal degrees) |
+| `SIGMOND_INSTANCE`     | the `<instance>` arg from the verb         | Set only when invoked with an instance.  Clients deriving per-instance fields consume this. |
+| `SIGMOND_RADIOD_COUNT` | number of `[radiod.<id>]` blocks in coordination.toml | Always set.  `1` is the simple case where reporter IDs need no per-instance suffix; `>1` signals that distinct reporter IDs per radiod are required (see §14.6). |
+| `SIGMOND_RADIOD_INDEX` | 1-based position of this instance's radiod in coordination.toml declaration order | Set only when `<instance>` is given and resolves to a known radiod.  Lets clients compose stable per-radiod suffixes without parsing `SIGMOND_INSTANCE`. |
+| `SIGMOND_RADIOD_STATUS`| `coordination.toml [radiod.<id>].status_dns` — see resolution rule below | radiod multicast status DNS this client/instance should bind to |
+| `SIGMOND_TIME_SOURCE`  | hf-timestd inventory if installed, else NTP from `environment.toml` | `<kind>@<host>:<port>` — e.g. `hf-timestd@localhost:8000` |
+| `SIGMOND_GNSS_VTEC`    | hf-timestd inventory `commons.gnss_vtec` (§14.5) when present | `<host>:<port>` — surfaced for clients that consume ionospheric data |
+
+**`SIGMOND_RADIOD_STATUS` resolution:**
+
+1. If `<instance>` is given and `coordination.toml` contains a
+   `[[clients.<client>]]` entry whose `instance` matches and whose
+   `radiod_id` resolves to a `[radiod.<id>]` block, use that block's
+   `status_dns`.
+2. Else if exactly one `[radiod.<id>]` block is declared, use its
+   `status_dns`.
+3. Else leave the var unset (operator picks interactively).
+
+The bag is intentionally small.  Adding a new variable is a minor
+contract bump; clients opt in by reading the new name.  The first four
+already exist in `coordination.env` (consumed at runtime via systemd
+`EnvironmentFile=-`); §14 just guarantees they're also present at
+config-time.
+
+### 14.4 Fallback when no `[contract.config]`
+
+If a client's `deploy.toml` has no `[contract.config]` block, sigmond:
+
+- For `smd config init <client>`: prints the path of the rendered
+  template (from `[install]` `kind = "render"`, §5 in CLIENT-CONTRACT)
+  and exits.  No interactive flow.
+- For `smd config edit <client>`: opens `$EDITOR` (default `vi`) on
+  the deployed config path reported by `inventory --json`
+  (`config_path`).
+
+This keeps `smd config edit` useful day one for every contract-
+conformant client, even before they ship a wizard.
+
+**Special case — radiod.**  radiod (`ka9q-radio`) is the upstream that
+HamSCI clients consume from, not itself a HamSCI contract client, so it
+has no `deploy.toml [contract.config]`.  Sigmond owns radiod's
+configuration directly: `smd config init radiod` runs a built-in
+wizard that probes the local USB bus, prompts the operator for an
+instance id / status DNS / antenna description per detected SDR, and
+renders `/etc/radio/radiod@<id>.conf` from `etc/radiod.conf.template`.
+Each rendered config locks to a specific physical SDR via the
+`serial = "..."` key recognised by every front-end driver
+(rx888, airspy, airspyhf, sdrplay).  The wizard then appends a
+`[radiod."<id>"]` block to `coordination.toml`, which makes the new
+radiod immediately visible to the rest of the configurations contract
+(`SIGMOND_RADIOD_COUNT`, `SIGMOND_RADIOD_INDEX`, per-instance
+`SIGMOND_RADIOD_STATUS`).  This honors the workflow ordering of §14.6:
+radiod gets configured *before* clients that consume from it.
+
+### 14.5 Inventory contributions (forward-compatible hook)
+
+A v0.5+ client MAY add a `commons` block to `inventory --json`
+reporting the values it currently has set for variables in the §14.3
+bag.  This is the basis for `smd validate` to detect drift between a
+client's stored config and `coordination.toml [host]`.  Drift becomes
+a validation warning, never a silent rewrite — sigmond never edits
+client files.
+
+```json
+{
+  "contract_version": "0.5",
+  "config_path": "/etc/hf-timestd/timestd-config.toml",
+  "commons": {
+    "station_call":  "AC0G",
+    "station_grid":  "EM38",
+    "gnss_vtec":     "192.168.1.50:2123"
+  }
+}
+```
+
+A client MAY also include entries that contribute to other clients'
+view of the environment — e.g. an installed hf-timestd advertises its
+GNSS-VTEC endpoint, which sigmond surfaces as `SIGMOND_GNSS_VTEC`
+when invoking other clients' `init`/`edit`.
+
+### 14.6 Workflow ordering and reporter naming
+
+Sigmond's situational-awareness inventory (`smd environment`) and the
+operator's `coordination.toml` together establish *which radiods exist*
+before any client is configured.  The intended workflow is:
+
+1. **Discover** — `smd environment probe` finds reachable peers.
+2. **Declare** — operator records radiod(s) in
+   `coordination.toml [radiod.<id>]`.
+3. **Configure** — `smd config init|edit <client> [<instance>]` runs,
+   with the env bag populated from the now-known coordination state.
+
+Because of this ordering, by the time a client's interview runs,
+`SIGMOND_RADIOD_COUNT` is authoritative.
+
+**Reporter-naming convention (per-client):**
+
+The reporter ID a client sends to its upstream service (PSK Reporter,
+WSPR Net, airframes.io) generally derives from `STATION_CALL`.  When
+exactly one radiod is declared, no per-radiod suffix is needed and
+`STATION_CALL` is used verbatim.  When more than one is declared, the
+client should suffix the call to disambiguate which receive setup
+produced the report.  The suffix format is per-client convention:
+
+| Client          | Single radiod | Multi radiod (n = `SIGMOND_RADIOD_INDEX`) |
+|---|---|---|
+| psk-recorder    | `AC0G`        | `AC0G/B<n>`     (e.g. `AC0G/B1`, `AC0G/B2`) |
+| wspr-recorder*  | `AC0G`        | `AC0G/B<n>`     (* reporter lives in wsprdaemon-client) |
+| hfdl-recorder   | `AC0G-1`      | `AC0G-<n>`      (airframes.io requires the suffix even for single) |
+
+Sigmond does not enforce these conventions — each client picks its
+default in `config init` and the operator may override interactively.
+The contract's job is to surface the env bag (`SIGMOND_RADIOD_COUNT`,
+`SIGMOND_RADIOD_INDEX`, `STATION_CALL`) so clients have what they need
+to compose a sensible default.
+
+---
+
 ## §3 amendment (expanded)
 
 `<client> inventory --json` adds two new fields per instance:

@@ -49,6 +49,7 @@ for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
 try:
     from sigmond.commands.validate    import cmd_validate
     from sigmond.commands.config      import cmd_config_show, cmd_config_migrate
+    from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
     from sigmond.commands.environment import (
         cmd_environment_list,
         cmd_environment_probe,
@@ -3155,7 +3156,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
                     ;;
                 config)
-                    COMPREPLY=($(compgen -W "show migrate backup restore edit" -- "$cur"))
+                    COMPREPLY=($(compgen -W "show migrate backup restore init edit" -- "$cur"))
                     ;;
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
@@ -3221,8 +3222,11 @@ _smd_complete() {
                         restore)
                             COMPREPLY=($(compgen -W "--input" -- "$cur"))
                             ;;
+                        init|edit)
+                            COMPREPLY=($(compgen -W "$components radiod" -- "$cur"))
+                            ;;
                         *)
-                            COMPREPLY=($(compgen -W "show migrate backup restore edit" -- "$cur"))
+                            COMPREPLY=($(compgen -W "show migrate backup restore init edit" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -3695,7 +3699,21 @@ def main() -> int:
     p.add_argument('--input', metavar='FILE', required=True,
                    help='backup tar.gz to restore (e.g. ~/sigmond-config-*.tar.gz)')
 
-    config_sub.add_parser('edit', help='[deprecated] use `smd tui` instead')
+    p = config_sub.add_parser('init',
+                              help="invoke a client's first-run config wizard")
+    p.add_argument('client', help='client name (e.g. hf-timestd)')
+    p.add_argument('instance', nargs='?', default=None,
+                   help='optional instance name for multi-source clients '
+                        '(e.g. radiod-0).  Single-instance is the default.')
+
+    p = config_sub.add_parser('edit',
+                              help="invoke a client's config edit flow, "
+                                   "or open $EDITOR on its config when no "
+                                   "wizard is advertised")
+    p.add_argument('client', nargs='?', default=None,
+                   help='client name (omit for the legacy TUI redirect)')
+    p.add_argument('instance', nargs='?', default=None,
+                   help='optional instance name for multi-source clients')
 
     # environment — situational awareness (site inventory + reconciliation).
     p_env = sub.add_parser('environment',
@@ -3795,7 +3813,14 @@ def main() -> int:
             return cmd_config_backup(args)
         if sub_cmd == 'restore':
             return cmd_config_restore(args)
+        if sub_cmd == 'init':
+            return cmd_config_init(args)
         if sub_cmd == 'edit':
+            # `smd config edit <client>` is the new client-aware form
+            # (CONTRACT-v0.5 §14).  Bare `smd config edit` retains the
+            # deprecated TUI redirect so old muscle memory still works.
+            if getattr(args, 'client', None):
+                return cmd_config_edit_client(args)
             return cmd_config_edit(args)
         p_config.print_help()
         return 0
