@@ -1556,8 +1556,9 @@ def cmd_apply(args) -> int:
         except Exception:
             pass  # non-fatal
 
-    # Write radiod CPU affinity drop-ins BEFORE wd-ctl apply so radiod cores
-    # are reserved before any client tries to start.
+    # Write radiod CPU affinity drop-ins and ensure radiod is running BEFORE
+    # wd-ctl apply so radiod cores are reserved and streams are available
+    # before decoders try to connect.
     if _HAS_SIGMOND_LIB and not dry_run:
         try:
             enabled = _enabled_components(topology)
@@ -1568,6 +1569,20 @@ def cmd_apply(args) -> int:
             ]
             if radiod_units:
                 _ensure_radiod_affinity_drop_ins(radiod_units, topology.get('cpu_affinity'))
+                # Ensure each radiod instance is enabled (survives reboot) and
+                # currently running.  wd-ctl decoders need radiod streams to exist.
+                for u in radiod_units:
+                    if _run(['systemctl', 'is-enabled', '--quiet', u.unit]).returncode != 0:
+                        _run(['systemctl', 'enable', u.unit], sudo=True)
+                    r_active = _run(['systemctl', 'is-active', '--quiet', u.unit])
+                    if r_active.returncode != 0:
+                        r_start = _run(['systemctl', 'start', u.unit], sudo=True)
+                        if r_start.returncode == 0:
+                            _ok(f'{u.unit}: enabled and started')
+                        else:
+                            _warn(f'{u.unit}: failed to start — {r_start.stderr.strip()}')
+                    else:
+                        _info(f'{u.unit}: already running')
         except Exception:
             pass  # non-fatal; affinity is best-effort
 
