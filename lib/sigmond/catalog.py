@@ -6,7 +6,7 @@ topology (what IS enabled) and lifecycle (what units resolve to what).
 Wave 2 architecture: the catalog has two sources.
 
 * **Primary — discovery.** ``load_catalog()`` (no path) globs every
-  ``/opt/git/*/deploy.toml`` and synthesizes a ``CatalogEntry`` from each
+  ``/opt/git/sigmond/*/deploy.toml`` and synthesizes a ``CatalogEntry`` from each
   client's own manifest.  This is how a drop-in client author gets sigmond
   to know about their client without editing any sigmond-side file.
 * **Override — etc/catalog.toml.** Layered on top of discovery so operators
@@ -15,7 +15,7 @@ Wave 2 architecture: the catalog has two sources.
   live here.
 
 Tests pass an explicit ``path=`` to read a single file; the
-``/opt/git`` glob only fires for the no-arg call.
+``/opt/git/sigmond`` glob only fires for the no-arg call.
 """
 
 from __future__ import annotations
@@ -57,20 +57,20 @@ class CatalogEntry:
     def is_installed(self) -> bool:
         """Best-effort check that this entry is installed on the local host.
 
-        Primary: repo cloned to /opt/git/<name> (production install path).
+        Primary: repo cloned to /opt/git/sigmond/<name> (production install path).
         Library kind: also importability from the current Python (the
                       authoritative signal for Python deps) and the dev
                       sibling locations ~/<name> and /opt/<name>.
         Fallback: install_script exists, or binary found in PATH.
         """
-        # Use lexists rather than exists so a symlink at /opt/git/<name>
+        # Use lexists rather than exists so a symlink at /opt/git/sigmond/<name>
         # pointing at a target the current user can't traverse (e.g.
-        # /opt/git/wsprdaemon-client -> /home/wsprdaemon/wsprdaemon-client,
+        # /opt/git/sigmond/wsprdaemon-client -> /home/wsprdaemon/wsprdaemon-client,
         # where /home/wsprdaemon is mode 700) still registers as
         # installed. Path.exists() would raise PermissionError from stat()
         # and abort the whole `smd list --available` before the Infra
         # section ever prints.
-        if os.path.lexists(str(Path('/opt/git') / self.name)):
+        if os.path.lexists(str(Path('/opt/git/sigmond') / self.name)):
             return True
         if self.kind == 'library':
             # Importability from the current Python wins: sigmond runs
@@ -87,7 +87,7 @@ class CatalogEntry:
             # Dev siblings: `git clone` location before packaging.
             # Use os.path.lexists so test monkeypatches that stub out
             # filesystem presence cover this branch consistently with
-            # the canonical /opt/git check above.
+            # the canonical /opt/git/sigmond check above.
             home = os.path.expanduser('~')
             for candidate in (os.path.join(home, self.name),
                               os.path.join('/opt', self.name)):
@@ -171,7 +171,7 @@ def load_catalog(path: Optional[Path] = None) -> dict[str, CatalogEntry]:
     """Load the catalog, keyed by client name.
 
     With an explicit ``path``: reads that single TOML file (single source).
-    With no path: discovers entries from /opt/git/*/deploy.toml, then
+    With no path: discovers entries from /opt/git/sigmond/*/deploy.toml, then
     layers ``etc/catalog.toml`` on top as an operator override, and
     finally adds synthesized library entries (ka9q-python).
 

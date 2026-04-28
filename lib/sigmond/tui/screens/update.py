@@ -7,7 +7,7 @@ components showing their current git ref and version policy, plus:
   • Update all      — run `smd update` (respects version policies: skips
                       'ignore' components and checks out pinned refs)
   • Dry run         — run `smd update --dry-run` to preview what would change
-  • Refresh         — re-scan /opt/git/ for current refs
+  • Refresh         — re-scan /opt/git/sigmond/ for current refs
 
 The CLI does all the real work; the TUI provides visibility, confirmation
 gate, and exit-code readout.
@@ -31,16 +31,23 @@ from textual.worker import Worker, WorkerState
 from ..mutation import confirm_and_run
 
 
+# Sigmond clients live under /opt/git/sigmond/ (the sigmond namespace).
+# Non-sigmond infra repos consumed by sigmond — ka9q-radio, ka9q-web,
+# ka9q-python — live in the general-use /opt/git/ space.  The fallback
+# below resolves catalog entries whose canonical name differs from
+# their repo-stem (e.g. catalog 'radiod' → repo at /opt/git/ka9q-radio).
+_OPT_GIT_SIGMOND = Path('/opt/git/sigmond')
 _OPT_GIT = Path('/opt/git')
 
 
 def _find_repo_dir(name: str, repo_url: str) -> Optional[Path]:
     """Return the cloned repo path for a catalog entry.
 
-    Checks /opt/git/<name> first.  Falls back to /opt/git/<url-stem> so that
-    entries like 'radiod' (repo at /opt/git/ka9q-radio) are handled correctly.
+    Checks /opt/git/sigmond/<name> first (sigmond's namespace).  Falls
+    back to /opt/git/<url-stem> for non-sigmond infra repos like
+    'radiod' whose clone lives at /opt/git/ka9q-radio.
     """
-    primary = _OPT_GIT / name
+    primary = _OPT_GIT_SIGMOND / name
     if primary.exists():
         return primary
     if repo_url:
@@ -125,7 +132,7 @@ def _git_last_subject(repo_dir: Path) -> str:
 
 
 def _gather(topology_components: dict) -> _UpdateView:
-    """Worker: scan catalog + /opt/git for current state."""
+    """Worker: scan catalog + /opt/git/sigmond for current state."""
     view = _UpdateView()
     try:
         from ...catalog import load_catalog

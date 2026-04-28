@@ -254,6 +254,46 @@ enabled = true
 
 ---
 
+## Migrating to `/opt/git/sigmond/` (existing hosts)
+
+Sigmond reserves `/opt/git/sigmond/` as the namespace for the clients it
+installs and discovers.  Non-sigmond infrastructure (`ka9q-radio`,
+`ka9q-web`, `ka9q-python`, `ka9q-update`) continues to live in the
+parent `/opt/git/` directly so that directory remains usable for
+unrelated repos.
+
+Hosts installed before the namespace move will have sigmond clients at
+`/opt/git/<name>/`.  Move them once with:
+
+```bash
+sudo mkdir -p /opt/git/sigmond
+for d in psk-recorder wspr-recorder hf-timestd wsprdaemon-client \
+         hfdl-recorder gpsdo-monitor igmp-querier; do
+  if [ -e /opt/git/$d ] && [ ! -e /opt/git/sigmond/$d ]; then
+    sudo mv /opt/git/$d /opt/git/sigmond/$d
+  fi
+done
+```
+
+The clients' systemd units, venv targets, and config paths
+(`/etc/<client>/...`) are not affected — only the source-checkout
+location moves.  After the move, re-run each enabled client's
+installer to refresh symlinks under `/usr/local/bin/` so they point at
+the new path:
+
+```bash
+for d in /opt/git/sigmond/*/; do
+  inst=$(ls "$d/scripts/install.sh" "$d/install.sh" 2>/dev/null | head -1)
+  [ -n "$inst" ] && sudo bash "$inst"
+done
+```
+
+Verify with `sudo smd list --available` — every previously-installed
+client should still show as installed (the symlinks at
+`/usr/local/bin/<client>` now resolve through the new path).
+
+---
+
 ## Bugs Found and Fixed During This Install
 
 | # | Issue | Fix |
@@ -273,7 +313,7 @@ enabled = true
 | 13 | `wireshark-common` debconf interactive prompt hangs `ka9q-update` apt install | Pre-answer: `echo "wireshark-common wireshark-common/install-setuid boolean false" \| sudo debconf-set-selections`, then set `DEBIAN_FRONTEND=noninteractive` |
 | 14 | `ka9q-radio` cloned to sigmond source dir instead of `/opt/git/ka9q-radio` | Fixed in `bin/smd`: pass `/opt/git` as arg to `install-ka9q.sh` |
 | 15 | `ka9q-python` treated as "unknown" component during `smd install` | Fixed: `library`/`infra` entries without `install_script` are silently skipped (handled by sigmond venv) |
-| 16 | `deps.conf not found at /home/wsprdaemon/...` error on fresh install | Fixed: `_load_deps_conf()` falls back to `/opt/git/wsprdaemon-client/deps.conf`; also updated `_DEFAULT_CLIENT_DIR` |
+| 16 | `deps.conf not found at /home/wsprdaemon/...` error on fresh install | Fixed: `_load_deps_conf()` falls back to `/opt/git/sigmond/wsprdaemon-client/deps.conf`; also updated `_DEFAULT_CLIENT_DIR` |
 | 17 | `ka9q-python` reinstalled from deps.conf even though already catalog-managed | Fixed: skip pypi deps.conf entries whose name matches a catalog entry |
 | 18 | `ka9q-update/install-ka9q.sh` fails on re-run: `git pull` on detached HEAD | Fixed in `install-ka9q.sh`: check out main/master branch before pulling |
 | 19 | `install-ka9q.sh` exits with code 1 when stdin is not a TTY (`read -p` returns EOF with `set -e`) | Fixed: add `\|\| true` to both `read -p` calls in `install-ka9q.sh` |

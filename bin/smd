@@ -246,7 +246,7 @@ BUILD_STEPS = {
 
 
 def _load_deps_conf(client_dir: Path) -> configparser.ConfigParser:
-    candidates = [client_dir / 'deps.conf', Path('/opt/git/wsprdaemon-client/deps.conf')]
+    candidates = [client_dir / 'deps.conf', Path('/opt/git/sigmond/wsprdaemon-client/deps.conf')]
     for deps_file in candidates:
         if deps_file.exists():
             cfg = configparser.ConfigParser()
@@ -1201,7 +1201,7 @@ def _install_single_client(args) -> int:
 
     entry = get_entry(client, catalog)
     if entry is None:
-        # Wave 2 fall-through: discover from /opt/git/<client>/deploy.toml.
+        # Wave 2 fall-through: discover from /opt/git/sigmond/<client>/deploy.toml.
         # A drop-in client author who's already cloned their repo gets
         # auto-discovered without any sigmond-side catalog edit.
         from sigmond.discover import find_deploy_toml, synthesize_catalog_entry
@@ -1549,7 +1549,7 @@ def cmd_apply(args) -> int:
             catalog = load_catalog()
             reloaded = False
             for name, entry in sorted(catalog.items()):
-                repo_dir = Path('/opt/git') / name
+                repo_dir = Path('/opt/git/sigmond') / name
                 if not repo_dir.exists():
                     continue
                 msgs = apply_deploy_toml_links(repo_dir, dry_run=dry_run)
@@ -2788,7 +2788,7 @@ def cmd_log(args) -> int:
 def cmd_update(args) -> int:
     """Pull the latest commit for every installed catalog component.
 
-    For each catalog entry that has a repo URL and a clone under /opt/git/,
+    For each catalog entry that has a repo URL and a clone under /opt/git/sigmond/,
     runs `git pull --ff-only` (or `git fetch + checkout <ref>` when --ref is
     given).  radiod is source-only and requires a ka9q-update rebuild to
     produce a new binary; smd warns rather than silently skipping it.
@@ -2812,7 +2812,7 @@ def cmd_update(args) -> int:
 
     _heading('update')
     errors   = 0
-    opt_git  = Path('/opt/git')
+    opt_git  = Path('/opt/git/sigmond')
 
     # Load topology once using the library object API (version field required).
     from sigmond.topology import load_topology as _lib_load_topology
@@ -2853,6 +2853,16 @@ def cmd_update(args) -> int:
             continue
 
         repo_dir = opt_git / name
+        if not repo_dir.exists():
+            # Non-sigmond infra repos (e.g. catalog 'radiod' → repo at
+            # /opt/git/ka9q-radio) live in the general-use /opt/git/
+            # space, not the sigmond namespace.  Fall back to url-stem.
+            if entry.repo:
+                stem = entry.repo.rstrip('/').rsplit('/', 1)[-1].removesuffix('.git')
+                if stem and stem != name:
+                    fallback = Path('/opt/git') / stem
+                    if fallback.exists():
+                        repo_dir = fallback
         if not repo_dir.exists():
             # Not installed; skip silently unless explicitly requested.
             if components_filter:

@@ -706,7 +706,7 @@ truth.
 {
   "instance": "default",
   "control_socket": "/run/psk-recorder/control.sock",
-  "deploy_toml_path": "/opt/git/psk-recorder/deploy.toml",
+  "deploy_toml_path": "/opt/git/sigmond/psk-recorder/deploy.toml",
   ...
 }
 ```
@@ -719,7 +719,7 @@ truth.
 - **`deploy_toml_path`** (v0.5): Path to the client's `deploy.toml` file.
   Sigmond discovers each client's lifecycle declarations (§5) via this path
   rather than inventing a second discovery mechanism. If absent, sigmond
-  falls back to `/opt/git/<client-name>/deploy.toml` (the Pattern A
+  falls back to `/opt/git/sigmond/<client-name>/deploy.toml` (the Pattern A
   canonical location, §12.5 in CLIENT-CONTRACT.md).
 
 ---

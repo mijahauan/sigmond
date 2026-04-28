@@ -4,7 +4,7 @@ Catalog browser with install status per entry.  Row cursor picks a
 target; 'Install selected' or 'Install all missing' shells out to the
 CLI with confirmation + suspend/sudo (same pattern as Lifecycle).
 
-The CLI does the real work — clone to /opt/git/<name>, run the
+The CLI does the real work — clone to /opt/git/sigmond/<name>, run the
 client's canonical install.sh — so the TUI stays thin.
 """
 

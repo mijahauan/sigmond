@@ -19,7 +19,7 @@ def _entry(name='fake-client', **overrides):
     defaults = dict(
         name=name, kind='client', description='test',
         repo='https://github.com/test/fake-client',
-        install_script=f'/opt/git/{name}/scripts/install.sh',
+        install_script=f'/opt/git/sigmond/{name}/scripts/install.sh',
     )
     defaults.update(overrides)
     return CatalogEntry(**defaults)

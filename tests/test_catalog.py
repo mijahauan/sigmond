@@ -37,7 +37,7 @@ class TestLoadCatalog:
         assert psk.kind == 'client'
         assert psk.contract == '0.4'
         assert psk.uses == ('ka9q-python',)
-        assert psk.install_script == '/opt/git/psk-recorder/scripts/install.sh'
+        assert psk.install_script == '/opt/git/sigmond/psk-recorder/scripts/install.sh'
         assert 'FT4' in psk.description or 'FT8' in psk.description
 
     def test_server_entry_has_no_contract_or_install_script(self):

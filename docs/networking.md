@@ -112,8 +112,9 @@ See: https://github.com/mijahauan/igmp-querier
 Short version:
 
 ```
-git clone https://github.com/mijahauan/igmp-querier /opt/git/igmp-querier
-sudo /opt/git/igmp-querier/install.sh
+sudo mkdir -p /opt/git/sigmond
+sudo git clone https://github.com/mijahauan/igmp-querier /opt/git/sigmond/igmp-querier
+sudo /opt/git/sigmond/igmp-querier/install.sh
 sudo systemctl edit igmp-querier        # set IGMP_INTERFACE=eth0
 sudo systemctl enable --now igmp-querier
 ```
@@ -127,7 +128,7 @@ sudo smd diag net --listen 130          # should now report a querier
 Uninstall:
 
 ```
-sudo /opt/git/igmp-querier/uninstall.sh
+sudo /opt/git/sigmond/igmp-querier/uninstall.sh
 ```
 
 ### When NOT to install igmp-querier

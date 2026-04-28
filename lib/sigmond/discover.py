@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 
-GIT_BASE = Path('/opt/git')
+GIT_BASE = Path('/opt/git/sigmond')
 
 
 def find_deploy_toml(component: str) -> Optional[Path]:
@@ -29,11 +29,11 @@ def find_deploy_toml(component: str) -> Optional[Path]:
 
     Search order:
     1. Via ``<component> inventory --json`` → deploy_toml_path field (v0.5)
-    2. Pattern A canonical: /opt/git/<component>/deploy.toml
+    2. Pattern A canonical: /opt/git/sigmond/<component>/deploy.toml
     3. None (caller should fall back to a shim or skip)
 
     Catches PermissionError on the canonical path so a component whose
-    /opt/git/<name>/ is behind a restrictive permission mask (e.g.
+    /opt/git/sigmond/<name>/ is behind a restrictive permission mask (e.g.
     wsprdaemon-client → /home/wsprdaemon/... at mode 700) doesn't abort
     higher-level commands like `smd list`.
     """
@@ -67,7 +67,7 @@ def find_deploy_toml(component: str) -> Optional[Path]:
 
 
 def find_client_repo(name: str) -> Optional[Path]:
-    """Locate a client's repo at /opt/git/<name> (the Pattern A canonical
+    """Locate a client's repo at /opt/git/sigmond/<name> (the Pattern A canonical
     location).  Returns None if the directory does not exist."""
     repo = GIT_BASE / name
     try:
@@ -107,7 +107,7 @@ def synthesize_catalog_entry(deploy_path: Path):
 
     # Prefer the explicit [client].name (the Wave 2 contract field).  Fall
     # back to the install-directory name — that's the canonical sigmond
-    # identity (matches /opt/git/<name>/, topology.toml, catalog keys).
+    # identity (matches /opt/git/sigmond/<name>/, topology.toml, catalog keys).
     # The deploy.toml's [package].name often differs (e.g. 'wsprdaemon'
     # vs the directory 'wsprdaemon-client') and would split a single
     # client into two catalog entries.

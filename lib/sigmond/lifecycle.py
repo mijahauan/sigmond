@@ -29,7 +29,7 @@ class UnitRef:
     template: Optional[str]         # "psk-recorder@.service" or None (concrete units)
     instance: Optional[str]         # "default" or None (for concrete units)
     kind: str                       # "service" | "target" | "timer"
-    source: str                     # "deploy.toml:/opt/git/psk-recorder/deploy.toml"
+    source: str                     # "deploy.toml:/opt/git/sigmond/psk-recorder/deploy.toml"
                                     # or "fallback:hardcoded"
     orphaned: bool = False          # in known but not configured
 

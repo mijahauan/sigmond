@@ -73,7 +73,7 @@ _DEFAULT_COMPONENTS = {
     'ka9q-web':           Component('ka9q-web',           enabled=False, managed=True,  description='ka9q-web radiod status UI'),
 }
 
-_DEFAULT_CLIENT_DIR = Path('/opt/git/wsprdaemon-client')
+_DEFAULT_CLIENT_DIR = Path('/opt/git/sigmond/wsprdaemon-client')
 _DEFAULT_SMD_BIN    = Path('/usr/local/sbin/smd')
 
 

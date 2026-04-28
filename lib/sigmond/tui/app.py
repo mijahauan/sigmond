@@ -253,7 +253,7 @@ class SigmondApp(App):
         except Exception:
             from ..topology import Topology
             self.topology = Topology(
-                client_dir=__import__('pathlib').Path('/opt/git'),
+                client_dir=__import__('pathlib').Path('/opt/git/sigmond'),
                 smd_bin=__import__('pathlib').Path('/usr/local/sbin/smd'),
             )
 

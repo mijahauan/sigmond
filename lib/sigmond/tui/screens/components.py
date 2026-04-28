@@ -1,7 +1,7 @@
 """Software Versions screen — catalog components, install state, git refs, version policy.
 
 Shows every catalog entry with:
-  - install status (present at /opt/git/<name>)
+  - install status (present at /opt/git/sigmond/<name>)
   - current HEAD ref (git branch@sha)
   - version policy from topology.toml (latest / pinned ref / ignore)
 
@@ -40,14 +40,21 @@ def _smd_binary() -> str:
     return shutil.which('smd') or '/usr/local/sbin/smd'
 
 
+# Sigmond clients live under /opt/git/sigmond/ (the sigmond namespace).
+# Non-sigmond infra repos (ka9q-radio, ka9q-web, ka9q-python) live in
+# the general-use /opt/git/ space; the fallback below resolves catalog
+# entries whose canonical name differs from their repo-stem (e.g.
+# 'radiod' → /opt/git/ka9q-radio).
+_OPT_GIT_SIGMOND = Path('/opt/git/sigmond')
 _OPT_GIT = Path('/opt/git')
 
 
 def _find_repo_dir(name: str, repo_url: str) -> Optional[Path]:
     """Return the cloned repo path for a catalog entry.
 
-    Checks /opt/git/<name> first.  Falls back to /opt/git/<url-stem> so that
-    entries like 'radiod' (repo at /opt/git/ka9q-radio) are handled correctly.
+    Checks /opt/git/sigmond/<name> first (sigmond's namespace).  Falls
+    back to /opt/git/<url-stem> for non-sigmond infra repos like
+    'radiod' whose clone lives at /opt/git/ka9q-radio.
     Sigmond itself lives next to this file, not under /opt/git.
     """
     # Sigmond manages itself — its repo is the parent of this library.
@@ -58,7 +65,7 @@ def _find_repo_dir(name: str, repo_url: str) -> Optional[Path]:
         if (self_dir / '.git').exists():
             return self_dir
 
-    primary = _OPT_GIT / name
+    primary = _OPT_GIT_SIGMOND / name
     if primary.exists():
         return primary
     if repo_url:
@@ -233,7 +240,7 @@ def _git_behind(repo_dir: Path) -> str:
 
 
 def _gather(topology_components: dict, do_fetch: bool = False) -> _ComponentsView:
-    """Worker: load catalog + topology, scan /opt/git, collect git refs."""
+    """Worker: load catalog + topology, scan /opt/git/sigmond, collect git refs."""
     view = _ComponentsView()
     try:
         from ...catalog import load_catalog

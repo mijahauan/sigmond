@@ -28,7 +28,7 @@ def _coord(radiods=None, call="N0CALL", grid="EM38"):
 def _write_client(tmp_path: Path, name: str, deploy_body: str,
                   template_name: str = "etc/radiod-fragment.conf",
                   template_body: str = "[ch.${RADIOD_ID}]\nfreq = 14095600\n"):
-    """Lay out /opt/git/<name>/{deploy.toml, etc/radiod-fragment.conf}."""
+    """Lay out /opt/git/sigmond/<name>/{deploy.toml, etc/radiod-fragment.conf}."""
     repo = tmp_path / name
     (repo / 'etc').mkdir(parents=True, exist_ok=True)
     (repo / 'deploy.toml').write_text(deploy_body)

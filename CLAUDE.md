@@ -50,7 +50,7 @@ smd environment list|probe|describe   Situational awareness of network peers
    Includes topology-alias bridge (grape → hf-timestd, wspr → wsprdaemon-client).
 
 2. **Installer** (`lib/sigmond/installer.py`) — catalog-driven install:
-   clone repo to `/opt/git/<name>`, run the client's canonical `install.sh`.
+   clone repo to `/opt/git/sigmond/<name>`, run the client's canonical `install.sh`.
    Each client's installer is authoritative; sigmond delegates, not duplicates.
 
 3. **Lifecycle** (`lib/sigmond/lifecycle.py`, contract v0.5 §5) — resolves

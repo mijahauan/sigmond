@@ -199,14 +199,14 @@ def _env_key(*parts) -> str:
 
 def _passthrough_extras_for(client_type: str) -> list:
     """Read ``[client.coordination] passthrough_extras`` from a client's
-    ``/opt/git/<client>/deploy.toml``.  Returns ``[]`` when the file is
+    ``/opt/git/sigmond/<client>/deploy.toml``.  Returns ``[]`` when the file is
     absent, unreadable, or the key is unset — clients opt in by shipping
     the block in their deploy.toml.  Wave 2 will move the canonical
     deploy.toml lookup into ``discover.py``; this minimal reader keeps
     Wave 1 free of cross-module surgery.
     """
     import tomllib
-    path = Path(f"/opt/git/{client_type}/deploy.toml")
+    path = Path(f"/opt/git/sigmond/{client_type}/deploy.toml")
     try:
         if not path.exists():
             return []
@@ -227,7 +227,7 @@ def render_env(coord: Coordination,
     ``passthrough_lookup`` is the function that, given a client_type,
     returns the list of ``extras`` keys that client wants piped into
     coordination.env.  Defaults to reading the client's deploy.toml.
-    Tests inject a fake lookup to avoid touching ``/opt/git``.
+    Tests inject a fake lookup to avoid touching ``/opt/git/sigmond``.
     """
     if passthrough_lookup is None:
         passthrough_lookup = _passthrough_extras_for

@@ -34,7 +34,7 @@ from ..coordination import Coordination
 
 
 RADIOD_CONFIG_DIR = Path('/etc/radio')
-GIT_BASE = Path('/opt/git')
+GIT_BASE = Path('/opt/git/sigmond')
 
 _DEFAULT_PRIORITY = 50      # mid-range when a fragment forgets to say
 

@@ -6,7 +6,7 @@
     "short": "96beda9",
     "ref": "main",
     "dirty": false,
-    "source": "/opt/git/hf-timestd/src/hf_timestd"
+    "source": "/opt/git/sigmond/hf-timestd/src/hf_timestd"
   },
   "contract_version": "0.2",
   "config_path": "/etc/hf-timestd/timestd-config.toml",

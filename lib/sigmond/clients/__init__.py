@@ -38,7 +38,7 @@ _CATALOG_CACHE = None
 
 
 def _cached_catalog():
-    """Cache load_catalog per process — avoids re-globbing /opt/git for
+    """Cache load_catalog per process — avoids re-globbing /opt/git/sigmond for
     every adapter lookup during a single command invocation."""
     global _CATALOG_CACHE
     if _CATALOG_CACHE is None:

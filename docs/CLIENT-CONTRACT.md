@@ -716,14 +716,17 @@ retention flag.
 
 #### 12.5 Pattern A canonical repo layout (SHOULD)
 
-The canonical repo location for a HamSCI client on a managed host is
-**`/opt/git/<client>`**, owned `mjh:<service-group>` and
+The canonical repo location for a sigmond-managed HamSCI client is
+**`/opt/git/sigmond/<client>`**, owned `mjh:<service-group>` and
 group-writable, with a convenience symlink `~/git/<client> →
-/opt/git/<client>`.  The service user must be a member of
-`<service-group>`.
+/opt/git/sigmond/<client>`.  The service user must be a member of
+`<service-group>`.  The `/opt/git/sigmond/` namespace is reserved for
+clients sigmond installs and discovers; non-sigmond infra repos
+(`ka9q-radio`, `ka9q-web`, `ka9q-python`, `ka9q-update`) live in the
+parent `/opt/git/` directly so they remain available for general use.
 
-Anti-pattern: `install.sh` writing a symlink `/opt/git/<client> →
-~/git/<client>`.  This fails the mode-700 home-traversability check
+Anti-pattern: `install.sh` writing a symlink `/opt/git/sigmond/<client>
+→ ~/git/<client>`.  This fails the mode-700 home-traversability check
 for service users and must not be shipped in new client install
 scripts.  `hf-timestd` and `psk-recorder` both originally hit this
 trap; both now use Pattern A.

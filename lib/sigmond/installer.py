@@ -1,6 +1,6 @@
 """Sigmond catalog-driven client installer.
 
-Clones a client repo to /opt/git/<name> and runs its canonical install.sh.
+Clones a client repo to /opt/git/sigmond/<name> and runs its canonical install.sh.
 Each client's install.sh is authoritative — sigmond delegates, not duplicates.
 """
 
@@ -14,7 +14,7 @@ from typing import Optional
 
 from .catalog import CatalogEntry
 
-GIT_BASE = Path('/opt/git')
+GIT_BASE = Path('/opt/git/sigmond')
 
 
 def _normalize_remote_url(repo_dir: Path, https_url: str) -> None:
