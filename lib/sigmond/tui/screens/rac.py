@@ -20,6 +20,26 @@ _WD_CONF     = Path('/etc/wsprdaemon/wsprdaemon.conf')
 _ADMIN_URL   = 'http://127.0.0.1:7500'
 
 
+def _read_frpc_toml() -> dict:
+    """Read /etc/sigmond/frpc.toml, falling back to sudo when permission-denied."""
+    import tomllib
+    try:
+        with open(_FRPC_CONFIG, 'rb') as f:
+            return tomllib.load(f)
+    except PermissionError:
+        pass
+    try:
+        r = subprocess.run(
+            ['sudo', 'cat', str(_FRPC_CONFIG)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+        if r.returncode == 0:
+            return tomllib.loads(r.stdout)
+    except Exception:
+        pass
+    return {}
+
+
 def _detect_rac_defaults_tui(current_id: str, current_num: str) -> tuple[str, str]:
     """Try to fill in rac_id / rac_number from the wsprdaemon v4 config."""
     if not _WD_CONF.exists():
@@ -158,30 +178,22 @@ class RacScreen(Vertical):
     def __init__(self, topology, **kwargs) -> None:
         super().__init__(**kwargs)
         self._topology = topology
-        comp = (topology.components.get('wd-rac') if hasattr(topology, 'components')
-                else {})
-        if comp:
-            self._rac_id     = getattr(comp, 'rac_id', '') or ''
-            self._rac_number = str(getattr(comp, 'rac_number', '') or '')
-        else:
-            self._rac_id = ''
-            self._rac_number = ''
+        self._rac_id     = ''
+        self._rac_number = ''
 
-        # Pre-fill from existing frpc.toml (preferred) or legacy frpc.ini
-        if not self._rac_id and _FRPC_CONFIG.exists():
-            try:
-                import tomllib
-                with open(_FRPC_CONFIG, 'rb') as f:
-                    cfg = tomllib.load(f)
-                for proxy in cfg.get('proxies', []):
-                    if not proxy.get('name', '').endswith('-WEB'):
-                        self._rac_id = proxy.get('name', '')
-                        rp = proxy.get('remotePort', -1)
-                        if rp >= _PORT_BASE:
-                            self._rac_number = str(rp - _PORT_BASE)
-                        break
-            except Exception:
-                pass
+        # frpc.toml is the authoritative source — it reflects what is actually
+        # running.  Read it first (with sudo fallback for permission-denied).
+        if _FRPC_CONFIG.exists():
+            cfg = _read_frpc_toml()
+            for proxy in cfg.get('proxies', []):
+                if not proxy.get('name', '').endswith('-WEB'):
+                    self._rac_id = proxy.get('name', '')
+                    rp = proxy.get('remotePort', -1)
+                    if rp >= _PORT_BASE:
+                        self._rac_number = str(rp - _PORT_BASE)
+                    break
+
+        # Legacy frpc.ini fallback
         if not self._rac_id and _FRPC_INI.exists():
             try:
                 cfg = configparser.ConfigParser()
@@ -196,7 +208,7 @@ class RacScreen(Vertical):
             except Exception:
                 pass
 
-        # Fall back to wsprdaemon.conf auto-detection
+        # Last resort: wsprdaemon.conf auto-detection
         if not self._rac_id or self._rac_number in ('', '-1'):
             self._rac_id, self._rac_number = _detect_rac_defaults_tui(
                 self._rac_id, self._rac_number
