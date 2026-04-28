@@ -1736,10 +1736,18 @@ def _ensure_fft_wisdom(radiod_units: list, all_units: list) -> bool:
     _info(f'FFT wisdom: checking {len(_FFT_WISDOM_PROFILES)} profiles '
           f'(skips already-planned transforms — fast if wisdom is current)')
 
+    # stdbuf -oL forces line-buffered stdout so each progress line from
+    # fftwf-wisdom is flushed to the log immediately (C stdio defaults to
+    # full-block buffering when stdout is a file, silencing tail -f for hours).
+    _stdbuf = shutil.which('stdbuf')
+    wisdom_cmd = (
+        [_stdbuf, '-oL'] if _stdbuf else []
+    ) + [str(_FFTWF_WISDOM_BIN), '-v', '-T', '1',
+         '-o', str(_WISDOM_TMP)] + _FFT_WISDOM_PROFILES
+
     with open(_WISDOM_LOG, 'w') as log_f:
         proc = subprocess.Popen(
-            [str(_FFTWF_WISDOM_BIN), '-v', '-T', '1',
-             '-o', str(_WISDOM_TMP)] + _FFT_WISDOM_PROFILES,
+            wisdom_cmd,
             stdout=log_f, stderr=subprocess.STDOUT,
             start_new_session=True,   # insulate from terminal Ctrl+C
         )
