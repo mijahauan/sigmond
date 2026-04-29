@@ -262,6 +262,35 @@ installs and discovers.  Non-sigmond infrastructure (`ka9q-radio`,
 parent `/opt/git/` directly so that directory remains usable for
 unrelated repos.
 
+### Pattern A traversability for symlinked checkouts (mode-700 homedirs)
+
+When a client's checkout is staged in a developer's homedir and a
+symlink is placed at `/opt/git/sigmond/<name>/`, the client's
+*service user* must be able to traverse the homedir.  Many distros
+ship homedirs at mode `700` (read/write/exec only for the owner) —
+this blocks any service user other than the homedir owner from
+following the symlink to the source tree.  `install.sh` catches this
+in the Pattern A traversability check and refuses the install with
+a clear error.
+
+The standard Linux convention is mode `701` or `711` for homedirs
+that contain content meant to be reachable via explicit paths
+(traversal-only, no listing): the owner retains full
+read/write/exec, others can `cd` through but cannot `ls`.  Apply it
+once per affected homedir:
+
+```bash
+sudo chmod o+x /home/wsprdaemon
+sudo chmod o+x /home/mjh                 # if hosting symlinked checkouts
+```
+
+This is needed today on hosts whose `/opt/git/sigmond/<name>/` is a
+symlink into a homedir.  On this dev host that's
+`gpsdo-monitor`, `hfdl-recorder`, `wsprdaemon-client`, and (when
+staged similarly) `codar-sounder`.  Real-directory checkouts owned
+by `root` under `/opt/git/sigmond/` don't need this — only the
+symlink-into-homedir layout does.
+
 Hosts installed before the namespace move will have sigmond clients at
 `/opt/git/<name>/`.  Move them once with:
 
