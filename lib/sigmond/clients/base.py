@@ -49,6 +49,7 @@ class ClientView:
     deploy_toml_path: Optional[Path] = None                           # v0.5 §3 amendment
     instances:        list = field(default_factory=list)              # list[InstanceView]
     issues:           list = field(default_factory=list)              # list[str]
+    quality:          Optional[dict] = None                           # §17 — runtime stream-quality snapshot
 
 
 class ClientAdapter:

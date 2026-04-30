@@ -10,6 +10,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'lib'))
@@ -273,6 +274,226 @@ class ValidateNativeTests(unittest.TestCase):
         self.assertEqual(len(issues), 2)
         self.assertEqual(issues[0]['severity'], 'warn')
         self.assertEqual(issues[1]['severity'], 'error')
+
+
+class ReadQualityTests(unittest.TestCase):
+    """`read_quality()` reads the optional `<binary> quality --json`
+    surface (CLIENT-CONTRACT.md §17 — first implemented by hf-timestd
+    for sigmond's packet-loss diagnostic loop).  Failure modes are all
+    silent (return None) — a client that doesn't implement the
+    subcommand is not a sigmond-level issue; it just means the
+    consumer-quality classifier in Phase 7e gets nothing to classify.
+    """
+
+    def setUp(self):
+        self.adapter = _HFTimestdAdapter()
+
+    def _patch_run(self, stdout='', returncode=0, side_effect=None):
+        target = 'sigmond.clients.contract.subprocess.run'
+        if side_effect is not None:
+            return mock.patch(target, side_effect=side_effect)
+        return mock.patch(target,
+                          return_value=FakeCompleted(stdout, returncode))
+
+    def test_binary_not_on_path_returns_none(self):
+        with mock.patch.object(self.adapter, 'find_binary',
+                               return_value=None):
+            self.assertIsNone(self.adapter.read_quality())
+
+    def test_subprocess_timeout_returns_none(self):
+        with mock.patch.object(self.adapter, 'find_binary',
+                               return_value='/usr/bin/hf-timestd'), \
+             self._patch_run(side_effect=__import__('subprocess')
+                                          .TimeoutExpired('hf-timestd', 5)):
+            self.assertIsNone(self.adapter.read_quality())
+
+    def test_nonzero_exit_returns_none(self):
+        # Older client without the 'quality' subcommand: argparse exits
+        # non-zero with usage on stderr.
+        with mock.patch.object(self.adapter, 'find_binary',
+                               return_value='/usr/bin/hf-timestd'), \
+             self._patch_run(stdout='', returncode=2):
+            self.assertIsNone(self.adapter.read_quality())
+
+    def test_malformed_json_returns_none(self):
+        with mock.patch.object(self.adapter, 'find_binary',
+                               return_value='/usr/bin/hf-timestd'), \
+             self._patch_run(stdout='{not json', returncode=0):
+            self.assertIsNone(self.adapter.read_quality())
+
+    def test_non_dict_top_level_returns_none(self):
+        # Defensive: a client emitting a JSON list at top level isn't
+        # contract-conformant.  Don't pass it through.
+        with mock.patch.object(self.adapter, 'find_binary',
+                               return_value='/usr/bin/hf-timestd'), \
+             self._patch_run(stdout='["not", "a", "dict"]', returncode=0):
+            self.assertIsNone(self.adapter.read_quality())
+
+    def test_normal_payload_passes_through(self):
+        payload = {
+            "schema_version": 1, "client": "hf-timestd",
+            "captured_at": 1000.0,
+            "recorders": [
+                {"description": "WWV_5000",
+                 "completeness_pct": 99.97,
+                 "packets_lost_total": 7,
+                 "packets_lost_rate": 0.02},
+            ],
+            "summary": {"recorder_count": 1, "total_packets_lost": 7},
+            "stale_seconds": 1.5,
+        }
+        with mock.patch.object(self.adapter, 'find_binary',
+                               return_value='/usr/bin/hf-timestd'), \
+             self._patch_run(stdout=json.dumps(payload), returncode=0):
+            got = self.adapter.read_quality()
+        self.assertEqual(got, payload)
+
+    def test_error_payload_still_returned(self):
+        # Daemon stopped → CLI exits 0 with error marker.  The adapter
+        # passes it through; Phase 7e's caller decides what to do.
+        payload = {"client": "hf-timestd",
+                   "error": "snapshot_missing",
+                   "snapshot_path": "/run/hf-timestd/quality.json"}
+        with mock.patch.object(self.adapter, 'find_binary',
+                               return_value='/usr/bin/hf-timestd'), \
+             self._patch_run(stdout=json.dumps(payload), returncode=0):
+            got = self.adapter.read_quality()
+        self.assertEqual(got["error"], "snapshot_missing")
+
+
+class QualityIntegrationTests(unittest.TestCase):
+    """Phase 7e wiring: read_view populates ClientView.quality, and
+    validate_native emits a stale-snapshot warning when the daemon's
+    snapshot writer has stalled."""
+
+    def setUp(self):
+        self.adapter = _HFTimestdAdapter()
+        self.inv_json = (FIXTURES / 'hf-timestd-inventory.json').read_text()
+
+    def _patch(self, *, inventory_payload: str, quality_payload: Optional[str],
+               quality_returncode: int = 0):
+        """Patch subprocess.run to dispatch on the requested subcommand
+        — `inventory --json` returns one fixture, `quality --json`
+        another (or simulates an unsupported subcommand)."""
+        def fake_run(args, **_kw):
+            if 'quality' in args:
+                if quality_payload is None:
+                    return FakeCompleted('', returncode=2)
+                return FakeCompleted(quality_payload,
+                                     returncode=quality_returncode)
+            return FakeCompleted(inventory_payload, returncode=0)
+
+        return mock.patch('sigmond.clients.contract.subprocess.run',
+                          side_effect=fake_run), \
+               mock.patch.object(self.adapter, 'find_binary',
+                                 return_value='/usr/bin/hf-timestd')
+
+    def test_read_view_populates_quality(self):
+        q_payload = json.dumps({
+            "client": "hf-timestd", "stale_seconds": 0.5,
+            "summary": {"recorder_count": 9},
+            "recorders": [],
+        })
+        run_patch, bin_patch = self._patch(inventory_payload=self.inv_json,
+                                           quality_payload=q_payload)
+        with run_patch, bin_patch:
+            view = self.adapter.read_view()
+        self.assertIsNotNone(view.quality)
+        self.assertEqual(view.quality["stale_seconds"], 0.5)
+        self.assertEqual(view.quality["summary"]["recorder_count"], 9)
+
+    def test_read_view_quality_none_when_subcommand_unsupported(self):
+        run_patch, bin_patch = self._patch(inventory_payload=self.inv_json,
+                                           quality_payload=None)
+        with run_patch, bin_patch:
+            view = self.adapter.read_view()
+        self.assertIsNone(view.quality)
+
+    def test_validate_native_warns_on_stale_snapshot(self):
+        q_payload = json.dumps({
+            "client": "hf-timestd", "stale_seconds": 90.0,  # > 30s
+            "recorders": [],
+        })
+        # validate --json returns no native issues; the staleness
+        # warning is the only thing the adapter emits.
+        validate_payload = json.dumps({"ok": True, "issues": []})
+
+        def fake_run(args, **_kw):
+            if 'quality' in args:
+                return FakeCompleted(q_payload, returncode=0)
+            return FakeCompleted(validate_payload, returncode=0)
+
+        with mock.patch('sigmond.clients.contract.subprocess.run',
+                        side_effect=fake_run), \
+             mock.patch.object(self.adapter, 'find_binary',
+                               return_value='/usr/bin/hf-timestd'):
+            issues = self.adapter.validate_native()
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]['severity'], 'warn')
+        self.assertIn('stale', issues[0]['message'])
+        self.assertIn('90.0s', issues[0]['message'])
+
+    def test_validate_native_silent_when_snapshot_fresh(self):
+        q_payload = json.dumps({
+            "client": "hf-timestd", "stale_seconds": 0.5,
+            "recorders": [],
+        })
+        validate_payload = json.dumps({"ok": True, "issues": []})
+
+        def fake_run(args, **_kw):
+            if 'quality' in args:
+                return FakeCompleted(q_payload, returncode=0)
+            return FakeCompleted(validate_payload, returncode=0)
+
+        with mock.patch('sigmond.clients.contract.subprocess.run',
+                        side_effect=fake_run), \
+             mock.patch.object(self.adapter, 'find_binary',
+                               return_value='/usr/bin/hf-timestd'):
+            issues = self.adapter.validate_native()
+        self.assertEqual(issues, [])
+
+    def test_validate_native_silent_when_quality_unsupported(self):
+        # A client without the quality subcommand: no stale-warning
+        # ever, regardless of native validate state.
+        validate_payload = json.dumps({"ok": True, "issues": []})
+
+        def fake_run(args, **_kw):
+            if 'quality' in args:
+                return FakeCompleted('', returncode=2)  # unsupported
+            return FakeCompleted(validate_payload, returncode=0)
+
+        with mock.patch('sigmond.clients.contract.subprocess.run',
+                        side_effect=fake_run), \
+             mock.patch.object(self.adapter, 'find_binary',
+                               return_value='/usr/bin/hf-timestd'):
+            issues = self.adapter.validate_native()
+        self.assertEqual(issues, [])
+
+    def test_validate_native_passes_through_native_issues(self):
+        # Existing native validate issues survive the stale-snapshot
+        # extension untouched.
+        q_payload = json.dumps({
+            "client": "hf-timestd", "stale_seconds": 1.0,
+            "recorders": [],
+        })
+        validate_payload = json.dumps({
+            "ok": False,
+            "issues": [{"severity": "warn", "instance": "default",
+                        "message": "storage near quota"}],
+        })
+
+        def fake_run(args, **_kw):
+            if 'quality' in args:
+                return FakeCompleted(q_payload, returncode=0)
+            return FakeCompleted(validate_payload, returncode=0)
+
+        with mock.patch('sigmond.clients.contract.subprocess.run',
+                        side_effect=fake_run), \
+             mock.patch.object(self.adapter, 'find_binary',
+                               return_value='/usr/bin/hf-timestd'):
+            issues = self.adapter.validate_native()
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]['message'], 'storage near quota')
 
 
 if __name__ == '__main__':

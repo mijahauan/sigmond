@@ -25,6 +25,14 @@ from .base import ClientAdapter, ClientView, DiskWrite, InstanceView
 
 SUPPORTED_CONTRACT_VERSION = "0.4"
 
+# Threshold above which a quality-snapshot's age is reported as a
+# warn-level validate issue.  6× the snapshot writer's 5 s cadence —
+# generous enough that one slow tick doesn't false-fire, tight enough
+# to catch a stalled main loop.  Sigmond-level (process supervision),
+# not consumer-significance (Phase-7 plan: "consumer owns significance,
+# sigmond owns allocation").
+QUALITY_STALE_THRESHOLD_S = 30.0
+
 
 class ContractAdapter(ClientAdapter):
     """Default adapter for any contract-conformant client."""
@@ -105,21 +113,86 @@ class ContractAdapter(ClientAdapter):
             msg = issue.get('message', '')
             view.issues.append(f"[{sev}] {msg}")
 
+        # Optional §17 surface — populates view.quality when the client
+        # implements `<binary> quality --json`.  Silent no-op otherwise.
+        view.quality = self.read_quality()
+
         return view
 
     def validate_native(self) -> list:
         binary = self.find_binary()
         if not binary:
             return []
+        issues: list = []
         try:
             proc = subprocess.run(
                 [binary, 'validate', '--json'],
                 capture_output=True, text=True,
                 timeout=self.timeout_sec,
             )
-            return (json.loads(proc.stdout) or {}).get('issues', [])
+            issues = list((json.loads(proc.stdout) or {}).get('issues', []))
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
-            return []
+            issues = []
+
+        # Stale-snapshot guard — sigmond-level supervision check.
+        # Only the daemon-hung case earns a sigmond-emitted issue; per-
+        # recorder thresholds (completeness%, lost rate) belong to the
+        # consumer's own validate output.
+        q = self.read_quality()
+        if q is not None:
+            stale = q.get("stale_seconds")
+            if isinstance(stale, (int, float)) and stale > QUALITY_STALE_THRESHOLD_S:
+                issues.append({
+                    "severity": "warn",
+                    "instance": None,
+                    "message": (
+                        f"quality snapshot stale ({stale:.1f}s > "
+                        f"{QUALITY_STALE_THRESHOLD_S:.0f}s) — daemon "
+                        f"snapshot writer may be stalled"
+                    ),
+                })
+        return issues
+
+    def read_quality(self) -> Optional[dict]:
+        """Return the client's runtime stream-quality snapshot, or None.
+
+        Optional contract surface (CLIENT-CONTRACT.md §17): clients that
+        capture per-stream RTP loss / completeness data expose it via
+        ``<binary> quality --json``.  hf-timestd was the first to
+        implement it; others may follow.
+
+        Failure modes that yield None (silent — not an issue, the client
+        simply doesn't implement this surface):
+          * binary not on PATH
+          * subprocess timeout
+          * non-zero exit (most commonly: argparse rejecting an unknown
+            'quality' subcommand on an older client)
+          * unparseable JSON
+
+        A successful invocation that returns ``{"error": "..."}`` IS
+        returned to the caller — that's the daemon-running-but-stale
+        signal Phase 7e converts into a sigmond-level warning.  Reading
+        ``stale_seconds`` and the per-recorder fields is the caller's
+        job, not this method's.
+        """
+        binary = self.find_binary()
+        if not binary:
+            return None
+        try:
+            proc = subprocess.run(
+                [binary, 'quality', '--json'],
+                capture_output=True, text=True,
+                timeout=self.timeout_sec,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
 
 def _instance_from_contract(raw: dict) -> InstanceView:
