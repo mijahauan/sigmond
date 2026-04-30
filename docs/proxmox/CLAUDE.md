@@ -1,6 +1,6 @@
-# Proxmox VM Setup for Sigma — Context for Claude Code
+# Proxmox VM Setup for Sigmond — Context for Claude Code
 
-This directory documents the Proxmox VE host configuration required to run sigma (and wsprdaemon / ka9q-radio / radiod) inside a virtual machine with full bare-metal SDR performance.
+This directory documents the Proxmox VE host configuration required to run sigmond (and wsprdaemon / ka9q-radio / radiod) inside a virtual machine with full bare-metal SDR performance.
 
 ## When to read these documents
 
@@ -29,19 +29,18 @@ PCIe USB controller passthrough setup. Covers:
 This is the **first** document to read. The setup it describes is the prerequisite for everything else.
 
 ### `wsprdaemon-proxmox-cpu-clock-tuning.md`
-CPU isolation, hyperthread pair exposure, per-vCPU pinning, and clock accuracy. Phased runbook with explicit reboot points. Covers:
-- Verifying host hyperthread pairing (5560U is sequential — `0,1 / 2,3 / …`)
-- Two-layer CPU partition: host gets cores 4–5 (CPUs 8–11); VM gets cores 0–3 (CPUs 0–7 = 8 vCPUs)
-- Exposing real HT pairs to the guest via QEMU `args: -smp ...,threads=2` (Proxmox's `qm` CLI does not expose `threads` directly)
-- **Per-vCPU pinning** via Proxmox hookscript so vCPU N → host CPU N is fixed (mandatory — process-wide affinity alone lets vCPU threads float and breaks L1/L2 sharing for radiod's HT pair)
-- Two-layer `isolcpus`: host `isolcpus=0-7` keeps Proxmox kernel off VM cores; guest `isolcpus=0,1` keeps guest kernel off radiod's pair
-- Cross-checking against sigmond's existing affinity logic (`lib/sigmond/cpu.py`, `harmonize.py`)
-- Validation tests at each phase
+CPU isolation, hyperthread pair exposure, and clock accuracy. Covers:
+- Identifying host hyperthread pairs (sequential vs split pairing)
+- Choosing VM CPU affinity that preserves hyperthread pair topology (worked example for Ryzen 5 5560U)
+- Exposing hyperthread topology to the guest via QEMU `args:` (Proxmox's `qm` CLI does not expose `threads` directly)
+- Isolating VM CPUs from the host scheduler with `isolcpus`, `nohz_full`, `rcu_nocbs`
+- Migrating from ntpd / systemd-timesyncd to chrony inside the VM with low-latency stratum-1 servers
+- Addressing the AMD APU "TSC found unstable" warning via `tsc=reliable processor.max_cstate=1` (works around BIOS-locked mini PCs)
+- **Per-vCPU pinning via Proxmox hookscript (Part 9) — required for SMT to actually work end-to-end on AMD Ryzen guests**
+- Validation tests for each layer
+- Operational observations under load and IRQ affinity hygiene (Part 10)
 
 This is the **second** document, addressing tuning work that follows the basic passthrough setup.
-
-### `wsprdaemon-proxmox-bios-checklist.md`
-**Offline-friendly** reference for the BIOS visit (Phase 1 of the tuning runbook). Read this on a phone or Mac while sitting in BIOS — Claude Code is not available pre-OS. Covers C-state disabling, HPET, Invariant TSC, vendor-name variations, fallback to `tsc=reliable` if BIOS can't fix it.
 
 ## Critical constraints that must not be violated
 
@@ -56,45 +55,43 @@ These are non-negotiable based on the working configuration. If a future change 
 ### VM configuration
 - **`machine: q35` is mandatory** for PCIe passthrough. The default i440fx fails immediately with "q35 machine model is not enabled at PCI.pm line 514."
 - **No `usb*` device passthrough lines** — the host no longer has those USB buses, so they fail at VM start. The RX-888 enumerates inside the VM via the passed-through xHCI controllers.
-- **CPU affinity must include both hyperthread siblings of each physical core.** On this 5560U with **sequential** pairing, `affinity: 0-7` gives 4 physical cores worth (cores 0–3) cleanly. Verify pairing with `cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | sort -u` — the docs were originally written assuming AMD split pairing, which is **wrong for this 5560U**.
-- **`cores: 4` and `args: -smp 8,sockets=1,cores=4,threads=2,maxcpus=8`** in `101.conf`. Proxmox's `qm` CLI does not expose `threads`, so the only way to give the guest real HT topology is the raw `-smp` injection. Without this the guest sees a flat topology.
-- **Per-vCPU pinning is mandatory, not optional.** Process-wide `affinity:` alone lets vCPU threads float across host CPUs 0–7 and breaks L1/L2 sharing for radiod's HT pair. A Proxmox hookscript (`/var/lib/vz/snippets/vm-101-affinity.sh`, registered with `qm set 101 --hookscript local:snippets/vm-101-affinity.sh`) pins each vCPU to a specific host CPU on `post-start`.
-- **Two layers of CPU isolation:**
-  - Host kernel cmdline: `isolcpus=0-7 nohz_full=0-7 rcu_nocbs=0-7` — keeps Proxmox kernel work off VM cores.
-  - Guest kernel cmdline: `isolcpus=0,1 nohz_full=0,1 rcu_nocbs=0,1` — keeps guest kernel work off radiod's HT pair (vCPU 0,1).
-- **Host reservation:** cores 4–5 (CPUs 8–11) belong to Proxmox. The host runs only on those four logical CPUs once `isolcpus=0-7` is in effect — that is enough for SSH, Proxmox UI, networking, and ZFS, but tight. Don't run anything else on this host.
+- **CPU affinity must include both hyperthread siblings of each physical core**, not just sequential CPU numbers. The Ryzen 5 5560U / 5825U / 7530U U-series mobile parts use **sequential pairing** (cores 0+1 are HT siblings, 2+3, 4+5, etc.), so `affinity: 0-9` correctly preserves five HT pairs. Some AMD desktop/server parts use **split pairing** (cores 0+N are siblings) where `affinity: 0-4,8-12` is the equivalent. Verify with `/sys/devices/system/cpu/cpuN/topology/thread_siblings_list` before assuming.
+- **Guest topology requires `args: -smp ...,threads=2`** in the conf file because Proxmox's `qm` CLI does not expose the threads parameter. Without this, the guest sees a flat topology and radiod's hyperthread pair detection fails.
+- **`-cpu host,topoext=on` is required in `args:`** for AMD Ryzen guests. Without `topoext`, QEMU emits a hyperthreading warning at start and the guest CPU doesn't properly advertise SMT to the OS, even though Linux accepts the topology. Proxmox's `cpu:` field cannot set `topoext` (security restriction), so it must go in `args:`.
+- **Per-vCPU pinning hookscript is REQUIRED** (`/var/lib/vz/snippets/cpu-pin-VMID.sh` attached via `--hookscript`). Without it, all vCPU threads bunch on a single host CPU under the Linux scheduler with `isolcpus=` in effect — a silent ~10x performance failure. The `affinity:` field is process-level, not per-vCPU, and does not prevent this. See Part 9 of the tuning doc.
 
 ### Time synchronization
 - **Use chrony, not ntpd or systemd-timesyncd** inside the VM. chrony tolerates virtualized clocks much better.
 - **The guest should use kvm-clock** as its clocksource. This is usually automatic but worth verifying with `cat /sys/devices/system/clocksource/clocksource0/current_clocksource`.
-- **AI6VN-1 status (2026-04-29):** chrony is already active, RMS offset ~80 µs, kvm-clock is the guest clocksource, ntpsec / systemd-timesyncd are inactive. Phase 5 of the tuning runbook can be skipped on this VM.
-
-### Hardware (this host)
-- **CPU:** AMD Ryzen 5 5560U (Lucienne, Zen 2 family, 6 cores / 12 threads).
-- **HT pairing:** sequential — `thread_siblings_list` for cpu0 is "0,1", cpu2 is "2,3", etc. NOT the split scheme (cpu0 siblings = "0,8") the original doc claimed for AMD APUs. Verify before committing.
-- VM: 101, hostname `AI6VN-1`.
+- **Host kernel must have `tsc=reliable processor.max_cstate=1`** in `GRUB_CMDLINE_LINUX_DEFAULT` to prevent the AMD APU TSC instability that otherwise destabilizes guest timing.
+- **Use explicit stratum-1 servers in chrony.conf**, not just regional pools — pools often select stratum-2/3 backends with worse latency. The validated reference list (good from California) is `time-b-wwv.nist.gov`, `time.cloudflare.com`, `time.google.com`, `time.apple.com`.
 
 ## Hardware context
 
-This system is an AMD Ryzen 5 **5560U** (Lucienne) mini PC. Key specifics:
+The reference system is a **KAMRUI mini PC with AMD Ryzen 5 5560U** (Renoir/Cezanne APU, 6 cores / 12 threads). Key specifics:
 
 - USB controllers `05:00.3` and `05:00.4`, both with PCI ID `1022:1639`
-- iGPU at `05:00.0` (sibling function — relevant for the reset bug)
-- Boot NVMe at `04:00.0` (separate IOMMU group, safe)
+- iGPU at `05:00.0` (sibling function on same physical device — relevant for the reset bug)
+- Boot NVMe at `04:00.0` (separate IOMMU group, safe to leave with host)
 - Two Intel I225-V Ethernet controllers (separate IOMMU groups)
-- BIOS reports unstable TSC (common quirk on these mini PCs)
-- 6 cores / 12 threads, **sequential HT pairing** (verified)
+- HT pairing is **sequential** (core 0 = CPUs 0+1, core 1 = CPUs 2+3, etc.)
+- BIOS is **locked-down AMI** — does not expose AMD CBS / C-state controls. TSC stability is achieved via kernel parameters (`tsc=reliable processor.max_cstate=1`) rather than BIOS.
 
-If working on different hardware, re-verify IOMMU groups, PCI device IDs, and HT pairing scheme before applying any of the procedures.
+Validated working configuration achieves:
+- 500 MB/s sustained RX-888 USB throughput with no transfer errors
+- ~63 µs RMS clock offset to NIST stratum-1 reference via chrony
+- 5 physical cores (10 vCPUs as 5 HT pairs) dedicated to VM, isolated from host scheduler
+
+Other AMD Ryzen U-series parts (5700U, 5825U, 7530U) found in similar mini PC boxes (KAMRUI, Beelink, Minisforum, GMKtec, NiPoGi, ACEMAGIC) use the same Renoir/Cezanne or related architectures and follow the same procedure. **Re-verify IOMMU groups and PCI IDs on each new machine** — they're usually consistent across this generation but it's not guaranteed.
+
+If working on completely different hardware (Intel, older AMD, server-class), re-verify everything from Part 1 of the setup doc.
 
 ## Task-specific guidance
 
 ### When asked to debug VM performance issues
 1. First check whether the basic setup in `wsprdaemon-proxmox-vm-setup.md` is intact: `lspci -nnk -s 05:00.3` should show `vfio-pci` as kernel driver in use
-2. Then check CPU isolation per `wsprdaemon-proxmox-cpu-clock-tuning.md` Phase 6 (validation)
-3. Verify per-vCPU pinning fired: `journalctl -t vm-101-affinity --since '1 hour ago'` should show 8 "pinned vCPU N to host CPU N" entries on every VM start
-4. Inside the VM, run `sudo smd diag cpu-affinity` — it should report no warnings, with radiod on vCPU 0,1 and other services on vCPU 2-7
-5. Don't suggest USB device passthrough as an alternative — it cannot meet the bandwidth requirement
+2. Then check CPU isolation per `wsprdaemon-proxmox-cpu-clock-tuning.md` Part 8
+3. Don't suggest USB device passthrough as an alternative — it cannot meet the bandwidth requirement
 
 ### When asked to add a new VM or migrate to new hardware
 1. Re-verify IOMMU groups on the new hardware
@@ -104,7 +101,7 @@ If working on different hardware, re-verify IOMMU groups, PCI device IDs, and HT
 ### When asked about clock accuracy issues
 1. Verify chrony is running and `chronyc tracking` shows reasonable offset
 2. Check guest clocksource is kvm-clock
-3. Investigate host TSC stability per `wsprdaemon-proxmox-bios-checklist.md`; the tuning doc references the BIOS doc from Phase 1
+3. Investigate host TSC stability per Part 6 of the tuning doc
 4. SDR timestamping for HamSCI GRAPE / WSPR / FT8 needs sub-millisecond accuracy — this is non-negotiable for the application
 
 ### When asked to update or upgrade Proxmox / kernel

@@ -1,9 +1,9 @@
-# Setting Up WSPRDAEMON / Sigma in a Virtual Machine Running Under Proxmox VE
+# Setting Up WSPRDAEMON / Sigmond in a Virtual Machine Running Under Proxmox VE
 
 **Author:** Rob Robinett (AI6VN / W0DAS)
 **Date:** April 2026
 **Hardware tested:** AMD Ryzen-class mini PC (Renoir/Cezanne APU) running Proxmox VE
-**Goal:** Run wsprdaemon / sigma + ka9q-radio inside a Proxmox VM with the RX-888 mk2 SDR achieving full bare-metal performance — sustained ~500 MB/s USB 3.0 transfer with no dropped samples.
+**Goal:** Run wsprdaemon / sigmond + ka9q-radio inside a Proxmox VM with the RX-888 mk2 SDR achieving full bare-metal performance — sustained ~500 MB/s USB 3.0 transfer with no dropped samples.
 
 ---
 

@@ -1,734 +1,327 @@
-# Proxmox VM — CPU Isolation, Hyperthread Pairs, Per-vCPU Pinning, and Clock Tuning Runbook
+# Configuring CPU Isolation, Hyperthread Pairs, and Clock Accuracy for WSPRDAEMON / Sigmond in a Proxmox VM
 
 **Author:** Rob Robinett (AI6VN / W0DAS)
 **Date:** April 2026
-**Companion to:** `wsprdaemon-proxmox-vm-setup.md` (PCIe USB passthrough — prerequisite)
-**Companion to:** `wsprdaemon-proxmox-bios-checklist.md` (offline reference for BIOS visit)
-**Goal:** Once PCIe USB passthrough is working, partition CPUs between
-host and VM, expose real hyperthread pairs to the guest, deterministically
-pin every guest vCPU to a specific host CPU, and reserve one in-guest
-HT pair for radiod alone.
+**Companion to:** `wsprdaemon-proxmox-vm-setup.md`
+**Goal:** Once PCIe USB passthrough is working, fully isolate the VM's assigned CPU cores from host workloads, expose host hyperthread pairs to the guest so that radiod can pin to real sibling threads, and stabilize the system clock for accurate SDR timestamping.
 
 ---
 
 ## Why this matters
 
-For sustained 500 MB/s SDR data with no dropped samples and
-sub-millisecond timestamping, four things matter:
+For sustained 500 MB/s SDR data with no dropped samples, three things matter beyond raw USB bandwidth:
 
-1. **No CPU contention on radiod's pair.** radiod's USB3/FFT thread
-   group is latency-sensitive. Anything else scheduled on those CPUs
-   adds jitter the tight loops cannot tolerate.
+1. **No CPU contention.** If the host scheduler runs anything else (kernel threads, cron jobs, the Proxmox web UI, ZFS) on the cores assigned to the VM, those tasks introduce jitter that radiod's tight loops cannot tolerate.
 
-2. **Real hyperthread topology in the guest.** radiod pins its
-   high-rate threads to a hyperthread sibling pair so they share L1/L2
-   cache. By default a Proxmox VM presents flat topology (no HT
-   siblings visible to the guest); sigmond falls back to assuming
-   consecutive pairs, but pinning still has to be honored at the host
-   level for the L1/L2 sharing to be real.
+2. **Correct hyperthread topology.** radiod pins its high-rate threads to a hyperthread sibling pair so the two cooperating threads share L1/L2 cache. By default a Proxmox VM presents a flat topology (no hyperthreads visible to the guest), so the guest's `thread_siblings_list` is wrong and radiod's pair-detection logic fails.
 
-3. **Deterministic per-vCPU placement.** Process-wide affinity (the
-   `affinity:` field) keeps QEMU on a set of host CPUs, but inside that
-   set vCPU threads are free to float. That floats radiod's "pair" off
-   real silicon HT siblings into different physical cores. Per-vCPU
-   pinning fixes vCPU N to a specific host CPU.
-
-4. **Stable, accurate clock.** SDR timestamping for HamSCI GRAPE, WSPR,
-   and FT8/FT4 demands sub-millisecond accuracy. Virtualized clocks
-   need chrony plus a stable host TSC (or a clean kvm-clock fallback).
+3. **Stable, accurate clock.** SDR timestamping for HamSCI GRAPE, WSPR, and FT8/FT4 demands sub-millisecond accuracy. Virtualized clocks are notoriously poor — especially on AMD APU mini PCs where the BIOS often reports an unstable TSC.
 
 ---
 
-## Hardware reference (this host)
+## Prerequisites
 
-CPU: **AMD Ryzen 5 5560U** (Lucienne, 6 cores / 12 threads).
+- PCIe USB passthrough working per `wsprdaemon-proxmox-vm-setup.md`
+- VM 101 running with `affinity: 0-9` (or similar) assigned
+- Root access on both host and guest
 
-HT pairing on this CPU is **sequential** — verify on the host before
-committing to the numbers below. Earlier versions of this document
-claimed AMD-style "split" pairing (sibling of CPU 0 is CPU 8); that is
-wrong for this hardware. Confirm by running on the host:
+---
+
+## Part 1 — Identify host hyperthread pairs
+
+Before anything else, you need to know which logical CPUs on the host are siblings of which physical core. This determines everything downstream.
+
+Run on the **host**:
+
+```bash
+for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
+    n=$(basename $cpu | sed 's/cpu//')
+    siblings=$(cat $cpu/topology/thread_siblings_list 2>/dev/null)
+    core=$(cat $cpu/topology/core_id 2>/dev/null)
+    printf "CPU %3s  core_id=%s  siblings=%s\n" "$n" "$core" "$siblings"
+done | sort -t= -k2 -n
+```
+
+You'll see one of two patterns. **Sequential pairing** (most common — used by Intel CPUs and by AMD Ryzen U-series mobile/embedded chips like the 5560U, 5700U, 5825U, 7530U found in most mini PCs):
+
+```
+CPU   0  core_id=0  siblings=0-1
+CPU   1  core_id=0  siblings=0-1
+CPU   2  core_id=1  siblings=2-3
+CPU   3  core_id=1  siblings=2-3
+CPU   4  core_id=2  siblings=4-5
+CPU   5  core_id=2  siblings=4-5
+...
+```
+
+Each physical core's two threads are consecutively numbered. Physical core 0 = CPUs 0+1, core 1 = CPUs 2+3, etc.
+
+**Split pairing** (less common — seen on some AMD desktop/server Ryzen and EPYC parts):
+
+```
+CPU   0  core_id=0  siblings=0,8
+CPU   1  core_id=1  siblings=1,9
+CPU   2  core_id=2  siblings=2,10
+...
+CPU   8  core_id=0  siblings=0,8
+CPU   9  core_id=1  siblings=1,9
+...
+```
+
+The first N CPUs are the "primary" thread of each core; the second N are the siblings. Physical core 0 = CPUs 0+N, core 1 = CPUs 1+(N+1), etc.
+
+Most KAMRUI / Beelink / Minisforum / GMKtec mini PCs based on Ryzen 5 5560U, 5700U, 5825U or Ryzen 7 7530U use **sequential pairing**, so this is the assumption used in the worked examples below.
+
+Or use a one-liner that just prints the unique pairs:
 
 ```bash
 cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | sort -u
-# Expected output (sequential):
-#   0,1
-#   2,3
-#   4,5
-#   6,7
-#   8,9
-#   10,11
 ```
 
-Host CPU/core map (sequential):
+**Write down the pairings** — you need them for steps 2, 3, and 4.
 
-| Physical core | Logical CPUs |
-|---|---|
-| core 0 | 0, 1 |
-| core 1 | 2, 3 |
-| core 2 | 4, 5 |
-| core 3 | 6, 7 |
-| core 4 | 8, 9 ← reserved for host |
-| core 5 | 10, 11 ← reserved for host |
-
----
-
-## Allocation plan (one VM only)
-
-- **Host (Proxmox OS):** cores 4–5 → CPUs 8–11 (4 logical CPUs).
-- **VM 101 (AI6VN-1):** cores 0–3 → CPUs 0–7 (4 physical, 8 vCPUs).
-- **Inside the VM:** vCPU 0,1 (one guest HT pair) reserved for radiod
-  alone via guest-side `isolcpus=0,1`. vCPU 2–7 for guest kernel and
-  every other service (sigmond, ka9q-web, hf-timestd, etc.).
-
-Two layers of `isolcpus`:
-
-| Layer | Boundary | Purpose |
-|---|---|---|
-| Host | `isolcpus=0-7` | Keep Proxmox kernel work off CPUs 0–7 so QEMU has them uncontested. |
-| Guest | `isolcpus=0,1` | Keep guest kernel work off vCPU 0,1 so radiod has its HT pair uncontested. |
-
-Per-vCPU pinning (Phase 2) makes vCPU N → host CPU N a fixed mapping,
-so the guest's vCPU 0,1 always lands on host CPUs 0,1 (a real HT pair).
-
----
-
-## Phases overview and reboot map
-
-| Phase | What changes | Where | Reboot? |
-|---|---|---|---|
-| 0 | Verify + snapshot | Host & VM | none |
-| 1 | BIOS settings (TSC, C-states) | Host BIOS | **HOST reboot** (into BIOS, save, out) |
-| 2 | VM conf (cores, args, affinity) + per-vCPU pinning hookscript | Host | **VM stop/start** only |
-| 3 | Host kernel cmdline (isolcpus, nohz_full, rcu_nocbs) | Host | **HOST reboot** (VM restarts too) |
-| 4 | Guest kernel cmdline (isolcpus=0,1) | VM | **VM reboot** |
-| 5 | chrony — already complete on AI6VN-1 | (skip) | none |
-| 6 | Validation | both | none |
-| 7 | Snapshot configs | both | none |
-
-Three reboots in total: two host, one guest. After each reboot the doc
-shows where to resume.
-
----
-
-## Phase 0 — Verify and snapshot (no changes)
-
-### 0.1 Verify HT pairing on the host
+Quick summary command:
 
 ```bash
-# On host
 lscpu --extended=CPU,CORE,SOCKET | head -20
-cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | sort -u
 ```
 
-If output is not sequential as shown in "Hardware reference" above,
-**stop and reconsider** — the affinity numbers below assume sequential
-pairing.
-
-### 0.2 Snapshot host configs
-
-```bash
-# On host
-sudo mkdir -p /root/proxmox-passthrough-backup
-sudo cp /etc/pve/qemu-server/101.conf  /root/proxmox-passthrough-backup/101.conf.pre-tuning
-sudo cp /etc/modprobe.d/vfio.conf      /root/proxmox-passthrough-backup/
-sudo cp /etc/default/grub              /root/proxmox-passthrough-backup/grub.host.pre-tuning
-sudo cp /etc/modules                   /root/proxmox-passthrough-backup/
-date | sudo tee /root/proxmox-passthrough-backup/saved-on-pre-tuning.txt
-```
-
-### 0.3 Snapshot guest configs
-
-```bash
-# Inside VM
-sudo mkdir -p /root/vm-config-backup
-sudo cp /etc/default/grub        /root/vm-config-backup/grub.guest.pre-tuning
-sudo cp /etc/chrony/chrony.conf  /root/vm-config-backup/
-sudo systemctl is-active chrony chronyd ntp ntpsec systemd-timesyncd > /root/vm-config-backup/timesync-state.txt 2>&1
-date | sudo tee /root/vm-config-backup/saved-on-pre-tuning.txt
-```
-
-### 0.4 Verify chrony state (so we know we can skip Phase 5)
-
-```bash
-# Inside VM
-systemctl is-active chrony   # expect: active
-chronyc tracking | head -10  # expect: stratum 2-3, RMS offset < 1 ms
-cat /sys/devices/system/clocksource/clocksource0/current_clocksource  # expect: kvm-clock
-```
-
-If chrony is **not** active, do the chrony migration described in
-"Appendix A — chrony migration" before continuing. As of 2026-04-29 on
-AI6VN-1, chrony is already active with RMS offset around 80 µs.
-
-### 0.5 Capture sigmond's current view of the affinity plan
-
-```bash
-# Inside VM
-sudo /opt/sigmond/venv/bin/python /home/sigmond/sigmond/bin/smd diag cpu-affinity --json | tee /root/vm-config-backup/smd-cpu-affinity.pre-tuning.json
-```
-
-This is the baseline — useful for diffing once the changes are in.
+The CORE column tells you which physical core each logical CPU belongs to. CPUs sharing a CORE value are hyperthread siblings.
 
 ---
 
-## Phase 1 — BIOS visit on the host
+## Part 2 — Choose VM CPU assignment based on hyperthread pairs
 
-> ⚠ **REBOOT REQUIRED**. Open `wsprdaemon-proxmox-bios-checklist.md` on
-> a separate device (phone, laptop, printed) — Claude Code is not
-> available during the BIOS visit. Follow the checklist, save changes,
-> and let the host reboot back into Proxmox.
+Your goal: pick **N physical cores** worth of host CPUs, including both siblings of each, for the VM. The exact CPUs depend on your host's pairing scheme.
 
-After Phase 1, return here for Phase 2.
+### Worked example: Ryzen 5 5560U (6 cores / 12 threads, sequential pairing)
 
-If chrony is currently sub-millisecond and you would rather defer the
-BIOS visit, you can skip Phase 1 and come back to it later. The
-remaining phases do not depend on it. The cost of skipping is that
-unstable-TSC warnings will keep appearing in `dmesg` and clock noise
-will be slightly higher.
+This is the reference hardware for these documents. Pairings are:
 
----
+| Physical core | Logical CPUs (HT pair) |
+|---|---|
+| 0 | 0, 1 |
+| 1 | 2, 3 |
+| 2 | 4, 5 |
+| 3 | 6, 7 |
+| 4 | 8, 9 |
+| 5 | 10, 11 |
 
-## Phase 2 — VM topology, affinity, and per-vCPU pinning
-
-This phase changes how the VM is launched. No host reboot. The VM is
-stopped and started once.
-
-### 2.1 Edit the VM config
-
-Edit `/etc/pve/qemu-server/101.conf` on the **host**. Change these
-fields (others — `hostpci0`, `hostpci1`, `machine: q35` — must remain
-untouched):
-
-```
-affinity: 0-7
-cores: 4
-sockets: 1
-args: -smp 8,sockets=1,cores=4,threads=2,maxcpus=8
-hookscript: local:snippets/vm-101-affinity.sh
-```
-
-Why each field:
-
-- `affinity: 0-7` — process-wide mask: QEMU may run only on host CPUs
-  0–7. (Phase 3 will also harden this with `isolcpus`.)
-- `cores: 4, sockets: 1` — the "Proxmox view" of the topology:
-  4 physical cores. `cores × threads` must equal total vCPUs.
-- `args: -smp 8,sockets=1,cores=4,threads=2,maxcpus=8` — the QEMU view:
-  8 vCPUs as 4 cores × 2 threads. Proxmox's `qm` CLI does not expose
-  `threads`, so the only way to give the guest real HT topology is
-  this raw `-smp` injection.
-- `hookscript: local:snippets/vm-101-affinity.sh` — runs the per-vCPU
-  pinning script after VM start (see 2.2).
-
-### 2.2 Install the per-vCPU pinning hookscript
-
-Per-vCPU pinning is the difference between "vCPU 0 is somewhere in the
-host CPU 0–7 range" and "vCPU 0 is exactly on host CPU 0". radiod
-**requires** the latter — without it, the guest HT pair (vCPU 0,1)
-can drift onto two different physical cores and lose L1/L2 sharing.
-
-Create the hookscript on the **host**:
+To assign 5 physical cores (10 vCPUs) to the VM and leave 1 physical core (2 logical CPUs) for the host:
 
 ```bash
-sudo install -d /var/lib/vz/snippets
+qm set 101 --affinity 0-9
+```
 
-sudo tee /var/lib/vz/snippets/vm-101-affinity.sh <<'EOF'
-#!/bin/bash
-# Per-vCPU pinning for VM 101 on AMD Ryzen 5 5560U.
-# Pin vCPU N to host CPU N so guest HT pair (vCPU 0,1) lands on
-# real host HT siblings (host CPU 0,1) — required for radiod.
-set -e
-vmid=$1
-phase=$2
+This gives the VM physical cores 0-4 (both threads of each), reserving core 5 (CPUs 10-11) for the host. Sequential pairing means a contiguous range like `0-9` correctly preserves all five HT pairs.
 
-# Only act on the post-start phase, and only for VM 101.
-[ "$phase" = "post-start" ] || exit 0
-[ "$vmid" = "101" ]          || exit 0
+The Ryzen 5 5825U and Ryzen 7 5825U/7530U found in similar mini PCs use the same scheme. For an 8-core part you'd use `affinity: 0-13` to give the VM 7 physical cores and reserve core 7.
 
-pid_file=/run/qemu-server/${vmid}.pid
-[ -r "$pid_file" ] || { logger -t vm-${vmid}-affinity "no pid file"; exit 0; }
-pid=$(cat "$pid_file")
+### Alternative: split-pairing CPUs (AMD desktop/server parts)
 
-# 1:1 vCPU → host CPU.  VM has 8 vCPUs; host CPUs 0-7 are the VM pool;
-# host CPUs 8-11 are reserved for the Proxmox host OS.
-declare -A pin=(
-    [0]=0  [1]=1  [2]=2  [3]=3
-    [4]=4  [5]=5  [6]=6  [7]=7
-)
+If your `thread_siblings_list` showed split pairing (e.g., siblings of CPU 0 are CPU 0 and CPU 8), then sequential ranges break HT pair preservation. To assign 5 physical cores you would instead use:
 
-# Give QEMU a moment to spawn all vCPU threads.  post-start fires after
-# QEMU is up but vCPU naming can lag fractionally.
-for attempt in 1 2 3 4 5; do
-    found=0
-    for tdir in /proc/${pid}/task/*/; do
-        tid=$(basename "$tdir")
-        name=$(cat "${tdir}comm" 2>/dev/null) || continue
-        # vCPU thread names look like:  CPU 0/KVM
-        if [[ $name =~ ^CPU\ ([0-9]+)/KVM$ ]]; then
-            vcpu=${BASH_REMATCH[1]}
-            host_cpu=${pin[$vcpu]}
-            if [ -n "$host_cpu" ]; then
-                if taskset -pc "$host_cpu" "$tid" >/dev/null; then
-                    logger -t vm-${vmid}-affinity \
-                        "pinned vCPU $vcpu (tid $tid) to host CPU $host_cpu"
-                    found=$((found+1))
-                fi
-            fi
-        fi
-    done
-    [ "$found" -ge 8 ] && exit 0
-    sleep 0.5
+```bash
+qm set 101 --affinity 0-4,8-12
+```
+
+This gives both threads of each of physical cores 0-4. The pattern is "first N cores plus their siblings."
+
+### Verify your choice
+
+```bash
+# After setting affinity, list the host CPU assignments and which physical cores they correspond to
+for c in $(seq 0 9); do   # adjust to match your affinity list
+    core=$(cat /sys/devices/system/cpu/cpu$c/topology/core_id)
+    siblings=$(cat /sys/devices/system/cpu/cpu$c/topology/thread_siblings_list)
+    echo "Host CPU $c -> physical core $core (siblings: $siblings)"
 done
-
-logger -t vm-${vmid}-affinity "warning: pinned only $found/8 vCPUs"
-exit 0
-EOF
-
-sudo chmod +x /var/lib/vz/snippets/vm-101-affinity.sh
 ```
 
-Register the hookscript with the VM (already in the conf if you edited
-it manually in 2.1, but this enforces it):
-
-```bash
-sudo qm set 101 --hookscript local:snippets/vm-101-affinity.sh
-```
-
-### 2.3 Restart the VM
-
-```bash
-# On host
-sudo qm stop 101
-sudo qm start 101
-```
-
-### 2.4 Verify Phase 2
-
-On the **host**:
-
-```bash
-# QEMU was launched with the right -smp string
-ps -ef | grep qemu-system-x86_64 | grep -- '-smp'
-# Expect: -smp 8,sockets=1,cores=4,threads=2,maxcpus=8
-
-# Per-vCPU pinning succeeded — check syslog
-sudo journalctl -t vm-101-affinity --since '5 minutes ago' --no-pager
-# Expect 8 lines: "pinned vCPU N (tid ...) to host CPU N" for N=0..7
-
-# Live confirmation: each vCPU thread's affinity mask
-pid=$(cat /run/qemu-server/101.pid)
-for tdir in /proc/${pid}/task/*/; do
-    tid=$(basename "$tdir")
-    name=$(cat "${tdir}comm" 2>/dev/null)
-    [[ $name == "CPU "*"/KVM" ]] || continue
-    mask=$(grep Cpus_allowed_list /proc/${pid}/task/${tid}/status | awk '{print $2}')
-    printf '%-12s tid=%s allowed=%s\n' "$name" "$tid" "$mask"
-done | sort
-# Expect each "CPU N/KVM" allowed=N (single CPU, no range).
-```
-
-Inside the **VM**:
-
-```bash
-# Guest now sees 4×2 topology, not flat
-lscpu | grep -E 'Thread|Core|Socket|CPU\(s\)'
-# Expect:
-#   CPU(s): 8
-#   Thread(s) per core: 2
-#   Core(s) per socket: 4
-#   Socket(s): 1
-
-# Sibling list shows pairs, not singletons
-cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list   # 0,1
-cat /sys/devices/system/cpu/cpu2/topology/thread_siblings_list   # 2,3
-```
-
-### 2.5 Gate
-
-- RX-888 still enumerates at SuperSpeed (`lsusb -t` shows `5000M`).
-- No xhci errors (`dmesg | grep -iE 'xhci|usb' | grep -iE 'error|fail|reset|halt'` is empty).
-- radiod can still start. If radiod was running, restart it: `sudo systemctl restart radiod@*`.
-- `sudo /opt/sigmond/venv/bin/python /home/sigmond/sigmond/bin/smd diag cpu-affinity` reports radiod assigned to vCPUs 0,1 with no warnings.
-
-If anything fails, restore `/etc/pve/qemu-server/101.conf` from
-`/root/proxmox-passthrough-backup/101.conf.pre-tuning` and stop here to
-investigate before continuing.
+You should see each physical `core_id` listed exactly twice (once per sibling). If any core appears only once, you've forgotten to include its sibling.
 
 ---
 
-## Phase 3 — Host kernel cmdline: isolate CPUs 0–7
+## Part 3 — Expose hyperthread topology to the guest
 
-This phase keeps the Proxmox kernel from scheduling its own work on the
-VM's CPU pool.
+Proxmox's `qm` CLI does not expose the `threads` parameter — its `cores` field is really a vCPU count, not a physical-core count. To get the guest to see proper hyperthread pairs, you need to inject raw QEMU `-smp` arguments via the `args:` config option.
 
-### 3.1 Edit /etc/default/grub on the host
+For a 10-vCPU VM (5 physical cores × 2 threads):
+
+Edit `/etc/pve/qemu-server/101.conf` directly:
+
+```
+cores: 5
+sockets: 1
+args: -smp 10,sockets=1,cores=5,threads=2,maxcpus=10
+```
+
+The numbers must agree:
+- Proxmox `cores: 5` × `sockets: 1` = 5 (this is what Proxmox thinks it's allocating)
+- QEMU `-smp 10,sockets=1,cores=5,threads=2` says 10 total vCPUs as 5 physical cores × 2 threads
+- These agree because `cores × threads = total vCPUs`
+
+After editing:
 
 ```bash
-sudo cp /etc/default/grub /root/proxmox-passthrough-backup/grub.host.pre-isolcpus
-
-sudoedit /etc/default/grub
+qm stop 101
+qm start 101
 ```
 
-Modify the `GRUB_CMDLINE_LINUX_DEFAULT` line to **append**
-(do not remove the existing flags):
+**Verify inside the guest:**
+
+```bash
+# Inside VM 101
+lscpu | grep -E 'Thread|Core|Socket|CPU\(s\)'
+```
+
+Should report:
+```
+CPU(s):                  10
+Thread(s) per core:      2
+Core(s) per socket:      5
+Socket(s):               1
+```
+
+Then check that sibling lists are populated:
+
+```bash
+cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list
+cat /sys/devices/system/cpu/cpu1/topology/thread_siblings_list
+```
+
+You should see something like `0,5` and `1,6` (or whatever the QEMU topology produces). The key thing: each sibling list has **two** CPUs in it, not just one. That's what radiod needs to detect hyperthread pairs.
+
+If `thread_siblings_list` still contains only the CPU itself, the `args:` line didn't take. Check `qm config 101` to confirm it's there, and `ps -ef | grep qemu-system | grep -- -smp` on the host to see what arguments QEMU actually got.
+
+---
+
+## Part 4 — Isolate VM's CPUs from the host scheduler
+
+Now we keep the host kernel from scheduling its own work on the cores assigned to the VM. This is done at the host kernel command line.
+
+Edit `/etc/default/grub` on the **host**:
 
 ```
-GRUB_CMDLINE_LINUX_DEFAULT="quiet amd_iommu=on iommu=pt isolcpus=0-7 nohz_full=0-7 rcu_nocbs=0-7"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet amd_iommu=on iommu=pt isolcpus=0-9 nohz_full=0-9 rcu_nocbs=0-9"
 ```
 
-If you already added `tsc=reliable` from the BIOS-checklist fallback,
-keep it.
-
-What each parameter does:
+Replace `0-9` with the same CPU list you used for `affinity:`. Each parameter does:
 
 | Parameter | Effect |
 |---|---|
-| `isolcpus=0-7` | Removes those CPUs from the kernel's general scheduler pool. Nothing runs there unless explicitly pinned. |
-| `nohz_full=0-7` | Disables the periodic 1000 Hz timer tick on those CPUs when only one task is running. Eliminates ~1000 interrupts/sec of jitter. |
-| `rcu_nocbs=0-7` | Moves RCU callback processing off these CPUs onto the non-isolated ones (8–11). |
+| `isolcpus=` | Removes those CPUs from the kernel scheduler's general pool. Nothing runs there unless explicitly pinned. |
+| `nohz_full=` | Disables the periodic 1000 Hz timer tick on those CPUs when only one task is running. Eliminates ~1000 interrupts/sec of jitter. |
+| `rcu_nocbs=` | Moves RCU (Read-Copy-Update) callback processing off these CPUs to other CPUs. |
 
-### 3.2 Apply and reboot
+For split-pairing CPUs, the list would instead be `isolcpus=0-4,8-12` etc. — match whatever you set for `affinity:`.
 
-```bash
-sudo update-grub
-sudo reboot
-```
-
-> ⚠ **REBOOT REQUIRED — HOST**. The VM will go down with the host and
-> come back up automatically (assuming `onboot 1`). After the host is
-> back, SSH back in and resume at 3.3.
-
-### 3.3 Verify Phase 3 (after host reboot)
-
-On the **host**:
+Then:
 
 ```bash
-# Confirm cmdline took effect
-cat /proc/cmdline
-# Expect to see all three: isolcpus=0-7 nohz_full=0-7 rcu_nocbs=0-7
-
-# Confirm CPUs 0-7 are nearly empty of host work
-ps -eo pid,psr,comm | awk '$2 <= 7 && NR > 1 {print}' | sort -k2 -n | head -30
-# Expect: only QEMU vCPU threads (CPU N/KVM) and a few unmovable per-CPU
-# kernel threads (migration/N, idle_inject/N, cpuhp/N, ksoftirqd/N).
-# NO systemd, kworker (except per-cpu), pveproxy, etc.
-
-# Compare to non-isolated CPUs 8-11 — those should be busy
-ps -eo pid,psr,comm | awk '$2 >= 8 && $2 <= 11 && NR > 1 {print}' | sort -k2 -n | head
+update-grub
+reboot
 ```
 
-Inside the **VM**:
+**Verify after reboot:**
 
 ```bash
-# RX-888 still good
-lsusb -t | grep -i rx888 || lsusb | grep -i 'cypress\|04b4'
-dmesg | grep -iE 'xhci|usb' | grep -iE 'error|fail|reset|halt' | tail
-# Expect: zero error lines
-
-# radiod healthy
-sudo systemctl status 'radiod@*' --no-pager | head -20
+# Should show only QEMU/kvm processes on the isolated CPUs (plus per-CPU kernel threads which are unavoidable)
+ps -eo pid,psr,comm,class | awk 'NR==1 || ($2 < 10 && $1 > 1000)' | sort -k2 -n | head -30
 ```
 
-### 3.4 Gate
+You'll still see per-CPU pinned kernel threads (kworker, ksoftirqd, migration, rcu*, etc.) on the isolated CPUs. These are infrastructure threads tied to specific CPUs that cannot be moved — they consume essentially zero CPU at idle. What `isolcpus=` actually removes is general scheduling of userspace processes. Compare to non-isolated CPUs:
 
-- Host stays responsive on SSH (CPUs 8–11 are enough for Proxmox UI,
-  networking, and ZFS).
-- VM came back up cleanly.
-- RX-888 streams without errors.
+```bash
+ps -eo pid,psr,comm | awk '$2 == 10 || $2 == 11' | head
+```
 
-> 🛑 If host became unresponsive or services time out, the most common
-> cause is too few host CPUs. To roll back, edit `/etc/default/grub` to
-> remove the three new parameters and `update-grub && reboot`. Do this
-> via the host's console (display + keyboard, IPMI, or directly at the
-> machine) since SSH may be unreliable.
+Those non-isolated CPUs will be running everything else: pveproxy, sshd, systemd, ZFS workers, etc.
+
+**Caution:** if your host has 16 logical CPUs and you isolate 10 of them, the host has only 6 logical CPUs (3 physical cores) for everything else — Proxmox web UI, networking, ZFS, monitoring. For a dedicated SDR appliance this is fine. Make sure you're leaving enough host CPU for the rest of the system to function.
 
 ---
 
-## Phase 4 — Guest kernel cmdline: isolate vCPU 0,1 for radiod
+## Part 5 — Migrate VM from ntpd/systemd-timesyncd to chrony
 
-The second layer. Same mechanism, applied inside the VM.
+chrony handles virtualized clocks much better than ntpd. It tolerates stepwise jumps, slews faster after suspend/resume, and copes with the inevitable hiccups of running on top of an unstable host TSC.
 
-### 4.1 Edit /etc/default/grub inside the VM
+### Step 5a — Install chrony and remove competing time daemons
 
-```bash
-# Inside VM
-sudo cp /etc/default/grub /root/vm-config-backup/grub.guest.pre-isolcpus
-
-sudoedit /etc/default/grub
-```
-
-Modify `GRUB_CMDLINE_LINUX_DEFAULT` to **append**:
-
-```
-GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=0,1 nohz_full=0,1 rcu_nocbs=0,1"
-```
-
-(Keep any existing flags. If you already had `clocksource=kvm-clock`
-or similar, leave it.)
-
-### 4.2 Apply and reboot
+Inside the VM:
 
 ```bash
-sudo update-grub
-sudo reboot
-```
-
-> ⚠ **REBOOT REQUIRED — VM**. The host stays up; only VM 101 reboots.
-
-### 4.3 Verify Phase 4 (after VM reboot)
-
-Inside the **VM**:
-
-```bash
-# Cmdline took effect
-cat /proc/cmdline
-# Expect: isolcpus=0,1 nohz_full=0,1 rcu_nocbs=0,1
-
-# Kernel reports those CPUs isolated
-cat /sys/devices/system/cpu/isolated   # expect: 0-1
-
-# vCPUs 0 and 1 are nearly empty of guest work
-ps -eo pid,psr,comm | awk '$2 == 0 || $2 == 1' | sort -k2 -n | head -30
-# Expect: only radiod threads (once it's running) and unmovable per-CPU
-# kernel threads (migration/0, ksoftirqd/0, etc.).  No systemd,
-# no chronyd, no random kworkers.
-```
-
-### 4.4 Re-apply sigmond's affinity drop-ins
-
-Once the kernel is reporting `isolated=0-1`, ask sigmond to recompute
-and apply its plan so radiod's drop-in matches:
-
-```bash
-sudo /opt/sigmond/venv/bin/python /home/sigmond/sigmond/bin/smd diag cpu-affinity --apply
-sudo /opt/sigmond/venv/bin/python /home/sigmond/sigmond/bin/smd diag cpu-affinity
-```
-
-Sigmond should report:
-
-- `radiod@*.service` → CPUAffinity=`0 1`
-- `other` services → CPUAffinity=`2 3 4 5 6 7`
-- No "outside isolated pool" warnings.
-- No foreign drop-ins or sched_setaffinity overrides.
-
-### 4.5 Gate
-
-- radiod runs on vCPU 0,1.
-- All other services (systemd-resolved, chronyd, ka9q-web, hf-timestd
-  components, etc.) run on vCPU 2–7.
-- chrony's RMS offset is still sub-millisecond.
-
----
-
-## Phase 5 — chrony migration
-
-**Status on AI6VN-1: already complete.**
-
-Verified 2026-04-29: chrony is active, RMS offset ~80 µs, kvm-clock is
-the guest clocksource, ntpsec / systemd-timesyncd are inactive. **Skip
-this phase** unless a future install starts from scratch — in which
-case follow Appendix A.
-
----
-
-## Phase 6 — Validation
-
-End-to-end checks after all phases are applied.
-
-### 6.1 Host CPU isolation
-
-```bash
-# Host
-ps -eo pid,psr,comm | awk '$2 <= 7' | sort -k2 -n
-```
-
-Should show only QEMU vCPU threads and unmovable per-CPU kernel threads.
-
-### 6.2 Guest topology
-
-```bash
-# Inside VM
-lscpu | grep -E 'Thread|Core|Socket'
-cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | sort -u
-```
-
-Should show 4 cores × 2 threads, sibling lists `0,1 / 2,3 / 4,5 / 6,7`.
-
-### 6.3 Guest CPU isolation
-
-```bash
-# Inside VM
-cat /sys/devices/system/cpu/isolated   # 0-1
-ps -eo pid,psr,comm | awk '$2 <= 1' | sort -k2 -n
-```
-
-Only radiod threads on vCPU 0,1.
-
-### 6.4 Guest clock
-
-```bash
-# Inside VM
-cat /sys/devices/system/clocksource/clocksource0/current_clocksource
-chronyc tracking | grep -E 'Reference|Last offset|RMS offset'
-```
-
-Clocksource = kvm-clock. RMS offset < 1 ms (ideally < 100 µs).
-
-### 6.5 Sigmond cross-check
-
-```bash
-# Inside VM
-sudo /opt/sigmond/venv/bin/python /home/sigmond/sigmond/bin/smd validate
-sudo /opt/sigmond/venv/bin/python /home/sigmond/sigmond/bin/smd diag cpu-affinity
-```
-
-`smd validate` should pass `cpu_isolation` and `cpu_isolation_runtime`.
-`smd diag cpu-affinity` should show no warnings.
-
-### 6.6 SDR throughput under load
-
-```bash
-# Inside VM, with radiod streaming
-dmesg -w | grep -iE 'xhci|usb' | grep -iE 'error|fail|reset|halt'
-```
-
-Watch for several minutes during a recording session. Expect zero
-output. If errors appear, see Troubleshooting.
-
----
-
-## Phase 7 — Snapshot working configuration
-
-```bash
-# Host
-sudo mkdir -p /root/proxmox-passthrough-backup
-sudo cp /etc/pve/qemu-server/101.conf            /root/proxmox-passthrough-backup/101.conf.tuned
-sudo cp /etc/modprobe.d/vfio.conf                /root/proxmox-passthrough-backup/
-sudo cp /etc/default/grub                        /root/proxmox-passthrough-backup/grub.host.tuned
-sudo cp /etc/modules                             /root/proxmox-passthrough-backup/
-sudo cp /var/lib/vz/snippets/vm-101-affinity.sh  /root/proxmox-passthrough-backup/
-date | sudo tee /root/proxmox-passthrough-backup/saved-on-tuned.txt
-
-# Inside VM
-sudo mkdir -p /root/vm-config-backup
-sudo cp /etc/default/grub        /root/vm-config-backup/grub.guest.tuned
-sudo cp /etc/chrony/chrony.conf  /root/vm-config-backup/
-sudo /opt/sigmond/venv/bin/python /home/sigmond/sigmond/bin/smd diag cpu-affinity --json \
-    | sudo tee /root/vm-config-backup/smd-cpu-affinity.tuned.json > /dev/null
-date | sudo tee /root/vm-config-backup/saved-on-tuned.txt
-```
-
----
-
-## Troubleshooting
-
-### Guest still shows `Thread(s) per core: 1`
-
-The `args:` line in `/etc/pve/qemu-server/101.conf` isn't taking effect.
-
-```bash
-# On host
-ps -ef | grep qemu-system | grep -- '-smp'
-```
-
-If `threads=2` is missing, the args line is wrong or the VM is running
-on the old config. Stop and restart:
-
-```bash
-sudo qm stop 101 && sudo qm start 101
-```
-
-### Per-vCPU pinning didn't fire
-
-Check the journal on the host for `vm-101-affinity` entries:
-
-```bash
-sudo journalctl -t vm-101-affinity --since '10 minutes ago' --no-pager
-```
-
-If empty: the hookscript may not be registered, executable, or in the
-right path. Verify:
-
-```bash
-qm config 101 | grep -i hookscript    # should reference local:snippets/vm-101-affinity.sh
-ls -l /var/lib/vz/snippets/vm-101-affinity.sh   # must be executable
-```
-
-### Host became unresponsive after Phase 3 reboot
-
-You may have isolated more CPUs than the host can spare. Reduce the
-range (e.g. `isolcpus=0-5` to free up cores 3–5 for the host) and
-reboot.
-
-To recover from a wedged host: console access (display + keyboard, or
-IPMI) and edit `/etc/default/grub` directly.
-
-### chrony offset growing over time
-
-Likely the host TSC is genuinely unreliable and BIOS settings didn't
-fix it. Apply the `tsc=reliable` fallback from the BIOS checklist. If
-that doesn't help, accept kvm-clock and increase chrony's polling:
-
-```
-# /etc/chrony/chrony.conf inside the VM
-maxupdateskew 100.0
-makestep 0.001 -1
-```
-
-### radiod can't find HT pairs even with proper guest topology
-
-Sigmond reads `thread_siblings_list` and falls back to consecutive
-pairs if every entry is a singleton. With the `args: -smp ...threads=2`
-line in place, sibling lists should each have two CPUs in them. If
-they still look like singletons:
-
-```bash
-# Inside VM
-cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list
-# Should be "0,1" not "0"
-```
-
-If singleton, the `args:` line did not take effect — re-check Phase 2.
-
-### foreign drop-ins reported by sigmond
-
-Older `wd-ctl` / hf-timestd setup scripts wrote their own affinity
-drop-ins. `sudo smd apply` clears them out and replaces with sigmond's
-managed drop-in. The warning is harmless but easy to fix.
-
----
-
-## Companion documents
-
-- `wsprdaemon-proxmox-vm-setup.md` — PCIe USB passthrough (do this first).
-- `wsprdaemon-proxmox-bios-checklist.md` — offline reference for BIOS visit (Phase 1).
-- This document — runbook for everything CPU and clock related.
-
----
-
-## Appendix A — chrony migration (only if starting fresh)
-
-This is the procedure used when chrony is **not** already installed on
-the VM. AI6VN-1 already has chrony; skip this appendix.
-
-```bash
-# Inside VM
+# Remove competing time daemons
 sudo systemctl stop ntp ntpsec systemd-timesyncd 2>/dev/null
 sudo apt purge ntp ntpsec 2>/dev/null
 sudo systemctl disable systemd-timesyncd 2>/dev/null
 
+# Install chrony
 sudo apt update
 sudo apt install -y chrony
+```
 
-sudo tee /etc/chrony/chrony.conf <<'EOF'
-# NTP pools
-pool 0.us.pool.ntp.org iburst maxsources 4
-pool 1.us.pool.ntp.org iburst maxsources 2
-pool 2.us.pool.ntp.org iburst maxsources 2
+### Step 5b — Configure chrony with low-latency stratum-1 servers
 
-# Stratum-1 reference servers (Bay Area / US)
-server time.nist.gov iburst
+The default Debian/Ubuntu chrony config uses regional pool servers, which often select stratum-2 or stratum-3 backends with mediocre RTT. For best accuracy, add explicit stratum-1 references at the top of the config so chrony prefers them.
+
+Edit `/etc/chrony/chrony.conf`:
+
+```bash
+sudo vi /etc/chrony/chrony.conf
+```
+
+Find the existing `pool` line:
+
+```
+/pool
+```
+
+Press Enter, then `O` (capital O) to open a new line **above** the pool line and enter insert mode. Type these lines:
+
+```
+# Low-latency stratum-1 references (good from Bay Area / West Coast)
+server time-b-wwv.nist.gov iburst
+server time.cloudflare.com iburst
+server time.google.com iburst
 server time.apple.com iburst
+
+```
+
+(Include a blank line at the end before the existing pool line.)
+
+Press `Esc` to leave insert mode, then `:wq` and Enter to save.
+
+Notes on server choices:
+
+- `time-b-wwv.nist.gov` — NIST stratum-1 in Fort Collins CO (also `time-a-wwv` and `time-c-wwv` are siblings)
+- `time.cloudflare.com` — anycast, usually routes to a nearby PoP
+- `time.google.com` — anycast, also nearby
+- `time.apple.com` — Apple's NTP, very stable; from California typically resolves to the Santa Clara region
+
+For sites outside North America, replace these with regionally appropriate stratum-1 sources.
+
+### Step 5c — Enable and start chrony
+
+```bash
+sudo systemctl enable --now chrony
+sudo systemctl status chrony
+```
+
+### Step 5d — (Optional) From-scratch alternative
+
+If you'd rather replace the entire config rather than edit it, this is a known-good complete configuration:
+
+```bash
+sudo tee /etc/chrony/chrony.conf > /dev/null <<'EOF'
+# Low-latency stratum-1 references (good from Bay Area / West Coast)
+server time-b-wwv.nist.gov iburst
+server time.cloudflare.com iburst
+server time.google.com iburst
+server time.apple.com iburst
+
+# Pool fallback (in case explicit servers become unreachable)
+pool 0.us.pool.ntp.org iburst maxsources 2
 
 # Allow chrony to step the clock if it's wildly off at startup
 makestep 1.0 3
@@ -744,28 +337,541 @@ logdir /var/log/chrony
 log measurements statistics tracking
 EOF
 
-sudo systemctl enable --now chrony
-sudo systemctl status chrony
+sudo systemctl restart chrony
+```
+
+**Verify:**
+
+```bash
+chronyc tracking      # shows current sync state, last offset, RMS error
+chronyc sources -v    # shows server selection and per-source quality
+chronyc sourcestats   # shows long-term quality of each source
+```
+
+A healthy `chronyc tracking` on this configuration looks like:
+
+```
+Reference ID    : ... (time-b-wwv.nist.gov)
+Stratum         : 2
+Ref time (UTC)  : Thu Apr 30 19:09:35 2026
+System time     : 0.000063000 seconds fast of NTP time
+Last offset     : +0.000067348 seconds
+RMS offset      : 0.000080842 seconds
+Frequency       : 23.134 ppm slow
+Residual freq   : +0.003 ppm
+Skew            : 0.755 ppm
+Root delay      : 0.012345678 seconds
+Root dispersion : 0.001815836 seconds
+Update interval : 257.4 seconds
+Leap status     : Normal
+```
+
+**Targets for RMS offset:**
+
+- Under 100 µs (0.000100 seconds) — excellent, achievable with the configuration in this document
+- Under 1 ms (0.001 seconds) — good, fine for WSPR/FT8/FT4
+- Over 10 ms — something is wrong; check that systemd-timesyncd is fully disabled, the explicit servers are reachable, and the host clock is healthy (Part 6)
+
+The `chronyc sources -v` output shows each source with its current state. The `^*` marker indicates the currently-selected best source; `^+` are combinable backups; `^-` are non-combined alternates; `^?` is still being evaluated. After 5-10 minutes of running, you should see your explicit stratum-1 servers (NIST, Google, Apple) marked `^*` or `^+`, with the pool fallback at `^-`.
+
+---
+
+## Part 6 — Address the unstable TSC warning
+
+If the host kernel logs:
+
+```
+TSC found unstable after boot, most likely due to broken BIOS. Use 'tsc=unstable'.
+kvm: SMP vm created on host with unstable TSC; guest TSC will not be reliable
+```
+
+The TSC (Time Stamp Counter) is a hardware register that increments at a fixed rate and is the kernel's preferred clocksource because reads are cheap. When the BIOS or firmware doesn't behave correctly across CPU C-states, the kernel marks TSC unstable and falls back to HPET, which is much slower to read and noisier. KVM then warns that the guest TSC won't be reliable either.
+
+### Step 6a — Check if your BIOS exposes the relevant settings
+
+Most KAMRUI / NiPoGi / ACEMAGIC / Beelink / GMKtec / Minisforum mini PCs ship with **locked-down AMI BIOSes** that hide the AMD CBS (Common BIOS Settings) menu. If that's your situation, skip directly to Step 6b — the kernel approach is the standard workaround for these vendor-locked BIOSes.
+
+If you have an unlocked BIOS (rarer on consumer mini PCs, common on enterprise hardware), look for and **disable**:
+
+- Global C-State Control / CPU C-States (typically under CPU Configuration or AMD CBS)
+- C-State 6 (or any C-State above C2)
+- Cool'n'Quiet / SpeedStep dynamic frequency scaling
+- Power Supply Idle Control → set to "Typical Current Idle"
+
+Look for and **enable**:
+
+- HPET (High Precision Event Timer)
+- "Invariant TSC" or "TSC sync" if present
+
+Reboot and check:
+
+```bash
+dmesg | grep -i tsc
+```
+
+If you no longer see "TSC found unstable", you're done with the TSC issue. If the BIOS doesn't expose any of these controls, proceed to Step 6b.
+
+### Step 6b — Force tsc=reliable and disable deep C-states (works on BIOS-locked mini PCs)
+
+This is the standard fix on consumer AMD mini PCs where the BIOS hides advanced settings. The two kernel parameters together:
+
+- `tsc=reliable` — tells the kernel to trust TSC despite the BIOS not advertising it as invariant
+- `processor.max_cstate=1` — keeps the CPU in shallow idle (C0/C1 only) so it can't enter deep sleep states that desync TSC
+
+Edit `/etc/default/grub` on the host:
+
+```
+GRUB_CMDLINE_LINUX_DEFAULT="quiet amd_iommu=on iommu=pt isolcpus=0-9 nohz_full=0-9 rcu_nocbs=0-9 tsc=reliable processor.max_cstate=1"
+```
+
+Then `update-grub && reboot`.
+
+(Adjust the CPU range to match whatever you set for `affinity:` — `0-9` for the Ryzen 5 5560U / 5825U with sequential pairing, or `0-4,8-12` for split-pairing CPUs.)
+
+Trade-off: `processor.max_cstate=1` increases idle power consumption by roughly 3-5W. For a 24/7 SDR appliance running radiod continuously, the CPU rarely enters deep idle anyway, so the practical cost is near zero.
+
+After reboot, verify:
+
+```bash
+cat /sys/devices/system/clocksource/clocksource0/current_clocksource
+```
+
+Should report `tsc`. If it still says `hpet`, the kernel didn't accept the `tsc=reliable` override (rare).
+
+### Step 6c — Tell the guest to use kvm-clock
+
+The guest should automatically use `kvm-clock` (a paravirtualized clocksource that reads the host's clock cheaply). Verify inside the VM:
+
+```bash
+cat /sys/devices/system/clocksource/clocksource0/current_clocksource
+cat /sys/devices/system/clocksource/clocksource0/available_clocksource
+```
+
+Should show `kvm-clock` as current. If it shows something else (like `hpet`), set it explicitly:
+
+```bash
+echo kvm-clock > /sys/devices/system/clocksource/clocksource0/current_clocksource
+```
+
+To make this persistent, add to the guest's `/etc/default/grub`:
+
+```
+GRUB_CMDLINE_LINUX_DEFAULT="quiet clocksource=kvm-clock"
+```
+
+Then `update-grub && reboot`.
+
+### Step 6d — Verify clock stability over time
+
+After 10 minutes of running, check:
+
+```bash
 chronyc tracking
 ```
 
-Healthy `chronyc tracking`:
+The `RMS offset` should be **under 1 millisecond**, ideally under 100 microseconds. If it's larger or growing, the underlying clocksource is still poor — go back and revisit BIOS settings, or accept that the guest clock will need more aggressive chrony discipline.
 
-```
-Reference ID    : ...
-Stratum         : 2 or 3
-System time     : 0.000... seconds slow/fast of NTP time
-Last offset     : ±0.000... seconds
-RMS offset      : 0.000... seconds   ← target < 0.001 (1 ms)
+---
+
+## Part 7 — Snapshot the working configuration
+
+Save copies of all the host and guest config files:
+
+```bash
+# On the host
+mkdir -p /root/proxmox-passthrough-backup
+cp /etc/pve/qemu-server/101.conf /root/proxmox-passthrough-backup/
+cp /etc/modprobe.d/vfio.conf /root/proxmox-passthrough-backup/
+cp /etc/default/grub /root/proxmox-passthrough-backup/grub.host
+cp /etc/modules /root/proxmox-passthrough-backup/
+
+# Inside the VM
+mkdir -p /root/vm-config-backup
+cp /etc/chrony/chrony.conf /root/vm-config-backup/
+cp /etc/default/grub /root/vm-config-backup/grub.guest
+
+date > /root/proxmox-passthrough-backup/saved-on.txt
 ```
 
 ---
 
-## Appendix B — future tuning topics not covered here
+## Part 8 — Validation tests
 
-- IRQ affinity for passed-through devices (xhci IRQs land on a host
-  CPU outside the VM pool).
-- NUMA — N/A on this single-socket box.
-- Multi-VM allocation — N/A; this box runs one VM.
-- ZFS ARC tuning to keep host memory pressure off the VM.
-- Backup / snapshot strategy that is aware of the running radiod state.
+Once everything is configured, validate end-to-end:
+
+### Test 1: Host CPU isolation
+
+```bash
+# On host
+ps -eo pid,psr,comm,class | awk 'NR==1 || ($2 < 10 && $1 > 1000)' | sort -k2 -n
+```
+
+Should show only QEMU/kvm threads in the userspace process list. Per-CPU kernel infrastructure threads (kworker, ksoftirqd, migration, rcu*) will still appear and that's expected — they're pinned to their CPU and consume essentially zero CPU at idle.
+
+(Adjust the `$2 < 10` to match whatever upper bound applies for your CPU range.)
+
+### Test 2: Guest topology
+
+```bash
+# Inside VM
+lscpu | grep -E 'Thread|Core|Socket'
+cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list
+```
+
+Should show 2 threads per core, and `thread_siblings_list` should have 2 CPUs in it.
+
+### Test 3: Guest clocksource and chrony
+
+```bash
+# Inside VM
+cat /sys/devices/system/clocksource/clocksource0/current_clocksource   # expect: kvm-clock
+chronyc tracking | grep -E 'Reference|Last offset|RMS offset'
+```
+
+RMS offset should be < 1 ms after a few minutes.
+
+### Test 4: radiod hyperthread pair detection
+
+If sigmond / radiod has logic to detect HT pairs and pin to them, run it and confirm it finds pairs successfully. The relevant output usually appears in radiod startup logs — look for messages about CPU affinity or thread placement.
+
+### Test 5: SDR throughput under load
+
+Run a wsprdaemon recording session and watch for USB transfer errors:
+
+```bash
+# Inside VM
+dmesg -w | grep -iE 'xhci|usb' | grep -iE 'error|fail|reset|halt'
+```
+
+A clean run should produce no output here. If you see errors, check:
+
+- CPU isolation (Part 4) — host might still be stealing CPU time
+- Cable / port quality
+- Power delivery (some mini PCs throttle USB power under sustained load)
+
+---
+
+## Part 9 — Per-vCPU pinning via hookscript (CRITICAL)
+
+### Why this is necessary
+
+The `affinity:` field in the VM config is **process-level**, not per-vCPU. It restricts the QEMU process (and all its threads) to a set of host CPUs, but does **not** pin individual vCPU threads to specific host CPUs. The Linux scheduler then makes its own load-balancing decisions, and on isolated CPUs (`isolcpus=`) it tends to be conservative about migrating threads.
+
+The observed failure mode without per-vCPU pinning: **all 10 vCPU threads bunch on a single host CPU**, time-sharing it. Inside the guest, all 10 vCPUs report 100% utilization. On the host, only one CPU shows activity and the others are idle. radiod's pinning to specific guest vCPUs doesn't translate to specific host CPUs, so HT-pair-aware scheduling inside the guest provides no real benefit.
+
+This bug is silent and easy to miss — both the guest and the host appear "busy" in different ways, but actual throughput is roughly 1/N of what it should be.
+
+### Solution: hookscript that pins each vCPU to a specific host CPU after VM start
+
+Proxmox supports per-VM hookscripts that run at lifecycle events (pre-start, post-start, pre-stop, post-stop). We use the `post-start` phase to taskset each vCPU thread to a single host CPU.
+
+### Step 9a — Create the snippets directory
+
+```bash
+# ON HOST
+mkdir -p /var/lib/vz/snippets
+```
+
+### Step 9b — Create the hookscript
+
+Create `/var/lib/vz/snippets/cpu-pin-101.sh` with this content (use whatever editor you prefer):
+
+```bash
+#!/bin/bash
+# Per-vCPU pinning for VM 101
+# Maps guest vCPU N -> host CPU N (1:1 for affinity 0-9)
+# Preserves HT pair topology: guest vCPU 0+1 -> host CPUs 0+1 (real siblings), etc.
+
+VMID=$1
+PHASE=$2
+
+if [ "$PHASE" = "post-start" ] && [ "$VMID" = "101" ]; then
+    # Wait for QEMU to fully start all vCPU threads
+    sleep 2
+
+    # Find the QEMU process for this VM
+    QEMU_PID=$(cat /var/run/qemu-server/${VMID}.pid 2>/dev/null)
+    if [ -z "$QEMU_PID" ]; then
+        echo "cpu-pin: could not find QEMU pid for VM $VMID" >&2
+        exit 0
+    fi
+
+    # Pin each vCPU thread to its corresponding host CPU
+    for tid in $(ps -T -p $QEMU_PID -o tid= 2>/dev/null); do
+        comm=$(cat /proc/$tid/comm 2>/dev/null)
+        if [[ "$comm" =~ ^CPU\ ([0-9]+)/KVM$ ]]; then
+            vcpu=${BASH_REMATCH[1]}
+            host_cpu=$vcpu
+            taskset -pc $host_cpu $tid > /dev/null 2>&1
+            echo "cpu-pin: VM $VMID vCPU $vcpu (tid $tid) -> host CPU $host_cpu"
+        fi
+    done | logger -t cpu-pin-${VMID}
+fi
+
+exit 0
+```
+
+This script assumes a 1:1 vCPU-to-host-CPU mapping where guest vCPU N runs on host CPU N. For sequential pairing (Ryzen 5 5560U, 5825U, 7530U), this preserves HT pair topology naturally — guest vCPU 0+1 land on host CPUs 0+1, which are real siblings.
+
+For other VMs (different VMID, different CPU mapping), copy the script to `cpu-pin-VMID.sh` and adjust the `VMID` check and the host_cpu mapping inside the loop.
+
+### Step 9c — Make it executable
+
+```bash
+# ON HOST
+chmod +x /var/lib/vz/snippets/cpu-pin-101.sh
+```
+
+### Step 9d — Attach the hookscript to the VM
+
+```bash
+# ON HOST
+qm set 101 --hookscript local:snippets/cpu-pin-101.sh
+```
+
+### Step 9e — Add topoext CPU flag (required for Ryzen guests)
+
+Without the `topoext` CPU feature flag, AMD CPU models don't advertise SMT support to the guest, even though Linux will accept the `threads=2` topology. QEMU prints this warning at startup:
+
+```
+kvm: warning: This family of AMD CPU doesn't support hyperthreading(2). Please configure -smp options properly or try enabling topoext feature.
+```
+
+Proxmox restricts which CPU flags can be set via the `cpu:` config field for security reasons, and `topoext` is not in the allowed set. The workaround is to use the `args:` escape hatch, same as for `-smp threads=2`.
+
+Edit `/etc/pve/qemu-server/101.conf` and modify the existing `args:` line to include `-cpu host,topoext=on`:
+
+Before:
+```
+args: -smp 10,sockets=1,cores=5,threads=2,maxcpus=10
+```
+
+After:
+```
+args: -smp 10,sockets=1,cores=5,threads=2,maxcpus=10 -cpu host,topoext=on
+```
+
+The `-cpu host,topoext=on` in args will override the `cpu: host` line. Leave `cpu: host` in place (Proxmox uses it for its own bookkeeping).
+
+### Step 9f — Restart and verify
+
+```bash
+# ON HOST
+qm stop 101
+qm start 101
+sleep 5
+
+# Check the hookscript ran
+journalctl -t cpu-pin-101 -n 20
+
+# Confirm each vCPU is on its own host CPU
+ps -eLo psr,pcpu,comm --no-headers | grep KVM | sort -k1 -n
+```
+
+The journal should show 10 lines like `cpu-pin: VM 101 vCPU N (tid XXXX) -> host CPU N`. The `ps` output should show each vCPU thread on a distinct host CPU 0-9.
+
+The `kvm: warning: This family of AMD CPU doesn't support hyperthreading` message should NOT appear in the start logs anymore. Verify:
+
+```bash
+# ON HOST
+journalctl -b | grep -i 'hyperthreading\|topoext'
+```
+
+Inside the guest, confirm topoext is now advertised:
+
+```bash
+# IN VM
+cat /proc/cpuinfo | grep flags | head -1 | tr ' ' '\n' | grep topoext
+```
+
+Should output `topoext`.
+
+### Step 9g — Validate under real load
+
+Run a stress test inside the VM that exercises specific vCPUs, then verify on the host that the load lands on the corresponding host CPUs:
+
+```bash
+# IN VM — load only vCPUs 2 through 9, leaving 0 and 1 free for radiod
+taskset -c 2-9 stress -c 8
+```
+
+```bash
+# ON HOST — should show vCPUs 2-9 at ~100%, vCPUs 0 and 1 idle, host CPUs 10-11 idle
+ps -eLo psr,pcpu,comm --no-headers | grep KVM | sort -k1 -n
+```
+
+Expected output (rough):
+```
+0   <5%   CPU 0/KVM       (idle, available for radiod)
+1   <5%   CPU 1/KVM       (idle, available for radiod)
+2   ~100% CPU 2/KVM
+3   ~100% CPU 3/KVM
+...
+9   ~100% CPU 9/KVM
+```
+
+This confirms that pinning is end-to-end correct: a workload running on a specific guest vCPU consumes exactly the corresponding host CPU. Without per-vCPU pinning, the load would distribute unpredictably across whichever host CPUs the scheduler felt like using.
+
+---
+
+## Part 10 — Operational observations and validation under load
+
+Once the configuration is complete, the following observations are expected when running radiod alongside other workloads. None of these indicate a problem; they're documented here so future debugging doesn't chase phantoms.
+
+### Expected: elevated radiod CPU under cache contention
+
+Symptom: when something CPU-intensive runs on guest vCPUs 2-9, the radiod processes pinned to vCPUs 0-1 show modestly higher CPU utilization than when the rest of the system is idle.
+
+Cause: the Ryzen 5 5560U has a single 16 MB unified L3 cache shared across all 6 physical cores. When 8 stress workers run on cores 2-9, they evict radiod's working set from L3 more aggressively, increasing radiod's per-sample cycle cost. This is a hardware-level effect; it would happen on bare metal too. The vCPU pinning correctly maintains thread placement — the cache contention is unavoidable architecture.
+
+Validation that it's *only* cache contention and not a real problem:
+
+```bash
+# IN VM — should show no errors during sustained load
+journalctl -u radiod -n 100 --no-pager | grep -iE 'error|drop|fail|warn'
+dmesg -T | grep -iE 'xhci|usb' | grep -iE 'error|fail|reset|halt'
+```
+
+Both should return nothing. If they do, the issue is not just cache contention.
+
+### Expected: host CPUs 10-11 show steady low-level activity
+
+Symptom: even when the VM is doing nothing, host CPUs 10-11 show 1-5% utilization from kworker, ksoftirqd, pvestatd, pve-firewall, and similar processes.
+
+Cause: this is the host doing its normal management work — Proxmox cluster heartbeat, ZFS scrub scheduling, network stack housekeeping. It's confined to CPUs 10-11 by `isolcpus=0-9` and consumes essentially zero capacity. This is exactly what we want.
+
+### Expected: per-CPU kernel threads on isolated CPUs
+
+Symptom: `ps -eLo psr,comm` on the host shows kernel threads like `kworker/N:0H`, `ksoftirqd/N`, `migration/N`, `rcuog/N` on isolated CPUs 0-9.
+
+Cause: these are per-CPU pinned kernel infrastructure threads that exist on every CPU. They cannot be moved off because they're tied to that specific CPU's hardware. They sit idle and consume essentially zero CPU time. `isolcpus=` removes general scheduling, not these infrastructure threads.
+
+### Recommended hygiene: IRQ affinity isolation
+
+By default, hardware interrupts can be handled on any CPU. To eliminate one more source of jitter on the radiod cores, rebind all movable interrupts to host CPUs 10-11:
+
+```bash
+# ON HOST
+for irq in /proc/irq/*/smp_affinity_list; do
+    echo "10-11" > "$irq" 2>/dev/null
+done
+```
+
+(Some IRQs are pinned to specific CPUs by their drivers and can't be moved — those will silently fail. That's expected.)
+
+To make this persistent across reboots, add it to `/etc/rc.local` or create a systemd unit. A simple approach with rc.local:
+
+```bash
+# ON HOST
+sudo tee /etc/rc.local > /dev/null <<'EOF'
+#!/bin/bash
+# Move all movable IRQs to host CPUs 10-11 to keep them off VM cores
+for irq in /proc/irq/*/smp_affinity_list; do
+    echo "10-11" > "$irq" 2>/dev/null
+done
+exit 0
+EOF
+sudo chmod +x /etc/rc.local
+```
+
+Verify after a reboot:
+
+```bash
+# ON HOST
+for irq in /proc/irq/*/smp_affinity_list; do
+    n=$(basename $(dirname $irq))
+    aff=$(cat $irq 2>/dev/null)
+    desc=$(grep "^ *$n:" /proc/interrupts | awk '{print $NF}' 2>/dev/null)
+    [ -n "$aff" ] && printf "IRQ %4s  cpus=%-15s  %s\n" "$n" "$aff" "$desc"
+done | head -30
+```
+
+Most IRQs should now show `cpus=10-11`. The few that show specific CPUs (like `cpus=5` for some platform-specific interrupts) are pinned by the driver and cannot be moved.
+
+This is hygiene, not a fix for any specific problem. radiod was working fine before this change. But it removes one more potential source of latency spikes on the SDR processing cores.
+
+### Comparison with bare-metal performance
+
+The expected steady-state performance of this VM configuration is essentially identical to bare-metal performance for the radiod workload. Specifically:
+
+- Same sustained USB throughput (PCIe passthrough = direct DMA, no virtualization overhead in the data path)
+- Same clock accuracy (kvm-clock paravirtualization adds <1µs overhead on TSC reads)
+- Same L3 cache behavior (vCPUs execute directly on physical cores)
+- Slightly higher TLB miss cost due to nested page tables (typically <2% overhead, often unmeasurable)
+
+The configuration is therefore suitable for production SDR deployments where bare-metal performance is required but the management benefits of virtualization (snapshots, easy migration, consolidation with other VMs) are desirable.
+
+---
+
+## Troubleshooting
+
+### Guest still shows `Thread(s) per core: 1`
+
+The `args:` line in `/etc/pve/qemu-server/101.conf` isn't taking effect. Check:
+
+```bash
+ps -ef | grep qemu-system | grep -- '-smp'
+```
+
+If the `-smp` argument doesn't include `threads=2`, the args line is wrong or the VM was started before the edit. Stop and restart:
+
+```bash
+qm stop 101 && qm start 101
+```
+
+### chrony shows large offsets that don't settle
+
+Check that the VM has working network access to NTP pools:
+
+```bash
+chronyc activity
+chronyc sources
+```
+
+If sources are unreachable, check firewall rules for UDP port 123 outbound. Also check that `systemd-timesyncd` is fully disabled — it can fight chrony for control of the clock.
+
+### All vCPUs land on a single host CPU
+
+Symptom: inside the VM, all N vCPUs show high utilization. On the host, `ps -eLo psr,pcpu,comm --no-headers | grep KVM | sort -k1 -n` shows all `CPU N/KVM` threads with the same `psr` value (e.g., all on host CPU 5).
+
+Cause: the per-vCPU pinning hookscript (Part 9) is not running, or the VM was started before it was attached.
+
+Fix:
+1. Verify the hookscript is attached: `qm config 101 | grep hookscript`
+2. Verify the script is executable: `ls -la /var/lib/vz/snippets/cpu-pin-101.sh`
+3. Restart the VM: `qm stop 101 && qm start 101`
+4. Check the journal: `journalctl -t cpu-pin-101 -n 20`
+5. Re-verify per-vCPU placement: `ps -eLo psr,pcpu,comm --no-headers | grep KVM | sort -k1 -n`
+
+### "kvm: warning: This family of AMD CPU doesn't support hyperthreading"
+
+The `topoext` CPU flag is not enabled. See Part 9, Step 9e.
+
+### Host instability after adding `isolcpus`
+
+If the host becomes unresponsive or services time out, you may have isolated too many CPUs. On a Ryzen 5 5560U (12 logical CPUs), `isolcpus=0-9` leaves only CPUs 10-11 (1 physical core) for the host. That's tight but workable for a dedicated SDR appliance. If it's too tight, back off to `isolcpus=0-7` (giving the host 4 logical CPUs / 2 physical cores) and reduce the VM accordingly.
+
+### radiod still can't find hyperthread pairs
+
+Even with proper guest topology, radiod's pair-detection logic may parse `/sys` differently than expected. Check what files it actually reads — usually `thread_siblings_list` or `core_cpus_list`. Inside the VM:
+
+```bash
+ls -la /sys/devices/system/cpu/cpu0/topology/
+cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | sort -u
+```
+
+If sibling lists look correct but radiod still complains, the issue may be in radiod's parsing rather than the VM topology.
+
+---
+
+## Companion documents
+
+- `wsprdaemon-proxmox-vm-setup.md` — PCIe USB passthrough setup (do this first)
+- This document — CPU isolation, hyperthread pairs, clock accuracy
+
+Future topics worth documenting separately:
+
+- NUMA configuration for multi-socket hosts
+- Migration of the VM between hosts
+- Backup and snapshot strategy for the SDR workload
+- Upgrading Proxmox / kernel without losing the passthrough config
