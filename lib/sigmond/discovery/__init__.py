@@ -240,13 +240,16 @@ def load_snapshot(source: str, path: Optional[Path] = None) -> Optional[dict]:
     EnvironmentView — extending one cache file rather than maintaining
     a sidecar per probe.
 
-    Returns None on first run, missing cache, malformed JSON, or absent
-    source key.
+    Returns None on any failure mode (missing cache, malformed JSON,
+    absent source key, or — when the probe runs as a user without read
+    access to the cache directory — PermissionError from the stat or
+    read calls).  Path.exists() can raise PermissionError on a parent
+    directory we can't traverse, so it lives inside the try block.
     """
     p = path or cache_path()
-    if not p.exists():
-        return None
     try:
+        if not p.exists():
+            return None
         payload = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
         return None
@@ -265,21 +268,22 @@ def save_snapshot(source: str, snapshot: dict,
 
     Read-modify-write against the cache file: existing observations,
     deltas, and other probes' snapshots are preserved.  Silently no-ops
-    on permission errors (same policy as save_cache).
+    on any OS-level error (permission denied on stat / read / write,
+    missing parent directory we can't create, etc.) — same policy as
+    save_cache.
     """
     p = path or cache_path()
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
+    except OSError:
         return
-    if p.exists():
-        try:
+    payload: dict = {}
+    try:
+        if p.exists():
             payload = json.loads(p.read_text())
             if not isinstance(payload, dict):
                 payload = {}
-        except (OSError, json.JSONDecodeError):
-            payload = {}
-    else:
+    except (OSError, json.JSONDecodeError):
         payload = {}
     snaps = payload.get("previous_snapshots")
     if not isinstance(snaps, dict):
@@ -288,7 +292,7 @@ def save_snapshot(source: str, snapshot: dict,
     payload["previous_snapshots"] = snaps
     try:
         p.write_text(json.dumps(payload, indent=2))
-    except PermissionError:
+    except OSError:
         pass
 
 

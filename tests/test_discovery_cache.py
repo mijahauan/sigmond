@@ -62,6 +62,52 @@ class SnapshotHelpersTests(unittest.TestCase):
                              {"v": 2})
 
 
+class PermissionErrorTests(unittest.TestCase):
+    """Regression: load_snapshot / save_snapshot must NOT crash when the
+    caller lacks read or write access to the cache file.  Hit live in
+    bee1 production where /var/lib/sigmond/environment-cache.json is
+    owned by another user; Path.exists() raised PermissionError outside
+    the try block and propagated to the probe.
+    """
+
+    def test_load_snapshot_silent_on_permission_denied(self):
+        from unittest.mock import patch
+        with patch.object(Path, 'exists',
+                          side_effect=PermissionError("simulated")):
+            self.assertIsNone(
+                load_snapshot('local_resources', path=Path('/some/cache.json'))
+            )
+
+    def test_load_snapshot_silent_on_read_permission_denied(self):
+        from unittest.mock import patch
+        # exists() succeeds, but read_text() raises PermissionError —
+        # cache file present but unreadable.
+        with patch.object(Path, 'exists', return_value=True), \
+             patch.object(Path, 'read_text',
+                          side_effect=PermissionError("simulated")):
+            self.assertIsNone(
+                load_snapshot('local_resources', path=Path('/some/cache.json'))
+            )
+
+    def test_save_snapshot_silent_on_permission_denied(self):
+        from unittest.mock import patch
+        # mkdir succeeds (or no-ops), but exists/read/write all fail.
+        with patch.object(Path, 'mkdir'), \
+             patch.object(Path, 'exists',
+                          side_effect=PermissionError("simulated")):
+            # Must not raise.
+            save_snapshot('local_resources', {"v": 1},
+                          path=Path('/some/cache.json'))
+
+    def test_save_snapshot_silent_when_parent_unwriteable(self):
+        from unittest.mock import patch
+        with patch.object(Path, 'mkdir',
+                          side_effect=PermissionError("simulated")):
+            # Must not raise.  Returns None.
+            save_snapshot('local_resources', {"v": 1},
+                          path=Path('/some/cache.json'))
+
+
 class SaveCachePreservesSnapshotsTests(unittest.TestCase):
     """Regression: a plain save_cache(view) call must not wipe
     previous_snapshots written by probes."""
