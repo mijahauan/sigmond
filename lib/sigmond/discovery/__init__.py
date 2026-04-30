@@ -27,15 +27,16 @@ from ..paths import ENVIRONMENT_CACHE
 # ---------------------------------------------------------------------------
 
 DEFAULT_CADENCE = {
-    "mdns":          60.0,
-    "multicast":     120.0,
-    "ntp":           300.0,
-    "http_kiwisdr":  300.0,
-    "gpsdo":         30.0,
-    "http_ka9q":     300.0,
-    "http_gnss":     300.0,
-    "snmp":          300.0,
-    "usb_sdr":       60.0,
+    "mdns":             60.0,
+    "multicast":        120.0,
+    "ntp":              300.0,
+    "http_kiwisdr":     300.0,
+    "gpsdo":            30.0,
+    "http_ka9q":        300.0,
+    "http_gnss":        300.0,
+    "snmp":             300.0,
+    "usb_sdr":          60.0,
+    "local_resources":  60.0,
 }
 
 # Minimum gap between two probes of the same (source, target) even when
@@ -44,8 +45,10 @@ DEFAULT_CADENCE = {
 HARD_FLOOR = 5.0
 
 ALL_SOURCES = ("mdns", "multicast", "ntp", "http_kiwisdr", "gpsdo",
-               "http_ka9q", "http_gnss", "snmp", "usb_sdr")
-ACTIVE_SOURCES = ("ntp", "http_kiwisdr", "http_ka9q", "http_gnss", "snmp", "usb_sdr")
+               "http_ka9q", "http_gnss", "snmp", "usb_sdr",
+               "local_resources")
+ACTIVE_SOURCES = ("ntp", "http_kiwisdr", "http_ka9q", "http_gnss",
+                  "snmp", "usb_sdr", "local_resources")
 PASSIVE_SOURCES = ("mdns", "multicast", "gpsdo")
 
 
@@ -83,6 +86,9 @@ def module_for_source(src: str):
     if src == "usb_sdr":
         from . import usb_sdr
         return usb_sdr
+    if src == "local_resources":
+        from . import local_resources
+        return local_resources
     return None
 
 
@@ -107,6 +113,8 @@ def targets_for_source(src: str, env: "Environment") -> list:
     if src == "snmp":
         return [n.host for n in env.network_devices]
     if src == "usb_sdr":
+        return ["localhost"]                     # local-only probe
+    if src == "local_resources":
         return ["localhost"]                     # local-only probe
     return []
 
@@ -158,6 +166,11 @@ def save_cache(view: EnvironmentView, path: Optional[Path] = None) -> None:
     Silently skips if the cache directory is not writable (e.g. /var/lib/sigmond
     not yet created or owned by root).  The environment screen still works; it
     just won't persist the results across restarts.
+
+    Preserves the ``previous_snapshots`` map written by ``save_snapshot`` —
+    probes that need a prior reading to compute rates (e.g. the
+    local_resources probe diffing /proc/net/snmp) own that field, and a
+    plain ``save_cache`` call must not clobber it.
     """
     p = path or cache_path()
     try:
@@ -178,6 +191,16 @@ def save_cache(view: EnvironmentView, path: Optional[Path] = None) -> None:
             for d in view.deltas
         ],
     }
+    # Preserve any existing previous_snapshots on disk — they belong to
+    # the probes, not to the view payload.
+    try:
+        existing = json.loads(p.read_text()) if p.exists() else {}
+        if isinstance(existing, dict):
+            snaps = existing.get("previous_snapshots")
+            if isinstance(snaps, dict):
+                payload["previous_snapshots"] = snaps
+    except (OSError, json.JSONDecodeError):
+        pass
     try:
         p.write_text(json.dumps(payload, indent=2))
     except PermissionError:
@@ -206,6 +229,67 @@ def _obs_to_dict(o: Observation) -> dict:
         "ok":          o.ok,
         "error":       o.error,
     }
+
+
+def load_snapshot(source: str, path: Optional[Path] = None) -> Optional[dict]:
+    """Return the previous raw counter snapshot for ``source``, or None.
+
+    Probes that compute deltas (rates over an interval) need access to
+    their last raw counter reading.  Snapshots live under the
+    ``previous_snapshots[<source>]`` key in the same cache file as the
+    EnvironmentView — extending one cache file rather than maintaining
+    a sidecar per probe.
+
+    Returns None on first run, missing cache, malformed JSON, or absent
+    source key.
+    """
+    p = path or cache_path()
+    if not p.exists():
+        return None
+    try:
+        payload = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    snaps = payload.get("previous_snapshots")
+    if not isinstance(snaps, dict):
+        return None
+    snap = snaps.get(source)
+    return snap if isinstance(snap, dict) else None
+
+
+def save_snapshot(source: str, snapshot: dict,
+                  path: Optional[Path] = None) -> None:
+    """Persist ``snapshot`` under ``previous_snapshots[source]``.
+
+    Read-modify-write against the cache file: existing observations,
+    deltas, and other probes' snapshots are preserved.  Silently no-ops
+    on permission errors (same policy as save_cache).
+    """
+    p = path or cache_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        return
+    if p.exists():
+        try:
+            payload = json.loads(p.read_text())
+            if not isinstance(payload, dict):
+                payload = {}
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+    else:
+        payload = {}
+    snaps = payload.get("previous_snapshots")
+    if not isinstance(snaps, dict):
+        snaps = {}
+    snaps[source] = snapshot
+    payload["previous_snapshots"] = snaps
+    try:
+        p.write_text(json.dumps(payload, indent=2))
+    except PermissionError:
+        pass
 
 
 def dict_to_obs(d: dict) -> Observation:

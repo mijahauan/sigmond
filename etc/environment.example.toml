@@ -1,0 +1,95 @@
+# /etc/sigmond/environment.toml — example
+#
+# Operator-declared picture of network peers and local resources around
+# this host.  Sigmond probes each declared entity and reconciles the
+# observed state against `expect.*` thresholds in this file.
+#
+# Edit and copy to /etc/sigmond/environment.toml.  Loaded by:
+#   smd environment list
+#   smd environment probe
+#   smd environment describe <kind>/<id>
+#   smd tui  (Environment screen)
+
+[site]
+name        = "AC0G-EM38"
+description = "Beelink RX888 SAS station"
+
+# ---------------------------------------------------------------------------
+# Local-system resources — host CPU, USB, NICs, IRQs.
+# ---------------------------------------------------------------------------
+#
+# This section drives the local_resources probe (packet-loss
+# diagnostics).  Every field is optional; declare only what you want
+# observed.  See docs/PACKET-LOSS-DIAGNOSTICS.md for a cookbook.
+
+[local_system]
+
+# Cores assigned to managed services (used by harmonize CPU-isolation rule).
+cpu_affinity = [2, 3, 4, 5, 6, 7]
+
+# CPU governor sigmond expects to find active.
+cpu_governor = "performance"
+
+# SDR devices physically present on this host.
+sdrs = ["rx888-0"]
+
+# NICs to harvest ethtool -S counters from.
+nics = ["eth0"]
+
+# USB devices the operator wants tracked for URB errors.
+# Format: vendor:product (4 hex digits each).  Find via `lsusb`.
+#   1d50:6150  RX-888
+#   04b4:00f1  RX-888 Mk2
+usb_devices = ["1d50:6150"]
+
+# Expected IRQ pinning: handler-name → list of core indices.
+# The local_resources probe parses /proc/interrupts and reports drift.
+irq_pins = { xhci_hcd = [2, 3], eth0 = [4, 5] }
+
+# Threshold-based health classification.  Any expectation that fails
+# turns the local_system delta `degraded`.  Order of evaluation:
+# UDP rate → softirq → IRQ drift (loudest signal first).
+[local_system.expect]
+udp_rcvbuf_errors_rate_max = 0       # per-second; any UDP loss = degraded
+udp_in_errors_rate_max     = 0       # per-second; other UDP errors
+softirq_percent_max        = 30      # %soft on the busiest core
+irq_pin_drift_allowed      = false   # IRQs must land on declared cores
+
+# ---------------------------------------------------------------------------
+# Other entity kinds (illustrative — uncomment what applies)
+# ---------------------------------------------------------------------------
+
+# [[radiod]]
+# id         = "bee1-hf"
+# host       = "bee1.local"
+# status_dns = "hf-status.local"
+# role       = "primary"
+
+# [[time_source]]
+# id          = "upstream-ntp"
+# kind        = "ntp"
+# host        = "time.nist.gov"
+# stratum_max = 2
+
+# [[gpsdo]]
+# id   = "bodnar-bee1"
+# kind = "leo-bodnar-mini"
+# host = "localhost"
+
+# [[network_device]]
+# id        = "core-switch"
+# kind      = "switch"
+# host      = "10.0.0.1"
+# community = "public"
+
+# [[kiwisdr]]
+# id           = "kiwi-east"
+# host         = "kiwi1.local"
+# port         = 8073
+# gps_expected = true
+
+# [discovery]
+# mdns_enabled        = true
+# multicast_enabled   = true
+# passive_only        = false   # true = no active probes (snmp, ntp, ethtool, etc.)
+# background_interval = 900     # seconds between background probe sweeps

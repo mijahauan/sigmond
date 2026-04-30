@@ -91,6 +91,77 @@ def _gpsdo_classifier(declared, good_obs: list) -> tuple:
     return "healthy", ""
 
 
+def _local_system_classifier(declared, good_obs: list) -> tuple:
+    """Compare local_resources observations against declared expectations.
+
+    Recognised ``expect.*`` keys (all optional):
+
+      udp_rcvbuf_errors_rate_max  Per-second rate ceiling (e.g. 0).
+      udp_in_errors_rate_max      Per-second rate ceiling.
+      softirq_percent_max         %soft on the busiest core (e.g. 30).
+      irq_pin_drift_allowed       If False, every declared IRQ must fire
+                                  only on the cores listed in irq_pins.
+
+    The first failure wins — order in this function is the order of
+    surface-level diagnostic value (UDP rate is the loudest packet-loss
+    signal, IRQ drift is the most subtle).  ``healthy`` if no expect.*
+    keys are set: an operator who declared ``[local_system]`` only to
+    list ``nics`` or ``sdrs`` should not see degraded deltas.
+    """
+    expect = declared.expect or {}
+    if not expect:
+        return "healthy", ""
+    merged: dict = {}
+    for o in good_obs:
+        merged.update(o.fields)
+
+    udp = merged.get("udp", {}) or {}
+    rcv_max = expect.get("udp_rcvbuf_errors_rate_max")
+    if rcv_max is not None:
+        rate = float(udp.get("rcvbuf_errors_rate", 0) or 0)
+        if rate > rcv_max:
+            return "degraded", (
+                f"udp.rcvbuf_errors_rate {rate:.4f}/s exceeds max {rcv_max}"
+            )
+    in_max = expect.get("udp_in_errors_rate_max")
+    if in_max is not None:
+        rate = float(udp.get("in_errors_rate", 0) or 0)
+        if rate > in_max:
+            return "degraded", (
+                f"udp.in_errors_rate {rate:.4f}/s exceeds max {in_max}"
+            )
+
+    soft_max = expect.get("softirq_percent_max")
+    if soft_max is not None:
+        cores = merged.get("cpu_per_core", []) or []
+        worst = max((float(c.get("soft", 0) or 0) for c in cores),
+                    default=0.0)
+        if worst > soft_max:
+            return "degraded", (
+                f"core softirq% {worst} exceeds max {soft_max}"
+            )
+
+    if expect.get("irq_pin_drift_allowed") is False:
+        irqs = merged.get("irqs", {}) or {}
+        for handler, info in irqs.items():
+            expected = set(info.get("expected_cores", []) or [])
+            observed = set(info.get("observed_cores", []) or [])
+            if expected and not observed.issubset(expected):
+                drift = sorted(observed - expected)
+                return "degraded", (
+                    f"irq {handler} firing on unexpected cores {drift} "
+                    f"(expected {sorted(expected)})"
+                )
+
+    return "healthy", ""
+
+# Phase-4 deferred: _network_device_classifier and _igmp_querier_classifier
+# are not registered yet. The probes that would feed them (extended SNMP
+# port discards, IGMP-STD-MIB querier query) are Phase 3 work, and Phase 3
+# is on hold until we have a managed switch to talk to. Wire the
+# classifiers in alongside Phase 3 — see tasks/plan-local-resources-probe.md.
+
+
 def _flatten(d: dict, prefix: str = "") -> dict:
     out: dict = {}
     for k, v in (d or {}).items():
@@ -289,6 +360,9 @@ def _parse_local_system(raw: dict):
         cpu_affinity=list(raw.get('cpu_affinity', []) or []),
         cpu_governor=str(raw.get('cpu_governor', '') or ''),
         sdrs=list(raw.get('sdrs', []) or []),
+        nics=list(raw.get('nics', []) or []),
+        usb_devices=list(raw.get('usb_devices', []) or []),
+        irq_pins=dict(raw.get('irq_pins', {}) or {}),
         expect=dict(raw.get('expect', {}) or {}),
     )
 
@@ -297,7 +371,11 @@ def _local_system_is_declared(ls) -> bool:
     """An empty default DeclaredLocalSystem is treated as 'no local
     declaration' so it doesn't show up as a phantom missing delta on
     every host.  Operator must populate at least one field."""
-    return bool(ls.cpu_affinity or ls.cpu_governor or ls.sdrs or ls.expect)
+    return bool(
+        ls.cpu_affinity or ls.cpu_governor or ls.sdrs
+        or ls.nics or ls.usb_devices or ls.irq_pins
+        or ls.expect
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +455,7 @@ REGISTRY: dict = {
         parse=_parse_local_system,
         list_form=False,
         iter_filter=_local_system_is_declared,
+        expect_classifier=_local_system_classifier,
         tui_extra=_local_system_extra,
     ),
 }

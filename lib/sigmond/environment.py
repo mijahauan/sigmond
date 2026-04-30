@@ -99,6 +99,9 @@ class DeclaredLocalSystem:
     cpu_affinity: list = field(default_factory=list)      # CPU cores available
     cpu_governor: str = ""                                # "performance" | "powersave" | etc.
     sdrs: list = field(default_factory=list)             # SDR devices present
+    nics: list = field(default_factory=list)             # NIC names to harvest ethtool stats for
+    usb_devices: list = field(default_factory=list)      # USB vendor:product IDs to track
+    irq_pins: dict = field(default_factory=dict)         # handler-name -> expected core list
     expect: dict = field(default_factory=dict)
 
 

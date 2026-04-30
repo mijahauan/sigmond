@@ -125,5 +125,57 @@ host = "no-id.local"
         self.assertEqual(env.radiods[0].id, "keeps")
 
 
+class LocalSystemLoaderTests(unittest.TestCase):
+    """The DeclaredLocalSystem grew nics/usb_devices/irq_pins fields for
+    the local_resources probe; these tests pin the TOML round-trip and
+    the iter_filter behaviour."""
+
+    def test_new_fields_round_trip(self):
+        manifest = """
+[local_system]
+cpu_governor = "performance"
+nics = ["eth0", "enp1s0"]
+usb_devices = ["1d50:6150"]
+irq_pins = { xhci_hcd = [2, 3], eth0 = [4, 5] }
+
+[local_system.expect]
+udp_rcvbuf_errors_rate_max = 0
+softirq_percent_max = 30
+"""
+        with tempfile.TemporaryDirectory() as d:
+            env = load_environment(_write(Path(d), manifest))
+        ls = env.local_system
+        self.assertEqual(ls.nics, ["eth0", "enp1s0"])
+        self.assertEqual(ls.usb_devices, ["1d50:6150"])
+        self.assertEqual(ls.irq_pins, {"xhci_hcd": [2, 3], "eth0": [4, 5]})
+        self.assertEqual(ls.expect.get("softirq_percent_max"), 30)
+
+    def test_nics_alone_makes_local_system_declared(self):
+        manifest = """
+[local_system]
+nics = ["eth0"]
+"""
+        with tempfile.TemporaryDirectory() as d:
+            env = load_environment(_write(Path(d), manifest))
+        kinds = [k for k, _ in env.iter_declared()]
+        self.assertIn("local_system", kinds)
+
+    def test_irq_pins_alone_makes_local_system_declared(self):
+        manifest = """
+[local_system.irq_pins]
+xhci_hcd = [2, 3]
+"""
+        with tempfile.TemporaryDirectory() as d:
+            env = load_environment(_write(Path(d), manifest))
+        kinds = [k for k, _ in env.iter_declared()]
+        self.assertIn("local_system", kinds)
+
+    def test_truly_empty_local_system_is_filtered(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = load_environment(_write(Path(d), ''))
+        kinds = [k for k, _ in env.iter_declared()]
+        self.assertNotIn("local_system", kinds)
+
+
 if __name__ == '__main__':
     unittest.main()
