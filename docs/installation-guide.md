@@ -56,7 +56,7 @@ packages must be present if you plan to build the ka9q-radio C project:
 ```bash
 sudo apt-get update
 sudo apt-get install -y git python3-pip python3-venv chrony \
-    build-essential cmake
+    build-essential cmake tzdata-legacy
 ```
 
 | Package | Why |
@@ -65,6 +65,7 @@ sudo apt-get install -y git python3-pip python3-venv chrony \
 | `python3-pip` / `python3-venv` | Venv fallback if uv is unavailable |
 | `chrony` | Required timing daemon for the SDR suite |
 | `build-essential` / `cmake` | Compiling ka9q-radio (C project) |
+| `tzdata-legacy` | Provides `/usr/share/zoneinfo/right/` for TAI/UTC conversion. Without it, `radiod` falls back to a hardcoded 1972-era 18-second leap offset (current value is 37s) — causing a 19-second error in TAI-timestamped output. Not installed by default on Debian 12/13. |
 
 > **Note:** `chrony` will replace `systemd-timesyncd` — this is expected and
 > required for the precision timing the SDR suite needs.
