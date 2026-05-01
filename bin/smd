@@ -1575,6 +1575,27 @@ def _ensure_radiod_running() -> None:
 # smd apply
 # ---------------------------------------------------------------------------
 
+def _any_upload_service_inactive() -> bool:
+    """Return True if any wd-upload-* unit is loaded but not active.
+
+    Used by cmd_apply to decide whether to run _restart_upload_services_last
+    on an otherwise-no-op apply: a broken upload should self-heal even when
+    nothing else changed.
+    """
+    import subprocess as _sp
+    r = _sp.run(
+        ['systemctl', 'list-units', '--type=service',
+         '--state=loaded', '--no-legend', '--no-pager', 'wd-upload-*'],
+        capture_output=True, text=True,
+    )
+    for line in r.stdout.splitlines():
+        parts = line.strip().split()
+        # systemctl list-units columns: UNIT LOAD ACTIVE SUB DESCRIPTION
+        if len(parts) >= 3 and parts[2] != 'active':
+            return True
+    return False
+
+
 def _restart_upload_services_last() -> None:
     """Restart active wd-upload-* services so they start after all producers."""
     import subprocess as _sp
@@ -1605,6 +1626,11 @@ def cmd_apply(args) -> int:
     _heading('apply')
     _netdiag_auto_refresh('apply')
 
+    # Tracks whether anything observable was changed by this apply.  Drives
+    # the decision to restart wd-upload-* at the end: a fully no-op apply
+    # leaves them alone instead of cycling them every time.
+    something_changed = False
+
     # Ensure deploy.toml link-kind install steps are present for all installed
     # catalog components.  This catches unit files that install.sh omitted or
     # that were accidentally removed.
@@ -1628,6 +1654,7 @@ def cmd_apply(args) -> int:
                             reloaded = True
             if reloaded and not dry_run:
                 _run(['systemctl', 'daemon-reload'], sudo=True)
+                something_changed = True
         except Exception:
             pass  # non-fatal
 
@@ -1664,7 +1691,8 @@ def cmd_apply(args) -> int:
                 if u.component == 'ka9q-radio' and u.kind == 'service'
             ]
             if radiod_units:
-                _ensure_radiod_affinity_drop_ins(radiod_units, topology.get('cpu_affinity'))
+                if _ensure_radiod_affinity_drop_ins(radiod_units, topology.get('cpu_affinity')):
+                    something_changed = True
                 # Check wisdom file — generation is now a deliberate user
                 # action via 'smd tui → Operate → FFT Wisdom' (or the CLI
                 # equivalent).  We don't block apply to run it.
@@ -1681,6 +1709,7 @@ def cmd_apply(args) -> int:
                             r_start = _run(['systemctl', 'start', u.unit], sudo=True)
                             if r_start.returncode == 0:
                                 _ok(f'{u.unit}: enabled and started')
+                                something_changed = True
                             else:
                                 _warn(f'{u.unit}: failed to start — {r_start.stderr.strip()}')
                         else:
@@ -1699,14 +1728,18 @@ def cmd_apply(args) -> int:
     # 99-wdctl-cpu-affinity.conf drop-ins which use the full CPU range.
     if _HAS_SIGMOND_LIB and not dry_run:
         try:
-            _ensure_other_affinity_drop_ins(topology.get('cpu_affinity'))
+            if _ensure_other_affinity_drop_ins(topology.get('cpu_affinity')):
+                something_changed = True
         except Exception:
             pass  # non-fatal; affinity is best-effort
 
     # Restart wd-upload-* services AFTER everything else — they depend on
-    # decoders being active and fail with "unavailable resources" if started too early.
+    # decoders being active and fail with "unavailable resources" if started
+    # too early. Skip the cycle entirely on a no-op apply.  Also restart any
+    # upload that's currently inactive/failed so a broken state self-heals.
     if not dry_run:
-        _restart_upload_services_last()
+        if something_changed or _any_upload_service_inactive():
+            _restart_upload_services_last()
 
     return 0 if ok else 1
 
@@ -1888,7 +1921,7 @@ def _ensure_fft_wisdom(radiod_units: list, all_units: list) -> bool:
 # ---------------------------------------------------------------------------
 
 def _ensure_radiod_affinity_drop_ins(radiod_units: list,
-                                     topology_cpu_affinity=None) -> None:
+                                     topology_cpu_affinity=None) -> bool:
     """Write smd-cpu-affinity.conf drop-ins for radiod service instances.
 
     Assigns physical core 0 to the first instance (alphabetically), core 1 to
@@ -1897,15 +1930,17 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
 
     For any instance already running with the wrong CPU affinity, restarts it
     so the new constraint takes effect immediately.
+
+    Returns True if any drop-in was written, removed, or any unit restarted.
     """
     try:
         from sigmond.cpu import get_physical_cores, parse_cpu_mask
     except ImportError:
-        return
+        return False
 
     cores = get_physical_cores()
     if not cores:
-        return
+        return False
 
     sorted_units = sorted(radiod_units, key=lambda u: u.instance or u.unit)
     valid_unit_names = {u.unit for u in sorted_units}
@@ -1950,8 +1985,10 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
         _info(f'affinity changed: restarting {unit} to apply new CPU pinning')
         _run(['systemctl', 'restart', unit], sudo=True)
 
+    return wrote_any or bool(units_to_restart)
 
-def _ensure_other_affinity_drop_ins(topology_cpu_affinity=None) -> None:
+
+def _ensure_other_affinity_drop_ins(topology_cpu_affinity=None) -> bool:
     """Write template-level smd-cpu-affinity.conf drop-ins for all non-radiod
     managed services, restricting them to the CPUs not reserved for radiod.
 
@@ -1965,11 +2002,11 @@ def _ensure_other_affinity_drop_ins(topology_cpu_affinity=None) -> None:
                                   AFFINITY_UNITS as _AU,
                                   cpu_list_str as _cls)
     except ImportError:
-        return
+        return False
 
     plan = _cplan(topology_cpu_affinity)
     if not plan.other_cpus:
-        return
+        return False
 
     other_cpus = plan.other_cpus
     label = f'other → CPUs {_cpu_list_str(other_cpus)}'
@@ -2003,6 +2040,8 @@ def _ensure_other_affinity_drop_ins(topology_cpu_affinity=None) -> None:
             instances = [unit]
         for inst in instances:
             _apply_cpu_affinity_runtime(inst, other_cpus)
+
+    return wrote_any
 
 
 def cmd_start(args) -> int:
@@ -2085,11 +2124,22 @@ def cmd_stop(args) -> int:
 
 
 def _write_affinity_drop_in(unit: str, cpus: set, label: str) -> bool:
-    """Write /etc/systemd/system/<unit>.d/smd-cpu-affinity.conf."""
+    """Write /etc/systemd/system/<unit>.d/smd-cpu-affinity.conf.
+
+    Returns True only when the file was actually created or modified.
+    A no-op rewrite (existing content already matches) returns False so
+    callers don't trigger spurious daemon-reload / unit restart.
+    """
     import tempfile
     drop_dir = Path(f'/etc/systemd/system/{unit}.d')
     drop_in  = drop_dir / _SMD_AFFINITY_DROP_IN
     content  = _render_drop_in(cpus, label)
+    if drop_in.exists():
+        try:
+            if drop_in.read_text() == content:
+                return False
+        except OSError:
+            pass  # fall through and rewrite
     r = _run(['mkdir', '-p', str(drop_dir)], sudo=True)
     if r.returncode != 0:
         _err(f'{unit}: cannot create {drop_dir}')
