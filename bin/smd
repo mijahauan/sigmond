@@ -173,6 +173,9 @@ def _git_pull_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
     sigmond's self-update runs under sudo. If the repo has an SSH remote
     (git@github.com:...), root has no usable key. The repo owner does — so
     drop privs and let their on-disk SSH key authenticate.
+
+    Output is captured (not streamed) so caller controls display.  Compare
+    HEAD ref before/after to decide whether anything changed.
     """
     git_cmd = ['git', '-C', str(repo_dir), 'pull', '--ff-only']
     if os.geteuid() == 0:
@@ -183,7 +186,8 @@ def _git_pull_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
                 git_cmd = ['sudo', '-u', owner, '-H', '--'] + git_cmd
         except (OSError, KeyError):
             pass
-    return subprocess.run(git_cmd, stdin=subprocess.DEVNULL)
+    return subprocess.run(git_cmd, stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True)
 
 
 def _ok(msg):   print(f'  \033[32m✓\033[0m  {msg}')
@@ -1214,6 +1218,36 @@ def _install_wdlib(client_dir: Path) -> None:
     _ok('wdlib: symlinked into /opt/wsprdaemon/lib/')
 
 
+_WD_CTL_NOISE_RE = __import__('re').compile(
+    r'^(?:'
+    r'Parsing config:'
+    r'|  Env files:'
+    r'|  No orphaned instances'
+    r'|  Units: already in place'
+    r'|  Wrappers installed'
+    r'|  tmpfs (?:size|already mounted)'
+    r'|  Mount unit:'
+    r'|  systemd daemon reloaded'
+    r'|  Spool janitor:.* enabled'
+    r'|  Bash completion:'
+    r'|Apply complete\.'
+    r')'
+)
+
+
+def _print_wd_ctl_filtered(stdout: str, stderr: str) -> None:
+    """Print wd-ctl output with status-only lines suppressed.
+
+    Keeps anything that isn't recognised noise (real transitions like
+    'Started: X', errors, warnings, removed-orphan messages).
+    """
+    for line in stdout.splitlines():
+        if line.strip() and not _WD_CTL_NOISE_RE.match(line):
+            print(line)
+    if stderr.strip():
+        print(stderr, file=sys.stderr)
+
+
 def _run_wd_ctl_apply(client_dir: Path, dry_run: bool) -> bool:
     wd_ctl = Path('/usr/local/sbin/wd-ctl')
     if not wd_ctl.exists():
@@ -1225,15 +1259,18 @@ def _run_wd_ctl_apply(client_dir: Path, dry_run: bool) -> bool:
     if dry_run:
         _info('dry-run: would run: sudo WD_SKIP_AFFINITY=1 ' + ' '.join(cmd))
         return True
-    _info('Running wd-ctl apply ...')
     # sigmond owns CPU affinity for all managed services (radiod + workers).
     # WD_SKIP_AFFINITY=1 tells wd-ctl to skip its own affinity drop-ins
     # rather than write them and have sigmond delete them moments later.
     if os.geteuid() == 0:
         env = {**os.environ, 'WD_SKIP_AFFINITY': '1'}
-        r = _run(cmd, capture=False, env=env)
+        r = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL)
     else:
-        r = _run(['sudo', 'WD_SKIP_AFFINITY=1'] + cmd, capture=False)
+        r = subprocess.run(['sudo', 'WD_SKIP_AFFINITY=1'] + cmd,
+                           capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL)
+    _print_wd_ctl_filtered(r.stdout, r.stderr)
     return r.returncode == 0
 
 
@@ -1712,8 +1749,7 @@ def cmd_apply(args) -> int:
                                 something_changed = True
                             else:
                                 _warn(f'{u.unit}: failed to start — {r_start.stderr.strip()}')
-                        else:
-                            _info(f'{u.unit}: already running')
+                        # else: already running — silent
                 else:
                     _warn('radiod not started — FFT wisdom not yet ready')
                     _warn('wd-decode, wd-post, wd-upload will have no data until '
@@ -2945,21 +2981,28 @@ def cmd_update(args) -> int:
             elif dry_run:
                 _info('sigmond: (dry-run) would pull and sync catalog')
             else:
-                _info(f'sigmond: pulling ({sigmond_dir}) ...')
+                before = _git_head_ref(sigmond_dir)
                 r = _git_pull_as_owner(sigmond_dir)
                 if r.returncode != 0:
-                    _warn('sigmond: self-update failed — continuing')
+                    err_msg = (r.stderr.strip() or r.stdout.strip()
+                               or 'git pull failed')
+                    _err(f'sigmond: self-update failed — {err_msg}')
                     errors += 1
                 else:
-                    _ok('sigmond: up to date')
-                # Always sync the catalog after self-update so new entries are live.
+                    after = _git_head_ref(sigmond_dir)
+                    if after != before:
+                        _ok(f'sigmond: {before} → {after}')
+                    # else: silent — final summary will say "all up to date"
+                # Sync catalog only if its bytes differ — silent no-op otherwise.
                 catalog_src = sigmond_dir / 'etc' / 'catalog.toml'
                 catalog_dst = Path('/etc/sigmond/catalog.toml')
                 if catalog_src.exists():
                     try:
                         import shutil as _shutil
-                        _shutil.copy2(str(catalog_src), str(catalog_dst))
-                        _ok('sigmond: catalog synced to /etc/sigmond/catalog.toml')
+                        if (not catalog_dst.exists()
+                                or catalog_src.read_bytes() != catalog_dst.read_bytes()):
+                            _shutil.copy2(str(catalog_src), str(catalog_dst))
+                            _ok('sigmond: catalog updated')
                     except Exception as _exc:
                         _warn(f'sigmond: could not sync catalog: {_exc}')
 
@@ -3017,16 +3060,14 @@ def cmd_update(args) -> int:
                 _info(f'{name}: (dry-run) would {action}')
             continue
 
-        _info(f'{name}: pulling ...')
         try:
             _clone_repo(entry, pull_if_exists=True, ref=effective_ref)
             after = _git_head_ref(repo_dir)
-            if after == before:
-                _ok(f'{name}: already at {after}')
-            else:
+            if after != before:
                 _ok(f'{name}: {before} → {after}')
-                if name == 'ka9q-radio' and after != before:
+                if name == 'ka9q-radio':
                     _warn('ka9q-radio: source updated — rebuild binaries: smd install --components ka9q-radio')
+            # else: silent — final summary will say "all up to date"
         except RuntimeError as exc:
             _err(f'{name}: {exc}')
             errors += 1
@@ -3035,8 +3076,7 @@ def cmd_update(args) -> int:
         _info('(dry-run) no changes made')
         return 0
 
-    # --- apply: reload any changed systemd units ---
-    _heading('apply')
+    # --- apply: reload any changed systemd units (cmd_apply prints its own heading) ---
     args.dry_run = False
     apply_rc = cmd_apply(args)
     if apply_rc != 0:
@@ -3076,15 +3116,18 @@ def _netdiag_auto_refresh(verb: str) -> None:
         cache = net_diag.load_cache()
         if net_diag.is_cache_fresh(cache):
             report = net_diag._report_from_dict(cache['report'])
-            _info(f'network: {report.classification} '
-                  f'(cached {int(cache["age_s"]/60)}m ago)')
+            # Only surface the cache verdict if it's a problem the operator
+            # needs to act on. Healthy "lan-capable" stays silent.
+            if report.classification in ('lan-needs-querier', 'lan-unsafe'):
+                _warn(f'network: {report.classification} '
+                      f'(cached {int(cache["age_s"]/60)}m ago)')
             return
         if os.geteuid() != 0:
             # Tier-1 only (no raw socket), completes quickly.
             report, _from_cache = net_diag.run_cached(
                 listen_seconds=0, force=True)
-            _info(f'network: {report.classification}')
             if report.classification in ('lan-needs-querier', 'lan-unsafe'):
+                _warn(f'network: {report.classification}')
                 for line in report.recommendation.split('. '):
                     line = line.strip().rstrip('.')
                     if line:
