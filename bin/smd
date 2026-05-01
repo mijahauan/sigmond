@@ -1769,6 +1769,18 @@ def cmd_apply(args) -> int:
         except Exception:
             pass  # non-fatal; affinity is best-effort
 
+    # Disable hf-timestd's radiod-affinity watcher if it ever got enabled
+    # (typically by a re-run of hf-timestd's deploy.sh on a host where the
+    # operator forgot TIMESTD_SKIP_AFFINITY=1).  Sigmond owns radiod
+    # affinity; the watcher would otherwise re-apply hf-timestd's drop-in
+    # on every radiod restart.  Silent no-op when already disabled.
+    if not dry_run:
+        try:
+            if _disable_hftimestd_affinity_watcher():
+                something_changed = True
+        except Exception:
+            pass  # non-fatal
+
     # Restart wd-upload-* services AFTER everything else — they depend on
     # decoders being active and fail with "unavailable resources" if started
     # too early. Skip the cycle entirely on a no-op apply.  Also restart any
@@ -2207,15 +2219,28 @@ def _remove_foreign_affinity_drop_ins() -> list:
     return results
 
 
-def _disable_hftimestd_affinity_watcher() -> None:
-    """Disable and stop the hf-timestd units that monitor radiod for reinstalls."""
+def _disable_hftimestd_affinity_watcher() -> bool:
+    """Disable and stop the hf-timestd units that monitor radiod for reinstalls.
+
+    Sigmond owns radiod's CPU affinity; the hf-timestd watcher would otherwise
+    re-apply hf-timestd's drop-in on every radiod restart.  Returns True if
+    anything was actually disabled (silent on the typical no-op case).
+
+    Only acts when state is exactly "enabled" — `is-enabled --quiet` returns 0
+    for "static", "alias", "generated", etc., so checking exit code alone
+    would loop disabling units that don't have an [Install] section to begin
+    with (in particular timestd-radiod-affinity.service is static).
+    """
+    disabled_any = False
     for unit in _HFTIMESTD_AFFINITY_UNITS:
-        r = _run(['systemctl', 'is-enabled', '--quiet', unit])
-        if r.returncode == 0:
+        r = _run(['systemctl', 'is-enabled', unit])
+        state = r.stdout.strip()
+        if state == 'enabled':
             _run(['systemctl', 'disable', '--now', unit], sudo=True)
             _ok(f'disabled + stopped {unit}')
-        else:
-            _info(f'{unit}: not enabled (skipping)')
+            disabled_any = True
+        # else: silent — already disabled / static / etc.
+    return disabled_any
 
 
 def _apply_cpu_affinity_runtime(unit: str, cpus: set) -> bool:
