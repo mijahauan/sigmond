@@ -118,6 +118,29 @@ def synthesize_catalog_entry(deploy_path: Path):
     kind = client_block.get('kind') or package_block.get('kind') or 'client'
     description = client_block.get('description') or package_block.get('description', '')
     repo = client_block.get('repo', '')
+    # Fall back to the source repo's actual remote when the deploy.toml
+    # didn't declare one.  Without this, components like hfdl-recorder /
+    # gpsdo-monitor that have a real GitHub remote but no [client] repo=
+    # in their deploy.toml are silently skipped by `smd update`.
+    if not repo:
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ['git', '-C', str(deploy_path.parent),
+                 'remote', 'get-url', 'origin'],
+                capture_output=True, text=True, check=False,
+            )
+            if r.returncode == 0:
+                url = r.stdout.strip()
+                # Convert SSH form to HTTPS so root can pull without an SSH key.
+                if url.startswith('git@github.com:'):
+                    url = 'https://github.com/' + url[len('git@github.com:'):]
+                if url.endswith('.git'):
+                    url = url[:-4]
+                if url.startswith(('http://', 'https://', 'git@')):
+                    repo = url
+        except Exception:
+            pass  # best-effort; leave repo empty
     requires = tuple(client_block.get('requires') or ())
     uses = tuple(client_block.get('uses') or ())
     contract = (client_block.get('contract')
