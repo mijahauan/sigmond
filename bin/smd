@@ -29,6 +29,7 @@ Lifecycle verbs (start/stop/restart/reload/list/status):
 import argparse
 import configparser
 import os
+import pwd
 import shutil
 import subprocess
 import sys
@@ -116,7 +117,7 @@ BANNER = r"""
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _run(cmd: list, *, cwd=None, capture=True, sudo=False) -> subprocess.CompletedProcess:
+def _run(cmd: list, *, cwd=None, capture=True, sudo=False, env=None) -> subprocess.CompletedProcess:
     if sudo and os.geteuid() != 0:
         cmd = ['sudo'] + cmd
     # When not capturing output, redirect stdin from /dev/null so interactive
@@ -124,7 +125,26 @@ def _run(cmd: list, *, cwd=None, capture=True, sudo=False) -> subprocess.Complet
     stdin_arg = subprocess.DEVNULL if not capture else None
     return subprocess.run(cmd, cwd=cwd,
                           capture_output=capture, text=True,
-                          stdin=stdin_arg)
+                          stdin=stdin_arg, env=env)
+
+
+def _git_pull_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
+    """git pull --ff-only, dropping privileges to the repo's owning user when root.
+
+    sigmond's self-update runs under sudo. If the repo has an SSH remote
+    (git@github.com:...), root has no usable key. The repo owner does — so
+    drop privs and let their on-disk SSH key authenticate.
+    """
+    git_cmd = ['git', '-C', str(repo_dir), 'pull', '--ff-only']
+    if os.geteuid() == 0:
+        try:
+            owner_uid = os.stat(repo_dir).st_uid
+            if owner_uid != 0:
+                owner = pwd.getpwuid(owner_uid).pw_name
+                git_cmd = ['sudo', '-u', owner, '-H', '--'] + git_cmd
+        except (OSError, KeyError):
+            pass
+    return subprocess.run(git_cmd, stdin=subprocess.DEVNULL)
 
 
 def _ok(msg):   print(f'  \033[32m✓\033[0m  {msg}')
@@ -1164,10 +1184,17 @@ def _run_wd_ctl_apply(client_dir: Path, dry_run: bool) -> bool:
         return False
     cmd = [str(wd_ctl), 'apply']
     if dry_run:
-        _info('dry-run: would run: sudo ' + ' '.join(cmd))
+        _info('dry-run: would run: sudo WD_SKIP_AFFINITY=1 ' + ' '.join(cmd))
         return True
     _info('Running wd-ctl apply ...')
-    r = _run(cmd, capture=False, sudo=True)
+    # sigmond owns CPU affinity for all managed services (radiod + workers).
+    # WD_SKIP_AFFINITY=1 tells wd-ctl to skip its own affinity drop-ins
+    # rather than write them and have sigmond delete them moments later.
+    if os.geteuid() == 0:
+        env = {**os.environ, 'WD_SKIP_AFFINITY': '1'}
+        r = _run(cmd, capture=False, env=env)
+    else:
+        r = _run(['sudo', 'WD_SKIP_AFFINITY=1'] + cmd, capture=False)
     return r.returncode == 0
 
 
@@ -2824,8 +2851,7 @@ def cmd_update(args) -> int:
         if (sigmond_dir / '.git').exists():
             _info(f'sigmond: pulling ({sigmond_dir}) ...')
             if not dry_run:
-                r = _run(['git', '-C', str(sigmond_dir), 'pull', '--ff-only'],
-                         capture=False)
+                r = _git_pull_as_owner(sigmond_dir)
                 if r.returncode != 0:
                     _warn('sigmond: self-update failed — continuing')
                     errors += 1
