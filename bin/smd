@@ -1231,6 +1231,10 @@ _WD_CTL_NOISE_RE = __import__('re').compile(
     r'|  Spool janitor:.* enabled'
     r'|  Bash completion:'
     r'|Apply complete\.'
+    # _manage_radiod section noise — keep only the real transition lines
+    r'|--- radiod:'
+    r'|  ka9q-radio source: OK'
+    r'|  Running and config is current'
     r')'
 )
 
@@ -3010,7 +3014,6 @@ def cmd_update(args) -> int:
         _err(str(exc))
         return 1
 
-    _heading('update')
     errors   = 0
     opt_git  = Path('/opt/git/sigmond')
 
@@ -3040,7 +3043,8 @@ def cmd_update(args) -> int:
                     after = _git_head_ref(sigmond_dir)
                     if after != before:
                         _ok(f'sigmond: {before} → {after}')
-                    # else: silent — final summary will say "all up to date"
+                    else:
+                        _ok(f'sigmond: up to date ({after})')
                 # Sync catalog only if its bytes differ — silent no-op otherwise.
                 catalog_src = sigmond_dir / 'etc' / 'catalog.toml'
                 catalog_dst = Path('/etc/sigmond/catalog.toml')
@@ -3115,7 +3119,8 @@ def cmd_update(args) -> int:
                 _ok(f'{name}: {before} → {after}')
                 if name == 'ka9q-radio':
                     _warn('ka9q-radio: source updated — rebuild binaries: smd install --components ka9q-radio')
-            # else: silent — final summary will say "all up to date"
+            else:
+                _ok(f'{name}: up to date ({after})')
         except RuntimeError as exc:
             _err(f'{name}: {exc}')
             errors += 1
