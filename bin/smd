@@ -3015,6 +3015,7 @@ def cmd_update(args) -> int:
         return 1
 
     errors   = 0
+    pulled   = 0   # count of repos whose HEAD actually advanced
     opt_git  = Path('/opt/git/sigmond')
 
     # Load topology once using the library object API (version field required).
@@ -3043,6 +3044,7 @@ def cmd_update(args) -> int:
                     after = _git_head_ref(sigmond_dir)
                     if after != before:
                         _ok(f'sigmond: {before} → {after}')
+                        pulled += 1
                     else:
                         _ok(f'sigmond: up to date ({after})')
                 # Sync catalog only if its bytes differ — silent no-op otherwise.
@@ -3117,6 +3119,7 @@ def cmd_update(args) -> int:
             after = _git_head_ref(repo_dir)
             if after != before:
                 _ok(f'{name}: {before} → {after}')
+                pulled += 1
                 if name == 'ka9q-radio':
                     _warn('ka9q-radio: source updated — rebuild binaries: smd install --components ka9q-radio')
             else:
@@ -3129,11 +3132,15 @@ def cmd_update(args) -> int:
         _info('(dry-run) no changes made')
         return 0
 
-    # --- apply: reload any changed systemd units (cmd_apply prints its own heading) ---
-    args.dry_run = False
-    apply_rc = cmd_apply(args)
-    if apply_rc != 0:
-        errors += 1
+    # --- apply: only reload systemd units when something was actually pulled.
+    # On a no-op update there's nothing to reconcile and apply would just
+    # produce an empty heading + summary.  Operators can still run `sudo
+    # smd apply` directly when they need to force reconciliation.
+    if pulled > 0:
+        args.dry_run = False
+        apply_rc = cmd_apply(args)
+        if apply_rc != 0:
+            errors += 1
 
     if errors:
         _warn(f'update finished with {errors} error(s)')
