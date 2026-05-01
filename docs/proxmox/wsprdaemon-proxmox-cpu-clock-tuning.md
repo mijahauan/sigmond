@@ -714,6 +714,100 @@ This confirms that pinning is end-to-end correct: a workload running on a specif
 
 ---
 
+## Part 9b — Per-pCPU frequency caps (multi-radiod aware)
+
+### Why
+
+Inside the guest, sigmond's affinity rules already keep radiod and the worker pool on separate cores. But all those cores share the same memory bus on the host. When the workers all wake up at WSPR minute boundaries and decode in parallel (wsprd at 60-80% CPU per band × ~17 bands), they pull memory bandwidth that radiod's RTP fast path needs, causing transient drops on radiod's HT pair.
+
+The remedy used in wsprdaemon v3 on bare metal (and now reproduced in the VM) is to **cap the worker pCPUs to a lower max frequency**. The workers still finish in time — they just finish at 1.4 GHz instead of 4 GHz — and the memory bus stays light enough that radiod runs unperturbed at full 3.2 GHz on its HT pair.
+
+Inside a KVM guest there is no `/sys/devices/system/cpu/cpufreq/` interface (KVM does not expose host frequency scaling). The caps must therefore be applied on the **Proxmox host**, on the host pCPUs that back the guest's vCPUs (the 1:1 pinning from Part 9 makes this mapping unambiguous).
+
+### What the caps look like in practice
+
+For one radiod (typical):
+
+| Host pCPU | Backs guest vCPU | Cap | Used by |
+|---|---|---|---|
+| 0, 1 | 0, 1 (HT pair of guest CORE 0) | 3.2 GHz | radiod |
+| 2 – 9 | 2 – 9 | 1.4 GHz | wd-decode / wd-post / wd-upload-* / wspr-recorder |
+| 10, 11 | (host's own — not assigned to VM) | untouched | host scheduler |
+
+For two radiods (each pinned to its own HT pair inside the guest):
+
+| Host pCPU | Backs guest vCPU | Cap | Used by |
+|---|---|---|---|
+| 0, 1 | 0, 1 | 3.2 GHz | radiod #1 |
+| 2, 3 | 2, 3 | 3.2 GHz | radiod #2 |
+| 4 – 9 | 4 – 9 | 1.4 GHz | worker pool |
+| 10, 11 | (host) | untouched | host |
+
+…and so on — two more pCPUs into the high-cap set per additional radiod.
+
+### Implementation: extend the hookscript
+
+The same `cpu-pin-<vmid>.sh` snippet that does vCPU pinning (Part 9) is the natural place for the caps — they need to be re-applied on every VM start, which is exactly what the `post-start` phase gives us.
+
+A working, parametrized template lives in this repo at
+[`docs/proxmox/cpu-pin-VMID.sh.example`](cpu-pin-VMID.sh.example).
+Copy it to `/var/lib/vz/snippets/cpu-pin-<vmid>.sh` on the Proxmox host, edit four
+things at the top, then wire it into the VM via `qm set <vmid> --hookscript local:snippets/cpu-pin-<vmid>.sh`.
+
+The four things to set:
+
+```bash
+VMID=101                        # match your sigmond VM's id
+RADIOD_CPUS=(0 1)               # one HT pair per radiod instance
+RADIOD_FREQ_KHZ=3200000         # 3.2 GHz cap for radiod CPUs
+WORKER_CPUS=(2 3 4 5 6 7 8 9)   # everything else assigned to the VM
+WORKER_FREQ_KHZ=1400000         # 1.4 GHz cap for worker CPUs
+```
+
+### Apply without restarting the VM
+
+```bash
+sudo bash /var/lib/vz/snippets/cpu-pin-101.sh 101 post-start
+```
+
+The script's vCPU pinning is idempotent (taskset is no-op when already pinned).
+The freq writes always take immediately.
+
+### View current state from the host
+
+```bash
+for c in $(seq 0 11); do
+    m=$(cat /sys/devices/system/cpu/cpufreq/policy${c}/scaling_max_freq)
+    printf "  pCPU%-2s max %.1f GHz\n" "$c" "$(echo "$m/1000000"|bc -l)"
+done
+```
+
+### View from the guest
+
+There is no `/sys/devices/system/cpu/cpufreq/` inside the guest, but **`/proc/cpuinfo` does report the host pCPU's current running frequency** for each vCPU. So you can verify the cap is in effect by watching the `cpu MHz` field under load:
+
+```bash
+sudo smd diag cpu-freq            # sigmond reads /proc/cpuinfo and shows running MHz per vCPU
+```
+
+When workers are bursting at a minute boundary, the worker vCPUs (2-9) should top out at ~1400 MHz; radiod's vCPUs (0-1) should top out at ~3200 MHz.
+
+### Hookscript log lines
+
+Each run logs to syslog under tag `cpu-pin-<vmid>`:
+
+```bash
+journalctl -t cpu-pin-101 --since "1 hour ago"
+# cpu-cap: pCPU 0 max=3200 MHz (radiod)
+# cpu-cap: pCPU 1 max=3200 MHz (radiod)
+# cpu-cap: pCPU 2 max=1400 MHz (worker)
+# ...
+# cpu-pin: VM 101 vCPU 0 (tid 50668) -> host pCPU 0
+# ...
+```
+
+---
+
 ## Part 10 — Operational observations and validation under load
 
 Once the configuration is complete, the following observations are expected when running radiod alongside other workloads. None of these indicate a problem; they're documented here so future debugging doesn't chase phantoms.

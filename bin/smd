@@ -2431,6 +2431,29 @@ def cmd_diag_cpu_freq(args) -> int:
     _info('  (Configure limits in /etc/sigmond/topology.toml  [cpu_freq])')
     print()
 
+    # No /sys/cpufreq at all → we're in a guest VM (KVM doesn't expose host
+    # frequency scaling, and /proc/cpuinfo's "cpu MHz" inside KVM is the
+    # calibration TSC value, not the live running freq).  The caps must be
+    # set on the Proxmox host; print the policy here and tell the operator
+    # how to verify on the host.
+    if not Path('/sys/devices/system/cpu/cpu0/cpufreq').exists():
+        _info('No /sys/cpufreq detected — running in a VM.')
+        _info('Frequency caps are applied on the Proxmox host (KVM does not')
+        _info('expose host frequency scaling to the guest, and /proc/cpuinfo')
+        _info('inside KVM only reports the boot-time TSC calibration value).')
+        print()
+        _info('Sigmond expects the host hookscript at /var/lib/vz/snippets/cpu-pin-<vmid>.sh')
+        _info('to apply these caps.  See:  docs/proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md')
+        print()
+        _info('To verify the live caps on the Proxmox host:')
+        print('       ssh root@<proxmox-host> \'for c in $(seq 0 11); do '
+              'm=$(cat /sys/devices/system/cpu/cpufreq/policy${c}/scaling_max_freq); '
+              'printf "  pCPU%-2s max %.1f GHz\\n" "$c" "$(echo "$m/1000000"|bc -l)"; done\'')
+        print()
+        if do_apply:
+            _warn('--apply has no effect inside a VM; edit the host hookscript instead')
+        return 0
+
     changes = 0
     errors  = 0
 

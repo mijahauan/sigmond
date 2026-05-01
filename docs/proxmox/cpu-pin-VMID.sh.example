@@ -1,0 +1,71 @@
+#!/bin/bash
+# /var/lib/vz/snippets/cpu-pin-101.sh
+# Per-vCPU pinning + per-pCPU frequency caps for VM 101 (sigmond).
+#
+# ---- How to adapt for YOUR station ----
+#
+# VMID                Set to your sigmond VM's id (matches `qm list`).
+#
+# RADIOD_CPUS         Host pCPUs that back the guest's radiod instance(s).
+#                     One HT pair (2 logical CPUs) per radiod instance.
+#                     Examples:
+#                       1 radiod  → RADIOD_CPUS=(0 1)
+#                       2 radiods → RADIOD_CPUS=(0 1 2 3)
+#                       3 radiods → RADIOD_CPUS=(0 1 2 3 4 5)
+#                     The vCPU pinning below is 1:1, so guest vCPUs 0,1
+#                     run on host pCPUs 0,1; etc.  Sigmond's affinity logic
+#                     then pins radiod inside the guest to vCPU 0,1
+#                     (or vCPU 0..3 for two radiods, etc.).
+#
+# WORKER_CPUS         Host pCPUs that back the guest's worker pool —
+#                     everything assigned to this VM minus RADIOD_CPUS.
+#                     Capped lower to limit memory-bandwidth contention
+#                     when the workers all wake at WSPR minute boundaries
+#                     (without this they steal memory bandwidth from radiod).
+#
+# Frequencies are kHz.  Adjust to fit your CPU's supported range
+# (see /sys/devices/system/cpu/cpufreq/policy0/cpuinfo_{min,max}_freq).
+
+VMID=101
+RADIOD_CPUS=(0 1)
+RADIOD_FREQ_KHZ=3200000      # 3.2 GHz cap for radiod CPUs
+WORKER_CPUS=(2 3 4 5 6 7 8 9)
+WORKER_FREQ_KHZ=1400000      # 1.4 GHz cap for worker CPUs
+
+# ---- end of operator-tunable section ----
+
+EVT_VMID=$1
+PHASE=$2
+
+if [ "$PHASE" = "post-start" ] && [ "$EVT_VMID" = "$VMID" ]; then
+    # Per-pCPU frequency caps — apply first, independent of QEMU readiness.
+    {
+        for c in "${RADIOD_CPUS[@]}"; do
+            echo "$RADIOD_FREQ_KHZ" \
+                > /sys/devices/system/cpu/cpufreq/policy${c}/scaling_max_freq \
+                && echo "cpu-cap: pCPU ${c} max=$((RADIOD_FREQ_KHZ/1000)) MHz (radiod)"
+        done
+        for c in "${WORKER_CPUS[@]}"; do
+            echo "$WORKER_FREQ_KHZ" \
+                > /sys/devices/system/cpu/cpufreq/policy${c}/scaling_max_freq \
+                && echo "cpu-cap: pCPU ${c} max=$((WORKER_FREQ_KHZ/1000)) MHz (worker)"
+        done
+    } | logger -t cpu-pin-${VMID}
+
+    # vCPU pinning — wait for QEMU to bring up vCPU threads, then 1:1 pin.
+    sleep 2
+    QEMU_PID=$(cat /var/run/qemu-server/${VMID}.pid 2>/dev/null)
+    if [ -z "$QEMU_PID" ]; then
+        echo "cpu-pin: could not find QEMU pid for VM $VMID" | logger -t cpu-pin-${VMID}
+        exit 0
+    fi
+    for tid in $(ps -T -p $QEMU_PID -o tid= 2>/dev/null); do
+        comm=$(cat /proc/$tid/comm 2>/dev/null)
+        if [[ "$comm" =~ ^CPU\ ([0-9]+)/KVM$ ]]; then
+            vcpu=${BASH_REMATCH[1]}
+            taskset -pc $vcpu $tid > /dev/null 2>&1
+            echo "cpu-pin: VM $VMID vCPU $vcpu (tid $tid) -> host pCPU $vcpu"
+        fi
+    done | logger -t cpu-pin-${VMID}
+fi
+exit 0
