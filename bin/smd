@@ -128,6 +128,45 @@ def _run(cmd: list, *, cwd=None, capture=True, sudo=False, env=None) -> subproce
                           stdin=stdin_arg, env=env)
 
 
+def _repo_is_dirty(repo_dir: Path) -> tuple[bool, str | None]:
+    """Return (is_dirty, reason) for a git repo.
+
+    Considers a repo unsafe to overwrite if it has either:
+    - uncommitted tracked-file changes (working tree or index), or
+    - local commits ahead of its upstream branch.
+
+    Untracked files alone don't count — git pull won't clobber them.
+    """
+    r = subprocess.run(
+        ['git', '-C', str(repo_dir), 'status', '--porcelain', '--untracked-files=no'],
+        capture_output=True, text=True,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        files = [line[3:].strip() for line in r.stdout.splitlines() if line.strip()]
+        head = ', '.join(files[:3]) + ('...' if len(files) > 3 else '')
+        return True, f'uncommitted changes in {len(files)} file(s): {head}'
+
+    up = subprocess.run(
+        ['git', '-C', str(repo_dir), 'rev-parse', '--abbrev-ref', '@{u}'],
+        capture_output=True, text=True,
+    )
+    if up.returncode == 0 and up.stdout.strip():
+        upstream = up.stdout.strip()
+        ahead = subprocess.run(
+            ['git', '-C', str(repo_dir), 'rev-list', '--count', f'{upstream}..HEAD'],
+            capture_output=True, text=True,
+        )
+        if ahead.returncode == 0:
+            try:
+                n = int(ahead.stdout.strip() or '0')
+            except ValueError:
+                n = 0
+            if n > 0:
+                return True, f'{n} unpushed local commit(s) ahead of {upstream}'
+
+    return False, None
+
+
 def _git_pull_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
     """git pull --ff-only, dropping privileges to the repo's owning user when root.
 
@@ -2849,8 +2888,14 @@ def cmd_update(args) -> int:
     if not components_filter:
         sigmond_dir = Path(__file__).resolve().parent.parent
         if (sigmond_dir / '.git').exists():
-            _info(f'sigmond: pulling ({sigmond_dir}) ...')
-            if not dry_run:
+            dirty, reason = _repo_is_dirty(sigmond_dir)
+            if dirty:
+                _warn(f'sigmond: skipping pull — {reason}')
+                _warn('         commit, stash, or push before running smd update')
+            elif dry_run:
+                _info('sigmond: (dry-run) would pull and sync catalog')
+            else:
+                _info(f'sigmond: pulling ({sigmond_dir}) ...')
                 r = _git_pull_as_owner(sigmond_dir)
                 if r.returncode != 0:
                     _warn('sigmond: self-update failed — continuing')
@@ -2867,8 +2912,6 @@ def cmd_update(args) -> int:
                         _ok('sigmond: catalog synced to /etc/sigmond/catalog.toml')
                     except Exception as _exc:
                         _warn(f'sigmond: could not sync catalog: {_exc}')
-            else:
-                _info('sigmond: (dry-run) would pull and sync catalog')
 
     # --- pull each installed catalog repo ---
     for name in sorted(catalog):
@@ -2905,6 +2948,14 @@ def cmd_update(args) -> int:
                 continue
             elif comp_version != 'latest':
                 effective_ref = comp_version  # pinned ref from topology
+
+        # Refuse to pull over uncommitted work or unpushed local commits.
+        # _clone_repo's `git checkout -B main origin/main` would discard them.
+        dirty, reason = _repo_is_dirty(repo_dir)
+        if dirty:
+            _warn(f'{name}: skipping pull — {reason}')
+            _warn(f'         commit, stash, or push in {repo_dir} before running smd update')
+            continue
 
         before = _git_head_ref(repo_dir) if not dry_run else '?'
         if dry_run:
