@@ -87,17 +87,18 @@ class ComponentState:
     def display_status(self) -> str:
         """Operator-friendly one-liner naming the next command needed.
 
-        Lines up with the table in the design doc — every line either
-        states the stage or names the next command.
+        Drops the "sudo " prefix from suggested commands — sigmond now
+        auto-elevates via sudo when invoked as a non-root user, so the
+        prefix is just noise.
         """
         if not self.cloned:
             return "missing — repo not cloned"
         if not self.installed:
-            return f"available — needs: sudo smd install {self.name}"
+            return f"available — needs: smd install {self.name}"
         if not self.configured:
-            return f"installed — needs: sudo smd config init {self.name}"
+            return f"installed — needs: smd config init {self.name}"
         if not self.enabled:
-            return f"configured — enable with: sudo smd enable {self.name}"
+            return f"configured — enable with: smd enable {self.name}"
         if not self.active:
             return "enabled, stopped"
         return "enabled, running"
@@ -307,15 +308,19 @@ def compute_state(name: str, topology=None, alias: str = None) -> ComponentState
 
     if deploy is None:
         # Component is cloned but doesn't ship a deploy.toml (radiod's
-        # upstream ka9q-radio is the canonical example).  Detect active
-        # via the lifecycle fallback shim, then trust reality: if it's
-        # running, it must be installed AND configured.
+        # upstream ka9q-radio is the canonical example — no sigmond
+        # install.sh, the binary lives at /usr/local/sbin/radiod from
+        # an out-of-band ka9q-update build).  No filesystem fingerprint
+        # we can verify against, so just trust the cloned state: assume
+        # installed AND configured.  Display will show "enabled, stopped"
+        # or "enabled, running" — the only states meaningful for a
+        # build-it-yourself component.
         active, active_n, total_n = _active_via_lifecycle(name, alias)
         return ComponentState(
             name=name,
             cloned=True,
-            installed=active,    # reality wins
-            configured=active,   # reality wins
+            installed=True,
+            configured=True,
             enabled=enabled,
             active=active,
             active_unit_count=active_n,
