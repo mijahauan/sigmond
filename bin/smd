@@ -2449,15 +2449,48 @@ def cmd_stop(args) -> int:
         coord = load_coordination()
         units = order_units(units, coordination=coord)
 
+    # Build the full stop list:
+    #   1. Every declared unit (services, targets, timers).
+    #   2. For each .timer, also the matching .service if it's currently
+    #      running.  systemctl stop foo.timer doesn't kill a foo.service
+    #      that the timer triggered earlier — e.g. a grape-daily catch-up
+    #      run that's still chewing on yesterday's data when we stop.
+    stop_list: list[str] = [u.unit for u in reversed(units)]
+    seen = set(stop_list)
+    for u in stop_list[:]:  # iterate a snapshot
+        if u.endswith('.timer'):
+            paired_service = u[:-len('.timer')] + '.service'
+            if paired_service in seen:
+                continue
+            # `is-active --quiet` returns 0 ONLY for "active"; it returns
+            # non-zero for "activating".  We want both — a long-running
+            # oneshot triggered by the timer (e.g. grape-daily mid-
+            # processing) is exactly what we need to interrupt on stop.
+            r = _run(['systemctl', 'is-active', paired_service])
+            state = r.stdout.strip()
+            if state in ('active', 'activating', 'reloading'):
+                idx = stop_list.index(u)
+                stop_list.insert(idx, paired_service)
+                seen.add(paired_service)
+
     _heading('stop')
-    # Stop in reverse order
-    for unit in reversed(units):
-        r = _run(['systemctl', 'stop', unit.unit], sudo=True)
+    stopped = 0
+    failed: list[tuple[str, str]] = []
+    for unit_name in stop_list:
+        r = _run(['systemctl', 'stop', unit_name], sudo=True)
         if r.returncode == 0:
-            _ok(f'{unit.unit}')
+            stopped += 1
         else:
-            _err(f'{unit.unit}: {r.stderr.strip()}')
-    return 0
+            failed.append((unit_name, r.stderr.strip() or 'unknown error'))
+
+    # Quiet by default: just the count and any failures.  Full per-unit
+    # output is overwhelming on a typical station with 30+ units; if the
+    # operator wants the detail they can tail journalctl.
+    if stopped:
+        _ok(f'stopped {stopped} unit{"s" if stopped != 1 else ""}')
+    for unit_name, err in failed:
+        _err(f'{unit_name}: {err}')
+    return 1 if failed else 0
 
 
 # ---------------------------------------------------------------------------
@@ -4596,5 +4629,26 @@ def main() -> int:
     return dispatch[args.command](args)
 
 
+def _install_sigint_handler() -> None:
+    """Replace Python's default SIGINT (Ctrl-C) traceback with a clean
+    one-line exit message — matches the feel of standard CLI tools like
+    apt or systemctl."""
+    import signal as _signal
+    def _handler(signum, frame):
+        # Newline so the prompt lands cleanly past any half-printed output.
+        sys.stderr.write('\nsmd: interrupted\n')
+        sys.exit(130)  # 128 + SIGINT, conventional shell exit code
+    _signal.signal(_signal.SIGINT, _handler)
+
+
 if __name__ == '__main__':
-    sys.exit(main())
+    _install_sigint_handler()
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        # Belt-and-suspenders for any path that catches and re-raises.
+        sys.stderr.write('\nsmd: interrupted\n')
+        sys.exit(130)
+    except BrokenPipeError:
+        # `smd ... | head` etc.; not an error.
+        sys.exit(0)
