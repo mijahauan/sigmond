@@ -236,6 +236,38 @@ def _topology_enabled(topology, name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _active_via_lifecycle(name: str) -> tuple[bool, int, int]:
+    """Fallback active-check for components without a deploy.toml.
+
+    Uses sigmond.lifecycle.resolve_units, which falls back to a
+    hardcoded shim for components like ka9q-radio (where the unit set
+    isn't declared in a deploy.toml because the upstream C project
+    doesn't carry sigmond contract metadata).
+    """
+    try:
+        from sigmond.lifecycle import resolve_units
+    except ImportError:
+        return (False, 0, 0)
+    try:
+        units = resolve_units([name], [name])
+    except Exception:
+        # No deploy.toml AND no shim — can't tell.
+        return (False, 0, 0)
+    active_n = 0
+    total = 0
+    for u in units:
+        if u.orphaned:
+            continue
+        total += 1
+        r = subprocess.run(
+            ["systemctl", "is-active", "--quiet", u.unit],
+            capture_output=True,
+        )
+        if r.returncode == 0:
+            active_n += 1
+    return (active_n > 0, active_n, total)
+
+
 def compute_state(name: str, topology=None) -> ComponentState:
     """Compute the lifecycle state for one component name.
 
@@ -246,15 +278,29 @@ def compute_state(name: str, topology=None) -> ComponentState:
     """
     cloned = (GIT_BASE / name).exists()
     deploy = _read_deploy_toml(name) if cloned else None
+    enabled = _topology_enabled(topology, name) if topology is not None else False
 
-    if not cloned or deploy is None:
+    if not cloned:
+        return ComponentState(
+            name=name, cloned=False, installed=False, configured=False,
+            enabled=enabled, active=False,
+        )
+
+    if deploy is None:
+        # Component is cloned but doesn't ship a deploy.toml (radiod's
+        # upstream ka9q-radio is the canonical example).  Detect active
+        # via the lifecycle fallback shim, then trust reality: if it's
+        # running, it must be installed AND configured.
+        active, active_n, total_n = _active_via_lifecycle(name)
         return ComponentState(
             name=name,
-            cloned=cloned,
-            installed=False,
-            configured=False,
-            enabled=False,
-            active=False,
+            cloned=True,
+            installed=active,    # reality wins
+            configured=active,   # reality wins
+            enabled=enabled,
+            active=active,
+            active_unit_count=active_n,
+            inactive_unit_count=max(0, total_n - active_n),
         )
 
     produces = _produces_paths(deploy)
