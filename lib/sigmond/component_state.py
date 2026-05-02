@@ -291,7 +291,13 @@ def compute_state(name: str, topology=None, alias: str = None) -> ComponentState
     """
     cloned = (GIT_BASE / name).exists()
     deploy = _read_deploy_toml(name) if cloned else None
-    enabled = _topology_enabled(topology, name) if topology is not None else False
+    # Topology may key the entry under either the catalog name or the
+    # topology_alias (radiod's catalog name is "radiod" but topology
+    # has [component.ka9q-radio]).  Check both.
+    enabled = False
+    if topology is not None:
+        enabled = (_topology_enabled(topology, name) or
+                   (bool(alias) and _topology_enabled(topology, alias)))
 
     if not cloned:
         return ComponentState(
