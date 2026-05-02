@@ -157,3 +157,128 @@ def load_topology(path: Path = TOPOLOGY_PATH,
 def enabled_components(topology: Topology, only: Optional[list] = None) -> list:
     """Backwards-compatible free function."""
     return topology.enabled_components(only)
+
+
+# ---------------------------------------------------------------------------
+# Mutating writers — line-based to preserve operator comments + ordering.
+# ---------------------------------------------------------------------------
+
+
+def set_component_enabled(name: str,
+                          enabled: bool,
+                          path: Path = TOPOLOGY_PATH,
+                          description: Optional[str] = None) -> bool:
+    """Set [component.<name>].enabled = true|false in topology.toml.
+
+    Idempotent — returns True only if the file actually changed.
+
+    Behavior:
+      - Existing section with `enabled = ...` line: rewrite that line.
+      - Existing section without `enabled = ...`: insert one after the header.
+      - No section at all: append a new [component.<name>] block at EOF.
+    """
+    val = 'true' if enabled else 'false'
+    target_header = f'[component.{name}]'
+
+    if path.exists():
+        original = path.read_text()
+        lines = original.splitlines()
+    else:
+        original = ''
+        lines = []
+
+    new_lines: list[str] = []
+    in_section = False
+    enabled_handled = False
+    section_found = False
+    section_header_idx = -1
+
+    for line in lines:
+        stripped = line.strip()
+        is_header = stripped.startswith('[') and stripped.endswith(']')
+
+        if is_header:
+            if in_section and not enabled_handled:
+                new_lines.insert(section_header_idx + 1, f'enabled = {val}')
+                enabled_handled = True
+            in_section = (stripped == target_header)
+            if in_section:
+                section_found = True
+                section_header_idx = len(new_lines)
+
+        if in_section and stripped.startswith('enabled') and '=' in stripped:
+            indent = line[:len(line) - len(line.lstrip())]
+            new_lines.append(f'{indent}enabled = {val}')
+            enabled_handled = True
+            continue
+
+        new_lines.append(line)
+
+    if in_section and not enabled_handled:
+        new_lines.insert(section_header_idx + 1, f'enabled = {val}')
+        enabled_handled = True
+        section_found = True
+
+    if not section_found:
+        while new_lines and new_lines[-1].strip() == '':
+            new_lines.pop()
+        if new_lines:
+            new_lines.append('')
+        new_lines.append(target_header)
+        new_lines.append(f'enabled = {val}')
+        if description:
+            new_lines.append(f'description = "{description}"')
+
+    new_text = '\n'.join(new_lines)
+    if not new_text.endswith('\n'):
+        new_text += '\n'
+
+    if new_text == original:
+        return False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_text)
+    return True
+
+
+def remove_component(name: str, path: Path = TOPOLOGY_PATH) -> bool:
+    """Remove the [component.<name>] section from topology.toml.
+
+    Idempotent — returns False if no such section was present.
+    """
+    if not path.exists():
+        return False
+
+    original = path.read_text()
+    lines = original.splitlines()
+    target_header = f'[component.{name}]'
+
+    new_lines: list[str] = []
+    skipping = False
+    found = False
+
+    for line in lines:
+        stripped = line.strip()
+        is_header = stripped.startswith('[') and stripped.endswith(']')
+
+        if skipping:
+            if is_header and stripped != target_header:
+                skipping = False
+                new_lines.append(line)
+            continue
+
+        if stripped == target_header:
+            skipping = True
+            found = True
+            while new_lines and new_lines[-1].strip() == '':
+                new_lines.pop()
+            continue
+
+        new_lines.append(line)
+
+    if not found:
+        return False
+
+    new_text = '\n'.join(new_lines).rstrip() + '\n'
+    path.write_text(new_text)
+    return True

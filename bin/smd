@@ -1284,6 +1284,210 @@ def _ensure_sigmond_dirs() -> None:
 
 
 # ---------------------------------------------------------------------------
+# smd add / enable / disable / remove  — systemctl-style component lifecycle
+# ---------------------------------------------------------------------------
+#
+# Lifecycle:
+#   add      — clone repo into /opt/git/sigmond/<name>/ (or git pull if there)
+#   install  — run deploy.toml install steps (existing cmd_install)
+#   config init|edit — configure (existing cmd_config_init / cmd_config_edit)
+#   enable   — set [component.<name>].enabled=true in topology.toml
+#   start    — refuses unless installed AND configured
+#   disable  — set enabled=false AND stop the component's units
+#   remove   — delete the [component.<name>] section AND stop units
+
+
+def _derive_component_name_from_url(url: str) -> str:
+    """codar-sounder.git → 'codar-sounder' ; git@github.com:owner/foo → 'foo' ."""
+    stem = url.rstrip('/').rsplit('/', 1)[-1]
+    if stem.endswith('.git'):
+        stem = stem[:-4]
+    return stem
+
+
+def _stop_component_units(component: str) -> None:
+    """systemctl-stop everything declared by component's deploy.toml."""
+    if not _HAS_SIGMOND_LIB:
+        return
+    try:
+        topology = _load_topology(TOPOLOGY_PATH)
+        # If still in topology, resolve via library; otherwise read the
+        # deploy.toml directly so disable/remove still works after the
+        # topology entry is gone.
+        try:
+            units = resolve_units([component], [component])
+        except Exception:
+            from sigmond.component_state import (_read_deploy_toml,
+                                                  _systemd_unit_names,
+                                                  _expand_running_instances)
+            deploy = _read_deploy_toml(component)
+            unit_names: list[str] = []
+            if deploy:
+                for u in _systemd_unit_names(deploy):
+                    if '@.' in u:
+                        unit_names.extend(_expand_running_instances(u))
+                    else:
+                        unit_names.append(u)
+            for u in unit_names:
+                _run(['systemctl', 'stop', u], sudo=True)
+            return
+        for unit in [u for u in units if not u.orphaned]:
+            _run(['systemctl', 'stop', unit.unit], sudo=True)
+    except Exception as exc:
+        _warn(f'{component}: stop units skipped — {exc}')
+
+
+def cmd_add(args) -> int:
+    """Clone a sigmond-managed component into /opt/git/sigmond/<name>/.
+
+    No topology edit; operator runs `smd enable` separately.  If the
+    component is already cloned, fast-forward pulls so `smd add` doubles
+    as a per-component refresh.
+    """
+    if _need_root('add'):
+        return 1
+
+    url = getattr(args, 'url', None)
+    if not url:
+        _err('smd add: URL required (e.g. git@github.com:owner/<name>.git)')
+        return 1
+
+    name = _derive_component_name_from_url(url)
+    repo_dir = Path('/opt/git/sigmond') / name
+
+    if repo_dir.exists():
+        _info(f'{name}: already cloned at {repo_dir} — pulling latest')
+        r = _run(['git', '-C', str(repo_dir), 'pull', '--ff-only'])
+        if r.returncode != 0:
+            _err(f'{name}: pull failed: {r.stderr.strip() or r.stdout.strip()}')
+            return 1
+    else:
+        _info(f'{name}: cloning {url} → {repo_dir}')
+        repo_dir.parent.mkdir(parents=True, exist_ok=True)
+        r = _run(['git', 'clone', url, str(repo_dir)])
+        if r.returncode != 0:
+            _err(f'{name}: clone failed: {r.stderr.strip()}')
+            return 1
+
+    if not (repo_dir / 'deploy.toml').exists():
+        _err(f'{name}: not a sigmond-managed component (no deploy.toml at {repo_dir})')
+        _err(f'         repo is at {repo_dir}; sudo rm -rf {repo_dir} to undo.')
+        return 1
+
+    _ok(f'{name}: added')
+    _info(f'  next: sudo smd install {name}')
+    _info(f'        sudo smd config init {name}')
+    _info(f'        sudo smd enable {name}')
+    return 0
+
+
+def cmd_enable(args) -> int:
+    """Set [component.<name>].enabled=true in /etc/sigmond/topology.toml."""
+    if _need_root('enable'):
+        return 1
+    if not _HAS_SIGMOND_LIB:
+        _err('enable: sigmond library not importable')
+        return 1
+
+    from sigmond.topology import set_component_enabled
+    from sigmond.catalog import load_catalog
+
+    names = getattr(args, 'names', []) or []
+    if not names:
+        _err('smd enable: name required (e.g. smd enable hfdl-recorder)')
+        return 1
+
+    try:
+        catalog = load_catalog()
+    except FileNotFoundError as exc:
+        _err(str(exc))
+        return 1
+
+    rc = 0
+    for name in names:
+        if name not in catalog:
+            _err(f'{name}: not in catalog (clone it first with: sudo smd add <url>)')
+            rc = 1
+            continue
+        changed = set_component_enabled(name, True, TOPOLOGY_PATH,
+                                         description=catalog[name].description)
+        if changed:
+            _ok(f'{name}: enabled in topology')
+        else:
+            _info(f'{name}: already enabled')
+    if rc == 0:
+        _info('  start with: sudo smd start')
+    return rc
+
+
+def cmd_disable(args) -> int:
+    """Set enabled=false in topology AND stop the component's running units."""
+    if _need_root('disable'):
+        return 1
+    if not _HAS_SIGMOND_LIB:
+        _err('disable: sigmond library not importable')
+        return 1
+
+    from sigmond.topology import set_component_enabled
+    from sigmond.catalog import load_catalog
+
+    names = getattr(args, 'names', []) or []
+    if not names:
+        _err('smd disable: name required')
+        return 1
+
+    try:
+        catalog = load_catalog()
+    except FileNotFoundError as exc:
+        _err(str(exc))
+        return 1
+
+    rc = 0
+    for name in names:
+        if name not in catalog:
+            _warn(f'{name}: not in catalog — proceeding to stop any leftover units')
+        # Always try to stop units first (matches the operator's intent
+        # "I want this off").  Then flip the topology flag.
+        _stop_component_units(name)
+        if name in catalog:
+            changed = set_component_enabled(name, False, TOPOLOGY_PATH)
+            if changed:
+                _ok(f'{name}: disabled in topology + units stopped')
+            else:
+                _ok(f'{name}: already disabled (units stopped)')
+    return rc
+
+
+def cmd_remove(args) -> int:
+    """Delete the [component.<name>] section from topology AND stop units.
+
+    Does NOT delete the cloned source — that stays under /opt/git/sigmond/
+    so the operator can `smd enable <name>` again later without re-cloning.
+    """
+    if _need_root('remove'):
+        return 1
+    if not _HAS_SIGMOND_LIB:
+        _err('remove: sigmond library not importable')
+        return 1
+
+    from sigmond.topology import remove_component
+
+    names = getattr(args, 'names', []) or []
+    if not names:
+        _err('smd remove: name required')
+        return 1
+
+    for name in names:
+        _stop_component_units(name)
+        removed = remove_component(name, TOPOLOGY_PATH)
+        if removed:
+            _ok(f'{name}: removed from topology + units stopped')
+        else:
+            _info(f'{name}: not in topology (units stopped if any were running)')
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # smd install
 # ---------------------------------------------------------------------------
 
@@ -2103,6 +2307,27 @@ def cmd_start(args) -> int:
     only = [c.strip() for c in args.components.split(',')] if args.components else None
     enabled = _enabled_components(topology, only)
 
+    # Hard gate: no component starts unless installed AND configured.
+    # Returns the subset of `enabled` that's safe to start.  Drops + warns
+    # for the rest.
+    try:
+        from sigmond.component_state import compute_state
+        topo_for_state = _load_topology(TOPOLOGY_PATH)
+        startable: list[str] = []
+        for name in enabled:
+            s = compute_state(name, topo_for_state)
+            if s.can_start:
+                startable.append(name)
+            else:
+                _warn(f'{name}: not started — {s.display_status}')
+        enabled = startable
+    except Exception:
+        pass  # fall through; lifecycle check is best-effort
+
+    if not enabled:
+        _warn('no startable components — every enabled component needs install + config')
+        return 0
+
     try:
         units = resolve_units(enabled, enabled)
     except ValueError as exc:
@@ -2554,6 +2779,25 @@ def cmd_restart(args) -> int:
     only = [c.strip() for c in args.components.split(',')] if args.components else None
     enabled = _enabled_components(topology, only)
 
+    # Same configured-before-start gate as cmd_start.
+    try:
+        from sigmond.component_state import compute_state
+        topo_for_state = _load_topology(TOPOLOGY_PATH)
+        startable: list[str] = []
+        for name in enabled:
+            s = compute_state(name, topo_for_state)
+            if s.can_start:
+                startable.append(name)
+            else:
+                _warn(f'{name}: not restarted — {s.display_status}')
+        enabled = startable
+    except Exception:
+        pass
+
+    if not enabled:
+        _warn('no restartable components — every enabled component needs install + config')
+        return 0
+
     try:
         units = resolve_units(enabled, enabled)
     except ValueError as exc:
@@ -2868,22 +3112,54 @@ def _list_configured(args) -> int:
             })
         print(_json.dumps(units_data, indent=2))
     else:
-        _heading('configured units')
-        by_component: dict[str, list[UnitRef]] = {}
-        for unit in units:
-            if unit.component not in by_component:
-                by_component[unit.component] = []
-            by_component[unit.component].append(unit)
+        # Component-level lifecycle summary first — every entry the catalog
+        # knows about gets a status line, even those not yet installed/
+        # configured/enabled.  Then per-unit details for components that
+        # are actually enabled.
+        try:
+            from sigmond.catalog import load_catalog
+            from sigmond.component_state import compute_state
+            full_catalog = load_catalog()
+            full_topo = _load_topology(TOPOLOGY_PATH)
+        except Exception:
+            full_catalog = {}
+            full_topo = topology
 
-        for comp in sorted(by_component.keys()):
-            print(f'\n  {comp}:')
-            for unit_ref in sorted(by_component[comp], key=lambda u: u.unit):
-                r = _run(['systemctl', 'is-active', unit_ref.unit])
-                state = r.stdout.strip() or 'unknown'
-                sym = '✓' if state == 'active' else '✗'
-                color = '\033[32m' if state == 'active' else '\033[31m'
-                orphan_tag = ' [orphaned]' if unit_ref.orphaned else ''
-                print(f'    {color}{sym}\033[0m  {unit_ref.unit}: {state}{orphan_tag}')
+        _heading('components')
+        for name in sorted(full_catalog):
+            try:
+                state = compute_state(name, full_topo)
+            except Exception:
+                continue
+            # Color: green if running, yellow if enabled-but-not-active or
+            # configured-but-disabled, dim/uncolored otherwise.
+            if state.active:
+                color = '\033[32m'
+            elif state.enabled or state.configured:
+                color = '\033[33m'
+            else:
+                color = ''
+            reset = '\033[0m' if color else ''
+            print(f'  {color}{name:22s}{reset}  {state.display_status}')
+
+        # Per-unit detail for components that are enabled — show the
+        # systemctl status of each declared unit.
+        enabled_units_by_comp: dict[str, list[UnitRef]] = {}
+        for unit in units:
+            enabled_units_by_comp.setdefault(unit.component, []).append(unit)
+
+        if enabled_units_by_comp:
+            print()
+            _heading('configured units')
+            for comp in sorted(enabled_units_by_comp.keys()):
+                print(f'\n  {comp}:')
+                for unit_ref in sorted(enabled_units_by_comp[comp], key=lambda u: u.unit):
+                    r = _run(['systemctl', 'is-active', unit_ref.unit])
+                    state = r.stdout.strip() or 'unknown'
+                    sym = '✓' if state == 'active' else '✗'
+                    color = '\033[32m' if state == 'active' else '\033[31m'
+                    orphan_tag = ' [orphaned]' if unit_ref.orphaned else ''
+                    print(f'    {color}{sym}\033[0m  {unit_ref.unit}: {state}{orphan_tag}')
 
     return 0
 
@@ -3932,6 +4208,22 @@ def main() -> int:
                         help=f'topology file (default: {TOPOLOGY_PATH})')
     sub = parser.add_subparsers(dest='command')
 
+    # add — clone (or pull) a component repo into /opt/git/sigmond/<name>/
+    p = sub.add_parser('add', help='clone a component repo (run sudo smd install + enable to bring it online)')
+    p.add_argument('url', help='git URL of the component repo (e.g. git@github.com:owner/foo.git)')
+
+    # enable — set [component.<name>].enabled = true in topology.toml
+    p = sub.add_parser('enable', help='enable component(s) in /etc/sigmond/topology.toml')
+    p.add_argument('names', nargs='+', help='one or more component names')
+
+    # disable — set enabled = false AND stop the component's units
+    p = sub.add_parser('disable', help='disable component(s) and stop their units')
+    p.add_argument('names', nargs='+', help='one or more component names')
+
+    # remove — delete the [component.<name>] section AND stop units
+    p = sub.add_parser('remove', help='remove component section from topology and stop its units')
+    p.add_argument('names', nargs='+', help='one or more component names')
+
     # install
     p = sub.add_parser('install', help='install and configure components')
     p.add_argument('client', nargs='?', default=None,
@@ -4129,6 +4421,10 @@ def main() -> int:
         return 0
 
     dispatch = {
+        'add':     cmd_add,
+        'enable':  cmd_enable,
+        'disable': cmd_disable,
+        'remove':  cmd_remove,
         'install': cmd_install,
         'apply':   cmd_apply,
         'start':   cmd_start,
