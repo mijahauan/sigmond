@@ -3112,10 +3112,10 @@ def _list_configured(args) -> int:
             })
         print(_json.dumps(units_data, indent=2))
     else:
-        # Component-level lifecycle summary first — every entry the catalog
-        # knows about gets a status line, even those not yet installed/
-        # configured/enabled.  Then per-unit details for components that
-        # are actually enabled.
+        # Component-level lifecycle summary — one line per real component.
+        # Drops library-kind entries (synthesized for pip metadata, no repo
+        # to clone, no install steps).  Per-unit detail belongs to
+        # `smd status`, not here.
         try:
             from sigmond.catalog import load_catalog
             from sigmond.component_state import compute_state
@@ -3127,11 +3127,16 @@ def _list_configured(args) -> int:
 
         _heading('components')
         for name in sorted(full_catalog):
+            entry = full_catalog[name]
+            # Skip pip-metadata library entries — they're not operator-
+            # facing components, just dependency declarations.
+            if getattr(entry, 'kind', None) == 'library':
+                continue
             try:
                 state = compute_state(name, full_topo)
             except Exception:
                 continue
-            # Color: green if running, yellow if enabled-but-not-active or
+            # Color: green if running, yellow if enabled-but-stopped or
             # configured-but-disabled, dim/uncolored otherwise.
             if state.active:
                 color = '\033[32m'
@@ -3141,25 +3146,6 @@ def _list_configured(args) -> int:
                 color = ''
             reset = '\033[0m' if color else ''
             print(f'  {color}{name:22s}{reset}  {state.display_status}')
-
-        # Per-unit detail for components that are enabled — show the
-        # systemctl status of each declared unit.
-        enabled_units_by_comp: dict[str, list[UnitRef]] = {}
-        for unit in units:
-            enabled_units_by_comp.setdefault(unit.component, []).append(unit)
-
-        if enabled_units_by_comp:
-            print()
-            _heading('configured units')
-            for comp in sorted(enabled_units_by_comp.keys()):
-                print(f'\n  {comp}:')
-                for unit_ref in sorted(enabled_units_by_comp[comp], key=lambda u: u.unit):
-                    r = _run(['systemctl', 'is-active', unit_ref.unit])
-                    state = r.stdout.strip() or 'unknown'
-                    sym = '✓' if state == 'active' else '✗'
-                    color = '\033[32m' if state == 'active' else '\033[31m'
-                    orphan_tag = ' [orphaned]' if unit_ref.orphaned else ''
-                    print(f'    {color}{sym}\033[0m  {unit_ref.unit}: {state}{orphan_tag}')
 
     return 0
 

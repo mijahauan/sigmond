@@ -273,6 +273,16 @@ def compute_state(name: str, topology=None) -> ComponentState:
 
     active, active_n, total_n = _any_unit_active(deploy)
 
+    # Reality wins: a component whose declared units are currently active
+    # must be both installed AND configured by definition (systemd would
+    # not be running it otherwise).  This bypasses brittle filesystem
+    # fingerprinting for components like radiod whose binary lives outside
+    # the source tree (/usr/local/sbin/radiod) and whose deploy.toml may
+    # not declare [build].produces.
+    if active:
+        installed = True
+        configured = True
+
     return ComponentState(
         name=name,
         cloned=cloned,
