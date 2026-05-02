@@ -200,6 +200,39 @@ def _heading(title: str):
     print(f'\n\033[1m━━━ {title} ━━━\033[0m')
 
 
+def _resolve_only_list(args, topology):
+    """Combine positional `names` + legacy `--components` into the lifecycle
+    `only` filter.
+
+    Returns:
+      None  if the operator wants "all enabled" (no args, or the literal
+            keyword `all`).
+      list  the explicit subset to operate on (already validated against
+            the topology — components that aren't enabled get a warning
+            but stay in the list so the caller's gate can show the right
+            error).
+    """
+    positional = list(getattr(args, 'names', None) or [])
+    legacy: list[str] = []
+    legacy_arg = getattr(args, 'components', None)
+    if legacy_arg:
+        legacy = [c.strip() for c in legacy_arg.split(',') if c.strip()]
+    combined = positional + legacy
+
+    if not combined or 'all' in combined:
+        return None  # operate on every enabled component
+
+    # Validate: warn (but proceed) for components that aren't enabled,
+    # so the operator gets a clear "not enabled" cue rather than silent
+    # no-op.
+    enabled_set = set(_enabled_components(topology) or [])
+    not_enabled = [c for c in combined if c not in enabled_set]
+    if not_enabled:
+        for name in not_enabled:
+            _warn(f'{name}: not enabled in topology — skipping (run: smd enable {name})')
+    return [c for c in combined if c in enabled_set]
+
+
 def _need_root(cmd_name: str) -> bool:
     """Auto-elevate to root via sudo when invoked as a normal user.
 
@@ -2320,19 +2353,35 @@ def cmd_start(args) -> int:
     if _need_root('start'):
         return 1
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    only = _resolve_only_list(args, topology)
+    if only is not None and not only:
+        return 0  # operator named only not-enabled components; already warned
     enabled = _enabled_components(topology, only)
 
     # Hard gate: no component starts unless installed AND configured.
     # Returns the subset of `enabled` that's safe to start.  Drops + warns
-    # for the rest.
+    # for the rest.  Library-kind entries (ka9q-python: pip metadata) and
+    # entries that turn out to be just topology aliases for another
+    # component are filtered silently — they have no units of their own.
     try:
         from sigmond.component_state import compute_state
+        from sigmond.catalog import load_catalog
         topo_for_state = _load_topology(TOPOLOGY_PATH)
+        catalog = load_catalog()
         startable: list[str] = []
         for name in enabled:
-            s = compute_state(name, topo_for_state)
+            entry = catalog.get(name)
+            if entry is not None and getattr(entry, 'kind', None) == 'library':
+                continue  # library entries have no services
+            alias = getattr(entry, 'topology_alias', None) if entry else None
+            s = compute_state(name, topo_for_state, alias=alias)
             if s.can_start:
+                startable.append(name)
+            elif not s.cloned:
+                # Topology references something that has no source clone
+                # — likely an alias-only entry (ka9q-radio when catalog
+                # uses "radiod") or a stale topology stub.  Skip silently;
+                # the lifecycle resolver will sort it out.
                 startable.append(name)
             else:
                 _warn(f'{name}: not started — {s.display_status}')
@@ -2381,7 +2430,9 @@ def cmd_stop(args) -> int:
     if _need_root('stop'):
         return 1
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    only = _resolve_only_list(args, topology)
+    if only is not None and not only:
+        return 0  # operator named only not-enabled components; already warned
     enabled = _enabled_components(topology, only)
 
     try:
@@ -2792,17 +2843,26 @@ def cmd_restart(args) -> int:
     if _need_root('restart'):
         return 1
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    only = _resolve_only_list(args, topology)
+    if only is not None and not only:
+        return 0  # operator named only not-enabled components; already warned
     enabled = _enabled_components(topology, only)
 
-    # Same configured-before-start gate as cmd_start.
+    # Same configured-before-start gate as cmd_start (see comment there
+    # for the library-kind / alias-only filtering rationale).
     try:
         from sigmond.component_state import compute_state
+        from sigmond.catalog import load_catalog
         topo_for_state = _load_topology(TOPOLOGY_PATH)
+        catalog = load_catalog()
         startable: list[str] = []
         for name in enabled:
-            s = compute_state(name, topo_for_state)
-            if s.can_start:
+            entry = catalog.get(name)
+            if entry is not None and getattr(entry, 'kind', None) == 'library':
+                continue
+            alias = getattr(entry, 'topology_alias', None) if entry else None
+            s = compute_state(name, topo_for_state, alias=alias)
+            if s.can_start or not s.cloned:
                 startable.append(name)
             else:
                 _warn(f'{name}: not restarted — {s.display_status}')
@@ -2846,7 +2906,9 @@ def cmd_reload(args) -> int:
     if _need_root('reload'):
         return 1
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    only = _resolve_only_list(args, topology)
+    if only is not None and not only:
+        return 0  # operator named only not-enabled components; already warned
     enabled = _enabled_components(topology, only)
 
     try:
@@ -2886,7 +2948,9 @@ def cmd_reload(args) -> int:
 
 def cmd_status(args) -> int:
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    only = _resolve_only_list(args, topology)
+    if only is not None and not only:
+        return 0  # operator named only not-enabled components; already warned
     enabled = _enabled_components(topology, only)
 
     # ── action needed ────────────────────────────────────────────────────────
@@ -3101,7 +3165,9 @@ def _print_catalog_entry(entry) -> None:
 
 def _list_configured(args) -> int:
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-    only = [c.strip() for c in args.components.split(',')] if args.components else None
+    only = _resolve_only_list(args, topology)
+    if only is not None and not only:
+        return 0  # operator named only not-enabled components; already warned
     enabled = _enabled_components(topology, only)
 
     try:
@@ -4245,24 +4311,43 @@ def main() -> int:
     p.add_argument('--dry-run', action='store_true')
 
     # start
+    # All four lifecycle verbs accept positional component names (systemctl
+    # style) or the literal keyword `all`.  Bare `smd start` (no args) is
+    # equivalent to `smd start all` for backward compat.  --components is
+    # kept as a deprecated alias.
     p = sub.add_parser('start', help='start managed services')
-    p.add_argument('--components', metavar='C1,C2')
+    p.add_argument('names', nargs='*',
+                   help='component names, or "all" (default: all enabled)')
+    p.add_argument('--components', metavar='C1,C2',
+                   help='deprecated; same as positional names')
 
     # stop
     p = sub.add_parser('stop', help='stop managed services')
-    p.add_argument('--components', metavar='C1,C2')
+    p.add_argument('names', nargs='*',
+                   help='component names, or "all" (default: all enabled)')
+    p.add_argument('--components', metavar='C1,C2',
+                   help='deprecated; same as positional names')
 
     # status
     p = sub.add_parser('status', help='show service health')
-    p.add_argument('--components', metavar='C1,C2')
+    p.add_argument('names', nargs='*',
+                   help='component names (default: all enabled)')
+    p.add_argument('--components', metavar='C1,C2',
+                   help='deprecated; same as positional names')
 
     # restart (NEW)
     p = sub.add_parser('restart', help='restart managed services')
-    p.add_argument('--components', metavar='C1,C2')
+    p.add_argument('names', nargs='*',
+                   help='component names, or "all" (default: all enabled)')
+    p.add_argument('--components', metavar='C1,C2',
+                   help='deprecated; same as positional names')
 
     # reload (NEW)
     p = sub.add_parser('reload', help='reload managed services (signal or restart)')
-    p.add_argument('--components', metavar='C1,C2')
+    p.add_argument('names', nargs='*',
+                   help='component names, or "all" (default: all enabled)')
+    p.add_argument('--components', metavar='C1,C2',
+                   help='deprecated; same as positional names')
     p.add_argument('--via', choices=['auto', 'systemd', 'socket'], default='auto',
                    help='routing strategy for reload (default: auto)')
 
