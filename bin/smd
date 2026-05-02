@@ -200,6 +200,66 @@ def _heading(title: str):
     print(f'\n\033[1m━━━ {title} ━━━\033[0m')
 
 
+def _expand_requires_closure(names, catalog) -> list[str]:
+    """Walk the catalog's `requires` graph and return the names plus all
+    transitive dependencies in topological order (deps before dependents).
+
+    Mirrors systemctl's behaviour where `systemctl start httpd` follows
+    `Wants=` / `Requires=` and brings up nginx (or whatever) first.
+    Sigmond reads the same intent from `[client] requires = [...]` in
+    each component's deploy.toml.
+
+    Rules:
+      - kind="library" entries (e.g. ka9q-python) are skipped — no
+        service to start.
+      - Aliases (entry.topology_alias) are emitted alongside the
+        canonical name so the enabled-components filter matches whichever
+        key the topology uses (radiod's catalog name is "radiod" but
+        topology.toml has [component.ka9q-radio]).
+      - Cycles are detected via a visited set and silently broken.
+      - Unknown names (not in catalog) pass through unchanged for the
+        caller's not-enabled warning to fire normally.
+    """
+    # Build alias → canonical map so requires using either name resolve.
+    alias_to_canonical: dict[str, str] = {}
+    for canonical_name, entry in catalog.items():
+        alias_to_canonical[canonical_name] = canonical_name
+        a = getattr(entry, 'topology_alias', None)
+        if a:
+            alias_to_canonical[a] = canonical_name
+
+    visited: set[str] = set()
+    order: list[str] = []
+
+    def visit(name: str) -> None:
+        canonical = alias_to_canonical.get(name, name)
+        if canonical in visited:
+            return
+        visited.add(canonical)
+
+        entry = catalog.get(canonical)
+        if entry is not None:
+            for req in getattr(entry, 'requires', ()) or ():
+                visit(req)
+            if getattr(entry, 'kind', None) == 'library':
+                return
+            # Emit canonical name + alias.  Caller's enabled-components
+            # filter picks whichever is in topology.toml.
+            order.append(canonical)
+            alias = getattr(entry, 'topology_alias', None)
+            if alias and alias != canonical:
+                order.append(alias)
+        else:
+            # Unknown — pass through; downstream filter / lifecycle resolver
+            # will handle it.
+            order.append(name)
+
+    for n in names:
+        visit(n)
+
+    return order
+
+
 def _resolve_only_list(args, topology):
     """Combine positional `names` + legacy `--components` into the lifecycle
     `only` filter.
@@ -2356,6 +2416,17 @@ def cmd_start(args) -> int:
     only = _resolve_only_list(args, topology)
     if only is not None and not only:
         return 0  # operator named only not-enabled components; already warned
+
+    # When the operator named specific components, walk their `requires`
+    # closure so dependencies start first.  `smd start wsprdaemon-client`
+    # transparently brings up radiod and wspr-recorder ahead of it, the
+    # way `systemctl start httpd` follows Wants=/Requires=.
+    if only is not None:
+        try:
+            from sigmond.catalog import load_catalog
+            only = _expand_requires_closure(only, load_catalog())
+        except Exception:
+            pass  # best-effort; fall through with the literal `only`
     enabled = _enabled_components(topology, only)
 
     # Hard gate: no component starts unless installed AND configured.
@@ -2879,6 +2950,15 @@ def cmd_restart(args) -> int:
     only = _resolve_only_list(args, topology)
     if only is not None and not only:
         return 0  # operator named only not-enabled components; already warned
+
+    # Walk the requires closure for the same reason cmd_start does —
+    # restarting a leaf without its deps would race or fail outright.
+    if only is not None:
+        try:
+            from sigmond.catalog import load_catalog
+            only = _expand_requires_closure(only, load_catalog())
+        except Exception:
+            pass
     enabled = _enabled_components(topology, only)
 
     # Same configured-before-start gate as cmd_start (see comment there
