@@ -3133,7 +3133,8 @@ def _list_configured(args) -> int:
             if getattr(entry, 'kind', None) == 'library':
                 continue
             try:
-                state = compute_state(name, full_topo)
+                state = compute_state(name, full_topo,
+                                      alias=getattr(entry, 'topology_alias', None))
             except Exception:
                 continue
             # Color: green if running, yellow if enabled-but-stopped or

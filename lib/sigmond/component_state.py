@@ -236,45 +236,58 @@ def _topology_enabled(topology, name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _active_via_lifecycle(name: str) -> tuple[bool, int, int]:
+def _active_via_lifecycle(*candidate_names: str) -> tuple[bool, int, int]:
     """Fallback active-check for components without a deploy.toml.
 
-    Uses sigmond.lifecycle.resolve_units, which falls back to a
-    hardcoded shim for components like ka9q-radio (where the unit set
-    isn't declared in a deploy.toml because the upstream C project
-    doesn't carry sigmond contract metadata).
+    Tries each candidate name in turn against sigmond.lifecycle.resolve_units,
+    which has a hardcoded shim for components like ka9q-radio (where the
+    unit set isn't declared in a deploy.toml because the upstream C project
+    doesn't carry sigmond contract metadata).  The catalog entry's name
+    and its topology_alias both feed in here — radiod's catalog name is
+    "radiod" but the shim is keyed under "ka9q-radio".
     """
     try:
         from sigmond.lifecycle import resolve_units
     except ImportError:
         return (False, 0, 0)
-    try:
-        units = resolve_units([name], [name])
-    except Exception:
-        # No deploy.toml AND no shim — can't tell.
-        return (False, 0, 0)
-    active_n = 0
-    total = 0
-    for u in units:
-        if u.orphaned:
+    for name in candidate_names:
+        if not name:
             continue
-        total += 1
-        r = subprocess.run(
-            ["systemctl", "is-active", "--quiet", u.unit],
-            capture_output=True,
-        )
-        if r.returncode == 0:
-            active_n += 1
-    return (active_n > 0, active_n, total)
+        try:
+            units = resolve_units([name], [name])
+        except Exception:
+            continue
+        if not units:
+            continue
+        active_n = 0
+        total = 0
+        for u in units:
+            if u.orphaned:
+                continue
+            total += 1
+            r = subprocess.run(
+                ["systemctl", "is-active", "--quiet", u.unit],
+                capture_output=True,
+            )
+            if r.returncode == 0:
+                active_n += 1
+        return (active_n > 0, active_n, total)
+    return (False, 0, 0)
 
 
-def compute_state(name: str, topology=None) -> ComponentState:
+def compute_state(name: str, topology=None, alias: str = None) -> ComponentState:
     """Compute the lifecycle state for one component name.
 
     `topology` may be a sigmond.topology.Topology object or a dict-like
     structure with a `components` mapping.  When None, the component's
     `enabled` flag is reported as False (caller can pass a loaded
     topology if they want richer reporting).
+
+    `alias` is the catalog entry's topology_alias when set — used as a
+    second-chance lookup against sigmond.lifecycle's fallback shims.
+    radiod's catalog name is "radiod" but the shim is keyed on
+    "ka9q-radio" (the URL stem).  Without alias, components with a
+    different catalog name vs lifecycle key would never match.
     """
     cloned = (GIT_BASE / name).exists()
     deploy = _read_deploy_toml(name) if cloned else None
@@ -291,7 +304,7 @@ def compute_state(name: str, topology=None) -> ComponentState:
         # upstream ka9q-radio is the canonical example).  Detect active
         # via the lifecycle fallback shim, then trust reality: if it's
         # running, it must be installed AND configured.
-        active, active_n, total_n = _active_via_lifecycle(name)
+        active, active_n, total_n = _active_via_lifecycle(name, alias)
         return ComponentState(
             name=name,
             cloned=True,
