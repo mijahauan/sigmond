@@ -158,6 +158,7 @@ class LifecycleScreen(Vertical):
             yield Button("▶ Start all",   id="lc-start",   variant="success")
             yield Button("■ Stop all",    id="lc-stop",    variant="error")
             yield Button("↺ Restart all", id="lc-restart", variant="warning")
+            yield Button("⟳ Reload all",  id="lc-reload",  variant="warning")
             yield Button("☐ All",         id="lc-clear",   variant="primary")
 
         yield Static(
@@ -193,6 +194,8 @@ class LifecycleScreen(Vertical):
             self._verb_all("stop") if self._target is None else self._verb_one("stop", self._target)
         elif bid == "lc-restart":
             self._verb_all("restart") if self._target is None else self._verb_one("restart", self._target)
+        elif bid == "lc-reload":
+            self._verb_all("reload") if self._target is None else self._verb_one("reload", self._target)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Click or Enter on a row: select it (or deselect if already selected)."""
@@ -209,6 +212,7 @@ class LifecycleScreen(Vertical):
         self.query_one("#lc-start",   Button).label = f"▶ Start{suffix}"
         self.query_one("#lc-stop",    Button).label = f"■ Stop{suffix}"
         self.query_one("#lc-restart", Button).label = f"↺ Restart{suffix}"
+        self.query_one("#lc-reload",  Button).label = f"⟳ Reload{suffix}"
 
     # ------------------------------------------------------------------
     # data loading
