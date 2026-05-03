@@ -143,6 +143,7 @@ class SigmondApp(App):
         Binding("v", "show_validate", "Validate"),
         Binding("b", "show_backup", "Backup"),
         Binding("R", "show_restore", "Restore"),
+        Binding("C", "show_client_config", "Client config"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -682,6 +683,26 @@ class SigmondApp(App):
             "Active probes are rate-limited and skipped entirely when "
             "discovery.passive_only = true in the manifest.\n\n"
             "Keys: p probe all · m/n/k source-only · r reload manifest",
+        )
+
+    def action_show_client_config(self) -> None:
+        from .screens.client_config import ClientConfigScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(ClientConfigScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Client config",
+            "Run a client's first-run wizard or edit its config file.\n\n"
+            "Init wizard — `sudo smd config init <client>` — invokes "
+            "the entry point each client advertises in its deploy.toml "
+            "[contract.config].init.  radiod uses the sigmond-owned "
+            "wizard (probe USB SDRs, render radiod@<id>.conf).\n\n"
+            "Edit config — `sudo smd config edit <client>` — invokes "
+            "the client's edit hook, or falls back to $EDITOR on the "
+            "config file.\n\n"
+            "Library-kind catalog entries (e.g. ka9q-python) are "
+            "excluded — they have no operator-facing config.",
         )
 
     def action_show_update(self) -> None:

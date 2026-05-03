@@ -39,6 +39,7 @@ class ComponentTree(Tree):
         configure.add_leaf("\u2691 Software versions", data={"screen": "components"})
         configure.add_leaf("\u229e SDR inventory",     data={"screen": "sdr_inventory"})
         configure.add_leaf("\u223f wsprdaemon-client", data={"screen": "wd_client"})
+        configure.add_leaf("\u2699 Client config",     data={"screen": "client_config"})
         configure.add_leaf("\u2261 Config view",       data={"screen": "config_show"})
         configure.add_leaf("\u2699 CPU affinity",      data={"screen": "cpu_affinity"})
         configure.add_leaf("\u21f5 CPU frequency",     data={"screen": "cpu_freq"})
@@ -109,6 +110,8 @@ class ComponentTree(Tree):
             self.app.action_show_fft_wisdom()
         elif screen == "config_show":
             self.app.action_show_config()
+        elif screen == "client_config":
+            self.app.action_show_client_config()
         elif screen == "diag_net":
             self.app.action_show_diag_net()
         elif screen == "environment":
