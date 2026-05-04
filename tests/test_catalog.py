@@ -35,7 +35,7 @@ class TestLoadCatalog:
         psk = entries['psk-recorder']
         assert psk.name == 'psk-recorder'
         assert psk.kind == 'client'
-        assert psk.contract == '0.4'
+        assert psk.contract == '0.5'
         assert psk.uses == ('ka9q-python',)
         assert psk.install_script == '/opt/git/sigmond/psk-recorder/scripts/install.sh'
         assert 'FT4' in psk.description or 'FT8' in psk.description
@@ -66,12 +66,12 @@ class TestLoadCatalog:
             'description = "a test client"\n'
             'repo = "https://example.com/ex"\n'
             'uses = ["ka9q-python"]\n'
-            'contract = "0.4"\n'
+            'contract = "0.5"\n'
             'install_script = "/tmp/ex/install.sh"\n'
         )
         entries = load_catalog(custom)
         assert 'example' in entries
-        assert entries['example'].contract == '0.4'
+        assert entries['example'].contract == '0.5'
 
 
 class TestIsInstalled:

@@ -32,6 +32,8 @@ class InstanceView:
     provides_timing_calibration: bool = False
     data_destination:           Optional[str] = None                  # v0.2 §7
     chain_delay_ns_applied:     Optional[int] = None                  # v0.2 §8
+    control_socket:             Optional[str] = None                  # v0.5 §3 amendment
+    data_path:                  Optional[dict] = None                 # v0.5 §16.3
     # radiod-only metadata: populated by RadiodAdapter, ignored elsewhere.
     radiod_samprate_hz:         int = 0
     radiod_status_dns:          str = ""

@@ -23,7 +23,7 @@ from typing import Optional
 from .base import ClientAdapter, ClientView, DiskWrite, InstanceView
 
 
-SUPPORTED_CONTRACT_VERSION = "0.4"
+SUPPORTED_CONTRACT_VERSION = "0.5"
 
 # Threshold above which a quality-snapshot's age is reported as a
 # warn-level validate issue.  6× the snapshot writer's 5 s cadence —
@@ -223,4 +223,12 @@ def _instance_from_contract(raw: dict) -> InstanceView:
         iv.radiod_samprate_hz = int(raw['radiod_samprate_hz'] or 0)
     if 'radiod_max_channels' in raw:
         iv.radiod_max_channels = int(raw['radiod_max_channels'] or 0)
+    if raw.get('control_socket') is not None:
+        iv.control_socket = str(raw['control_socket'])
+    dp = raw.get('data_path')
+    if isinstance(dp, dict):
+        # v0.5 §16.3 — clients without an explicit data_path are inferred
+        # as `radiod-ka9q-python` upstream; here we just preserve what
+        # the client reports, including the `kind` and any `details`.
+        iv.data_path = dict(dp)
     return iv
