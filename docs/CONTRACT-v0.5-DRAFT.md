@@ -1,9 +1,11 @@
 # HamSCI Client Contract — v0.5 Draft (Control Surface)
 
 **Status:** DRAFT for review by Rob (AI6VN) and Michael (AC0G). Not yet
-folded into `CLIENT-CONTRACT.md`. Targets a §13 addition, §5 lifecycle
-clarifications + new §5.1–§5.5, and enhanced §3 amendment (`inventory
---json`).
+folded into `CLIENT-CONTRACT.md`. Targets §5 lifecycle clarifications
++ new §5.1–§5.5, new §13 (control surface), §14 (configuration
+interview), §15 (radiod channel contributions), §16 (independent
+data-source clients), and amendments to §3 (`inventory --json`) and
+§6 (ka9q-python recommendation, no longer prohibition).
 
 **Motivation**
 
@@ -698,6 +700,169 @@ truth.
 
 ---
 
+## §16. Independent data-source clients (v0.5, NEW)
+
+### 16.1 Scope
+
+Two real cases motivate this section:
+
+1. **Direct-radiod clients** — a client that consumes radiod RTP but
+   manages its own control connection rather than going through
+   `ka9q-python`. Reasons include: an existing codebase that already
+   speaks radiod's protocol, a non-Python client, or a client whose
+   internal lifecycle is incompatible with `RadiodControl`'s
+   reservation model.
+
+2. **Non-radiod clients** — a client whose data source is not a radiod
+   instance at all (KiwiSDR audio, file replay, a different SDR
+   daemon, pure analytics on archived data). For these clients §2,
+   §6, §7, and §8 of `CLIENT-CONTRACT.md` do not apply.
+
+This section defines the obligations that make either case
+contract-conformant for sigmond's install / lifecycle / monitoring
+purposes. §6's prohibition on speaking radiod's control protocol
+directly is converted from MUST to SHOULD for clients that satisfy
+§16 (see §6 amendment below).
+
+### 16.2 Why this exists
+
+Sigmond's actual runtime view of a client is exactly four things: the
+systemd unit state, `<client> inventory --json`, `<client> validate
+--json`, and the v0.5 control surface (§13). Sigmond does not inspect
+radiod's control socket, does not parse ka9q's wire protocol, and does
+not know which library produced a client's multicast traffic. The
+v0.4 §6 prohibition was therefore **normative, not enforced** — a
+project-coordination convention rather than a sigmond runtime
+invariant. v0.5 makes this honest by defining the alternative path
+explicitly rather than leaving non-conforming-but-functional clients
+in a documentation gray zone.
+
+The benefits `ka9q-python` provides remain real (consistent teardown,
+shared evolution of the multicast derivation formula, automatic
+collision-avoidance, single bug-fix surface). Path A (ka9q-python) is
+the recommended default. Path B (independent) is for clients that
+have a concrete reason to manage their own data plane.
+
+### 16.3 Self-disclosure: `data_path` in inventory
+
+Every instance entry in `<client> inventory --json` MUST include a
+`data_path` object that names how the client receives samples:
+
+```json
+{
+  "instance": "default",
+  "data_path": {
+    "kind": "radiod-ka9q-python",
+    "radiod_id": "bee3-rx888"
+  }
+}
+```
+
+`kind` is one of:
+
+| `kind`                | Meaning                                                  |
+|-----------------------|----------------------------------------------------------|
+| `radiod-ka9q-python`  | Standard path. Client uses `RadiodControl`. (§6 default) |
+| `radiod-direct`       | Client speaks radiod's control protocol itself.          |
+| `kiwisdr`             | Client consumes audio/IQ from a KiwiSDR.                 |
+| `file`                | Client replays from disk (test/archived data).           |
+| `other`               | Anything else; `details.description` SHOULD explain.     |
+
+`details` is an optional object whose schema is `kind`-specific.
+Sigmond MUST treat unknown `kind` values as `other` and continue.
+
+For backward compatibility, sigmond MUST treat a missing `data_path`
+field on a v0.4-conformant client as `kind = "radiod-ka9q-python"` —
+that was the only conformant option before §16.
+
+### 16.4 Obligations for `radiod-direct` clients
+
+A direct-radiod client MUST:
+
+1. **Bind by radiod id** (§2 unchanged). The `radiod_id` field appears
+   in inventory; status DNS resolves via `RADIOD_<id>_STATUS` from
+   `coordination.env`, with a `radiod_status` fallback for standalone
+   operation.
+2. **Pick a non-colliding multicast destination.** Sigmond's collision
+   check (§7) reads `data_destination` from inventory and flags
+   duplicates across peers. The client is responsible for the
+   picking; sigmond is responsible for detecting the collision and
+   surfacing it through `smd diag`. Acceptable picking strategies:
+   - Read what the running radiod assigned and report it (recommended).
+   - Use the same derivation formula `ka9q-python` uses, kept in sync
+     by the client author.
+   - Operator-provided destination in the client's native config.
+3. **Report `data_destination`** truthfully in inventory, exactly as
+   §7's existing surface requires.
+4. **Honor `RADIOD_<id>_CHAIN_DELAY_NS`** from `coordination.env` on
+   startup and SIGHUP, and report the applied value as
+   `chain_delay_ns_applied` in inventory (§8 unchanged). This is a
+   plain env-var read; `ka9q-python` is not required.
+5. **Implement clean teardown.** When stopped, the client MUST
+   release any radiod-side reservation it holds. Stale reservations
+   that survive a restart cycle are a contract violation.
+6. **Document the choice.** The client's README SHOULD explain why
+   this client uses `radiod-direct` rather than `radiod-ka9q-python`.
+   Project hygiene, not a `validate` check.
+
+A direct-radiod client SHOULD NOT reimplement `ka9q-python`'s wire
+protocol if a thin wrapper around an existing radiod CLI tool would
+do — the maintenance-surface argument is real.
+
+### 16.5 Obligations for non-radiod clients
+
+A non-radiod client (`kind` ∈ `kiwisdr`, `file`, `other`):
+
+- MUST omit `radiod_id`, `data_destination`, and
+  `chain_delay_ns_applied` from inventory (these would be misleading).
+- MUST populate `data_path.details` with enough information for an
+  operator to understand the data source (e.g. KiwiSDR hostname, file
+  glob, source description).
+- MAY participate in §10 (log paths), §11 (runtime log level), §13
+  (control surface), and §14 (configuration interview) on equal
+  footing with radiod clients — none of those surfaces depend on
+  radiod.
+- §2, §6, §7, §8 do not apply.
+
+### 16.6 What independent clients give up
+
+Documenting the trade so the choice is informed:
+
+- **Coordinated evolution.** When `ka9q-python` tracks an upstream
+  ka9q-radio change in control protocol, multicast derivation, or
+  teardown semantics, Path A clients get the fix for free. Path B
+  clients become a maintenance island. `smd ka9q-watch` flags
+  upstream drift but cannot patch your client.
+- **PyPI version discipline (§12.6).** The `ka9q-python` PyPI-lag
+  check doesn't help a client that doesn't depend on `ka9q-python`.
+  Direct-radiod clients SHOULD include an equivalent version-pin
+  check in `validate --json` against whatever they do depend on.
+- **Default collision avoidance.** Path A clients get this for free
+  via per-client-identity derivation. Path B clients must do it on
+  purpose, and the contract trusts them to.
+- **§13 widget detail.** Sigmond's TUI widgets read fields from
+  `/status` (§13.4). A non-radiod client's `/status` has empty
+  `multicast` and `radiod` blocks; widgets degrade gracefully but the
+  operator sees less detail.
+
+### 16.7 Sigmond's view
+
+Sigmond MUST NOT distinguish between `data_path.kind` values for the
+purposes of install (§5.0), lifecycle (§5.1–§5.5), logging (§10–§11),
+control surface (§13), or configuration interview (§14). All clients
+that report a valid `inventory --json` and `validate --json` are
+equally manageable.
+
+Sigmond MAY use `data_path.kind` to:
+
+- Skip radiod-specific harmonization rules for non-radiod clients.
+- Annotate `smd status` output (e.g. `psk-recorder
+  [radiod-ka9q-python]` vs. `kiwi-monitor [kiwisdr]`).
+- Decide whether `RADIOD_<id>_*` env-var checks apply to a given
+  client when validating `coordination.env`.
+
+---
+
 ## §3 amendment (expanded)
 
 `<client> inventory --json` adds two new fields per instance:
@@ -721,6 +886,51 @@ truth.
   rather than inventing a second discovery mechanism. If absent, sigmond
   falls back to `/opt/git/sigmond/<client-name>/deploy.toml` (the Pattern A
   canonical location, §12.5 in CLIENT-CONTRACT.md).
+
+---
+
+## §6 amendment (revised)
+
+§6 of `CLIENT-CONTRACT.md` v0.4 reads, in part:
+
+> "Any client that consumes RTP streams from a radiod instance does so
+> through the `ka9q-python` library... Clients are forbidden from
+> speaking radiod's control protocol directly."
+
+v0.5 revises §6 to:
+
+> "Clients that consume RTP streams from a radiod instance **SHOULD**
+> use the `ka9q-python` library (`RadiodControl` etc.). This is the
+> recommended default and provides the channel-reservation,
+> multicast-derivation, and teardown guarantees the suite expects to
+> hold across peers without per-client coordination work.
+>
+> Clients that manage their own radiod control connection MUST
+> instead satisfy §16, which defines the explicit obligations
+> (multicast non-collision, env-var resolution, chain-delay
+> application, clean teardown) that allow such a client to remain
+> sigmond-manageable. Such clients declare themselves with
+> `data_path.kind = "radiod-direct"` in `inventory --json`.
+>
+> Clients whose data source is not a radiod instance at all (KiwiSDR,
+> file replay, etc.) are out of scope for §6 entirely; see §16.5."
+
+**Rationale.** The v0.4 prohibition was unenforceable by sigmond at
+runtime — sigmond does not inspect radiod's control socket and cannot
+detect a violation. The rule conflated two different concerns:
+sigmond's runtime invariants (which §16 preserves: non-colliding
+multicast, env-var-driven status DNS, applied chain delay, clean
+teardown) versus project-coordination conventions (uniform
+implementation, shared bug-fix surface, coordinated evolution with
+ka9q-radio). v0.5 separates them: the runtime invariants remain MUST,
+the coordination conventions remain SHOULD with §16 as the explicit
+opt-out path.
+
+This revision is **purely additive** with respect to v0.4 conformance.
+v0.4 clients that use `ka9q-python` remain conformant under v0.5
+without change; sigmond infers `data_path.kind = "radiod-ka9q-python"`
+when the field is absent (§16.3). Only clients adopting Path B need
+to publish `data_path` explicitly.
 
 ---
 
@@ -761,6 +971,17 @@ truth.
 5. Versioning: bump contract minor (v0.5) since this is purely
    additive — old clients remain conformant at v0.4 and sigmond
    degrades gracefully when `/status` is absent. Agree?
+6. §16 carve-out: do you want `wsprdaemon-client` to retrofit
+   onto Path A (`radiod-ka9q-python`) as part of the v0.4 retrofit
+   already on its plate, or is `radiod-direct` the right path for it
+   given existing radiod-protocol code? Either is now contract-
+   conformant; the question is whether the maintenance-island cost
+   (§16.6) is worth dodging the ka9q-python migration.
+7. §16.4 obligation 1 (still bind by `radiod_id`): is there a
+   non-radiod data source we want to model that nonetheless wants
+   sigmond's per-radiod env-var resolution? Current draft says no —
+   non-radiod clients skip §2 entirely — but flag if you've seen a
+   counterexample.
 
 ---
 
@@ -778,5 +999,12 @@ truth.
 - **Phase D** — hf-timestd adds the parallel unix-socket surface
   (web API stays). Independent planning per the existing project
   notes — its surface is more involved.
+- **Phase D2 (parallel)** — `data_path` field added to existing
+  conformant clients' inventory output (psk-recorder, hf-timestd,
+  wspr-recorder all report `radiod-ka9q-python`). Trivial change;
+  unblocks §16 reasoning in `smd status` and `smd diag`. The first
+  Path B client (whichever lands first — `wsprdaemon-client` if it
+  retains its own radiod talk, or a new KiwiSDR-source client)
+  validates the §16.4 / §16.5 obligations end-to-end.
 - **Phase E** — fold v0.5 into `CLIENT-CONTRACT.md` proper, retire
   this draft.
