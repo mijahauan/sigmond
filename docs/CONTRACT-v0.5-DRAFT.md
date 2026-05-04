@@ -765,7 +765,7 @@ Every instance entry in `<client> inventory --json` MUST include a
 | `radiod-ka9q-python`  | Standard path. Client uses `RadiodControl`. (§6 default) |
 | `radiod-direct`       | Client speaks radiod's control protocol itself.          |
 | `kiwisdr`             | Client consumes audio/IQ from a KiwiSDR.                 |
-| `file`                | Client replays from disk (test/archived data).           |
+| `file`                | Client reads WAV/IQ files from disk. **With** `details.upstream_client`: meta-client whose data is spooled by a sibling sigmond client (§16.3.1). **Without**: replay/test data from an archive. |
 | `other`               | Anything else; `details.description` SHOULD explain.     |
 
 `details` is an optional object whose schema is `kind`-specific.
@@ -774,6 +774,55 @@ Sigmond MUST treat unknown `kind` values as `other` and continue.
 For backward compatibility, sigmond MUST treat a missing `data_path`
 field on a v0.4-conformant client as `kind = "radiod-ka9q-python"` —
 that was the only conformant option before §16.
+
+### 16.3.1 Meta-clients: `kind = "file"` with `details.upstream_client`
+
+A meta-client is a client whose own data plane is files spooled by
+**another** sigmond-managed client. It does not open a radiod control
+connection or KiwiSDR socket; it consumes the WAV/IQ stream a sibling
+client has already written to disk.
+
+`wsprdaemon-client` is the canonical example: each instance reads
+WAVs from `wd-ka9q-record` (which itself execs `wspr-recorder`,
+declaring `radiod-ka9q-python`) or from `wd-kiwi-record` (declaring
+`kiwisdr`), and decodes/posts them. The radiod-side facts (radiod_id,
+multicast destination, chain delay) live on the upstream client's
+inventory, not the meta-client's.
+
+A meta-client MUST declare `kind = "file"` per instance with
+`details.upstream_client = "<sibling-client-name>"` plus enough
+context for an operator to find the upstream's inventory:
+
+```json
+{
+  "instance": "ka9q_0-20",
+  "data_path": {
+    "kind": "file",
+    "details": {
+      "upstream_client": "wspr-recorder",
+      "upstream_unit":   "wd-ka9q-record@KA9Q_0.service",
+      "spool":           "/var/spool/wsprdaemon/recording/KA9Q_0"
+    }
+  }
+}
+```
+
+Sigmond MAY cross-reference `details.upstream_client` against the
+catalog and the upstream client's `inventory --json` output to
+populate views that join "what's decoding" with "what radiod
+consumed it from." A meta-client is not on the hook for §16.4's
+radiod-direct obligations — those are satisfied by the upstream
+client, where they actually exist. If `details.upstream_client` does
+not name a known catalog entry, sigmond SHOULD surface a `warn`-level
+issue: the meta-client has named a sibling sigmond does not know
+about, which is recoverable but odd.
+
+This is distinct from `kind = "file"` for **archived/replay** data
+(test fixtures, captured IQ files, post-mortem analysis). For replay
+clients, `details` SHOULD describe the source dataset (path glob,
+capture date, source description) and SHOULD NOT include
+`upstream_client`. Sigmond uses the presence/absence of
+`upstream_client` to disambiguate the two cases.
 
 ### 16.4 Obligations for `radiod-direct` clients
 
@@ -971,17 +1020,22 @@ to publish `data_path` explicitly.
 5. Versioning: bump contract minor (v0.5) since this is purely
    additive — old clients remain conformant at v0.4 and sigmond
    degrades gracefully when `/status` is absent. Agree?
-6. §16 carve-out: do you want `wsprdaemon-client` to retrofit
-   onto Path A (`radiod-ka9q-python`) as part of the v0.4 retrofit
-   already on its plate, or is `radiod-direct` the right path for it
-   given existing radiod-protocol code? Either is now contract-
-   conformant; the question is whether the maintenance-island cost
-   (§16.6) is worth dodging the ka9q-python migration.
+6. **Resolved (2026-05-04):** `wsprdaemon-client` is neither Path A nor
+   Path B — it is a *meta-client* that decodes WAVs spooled by sibling
+   clients (`wd-ka9q-record`/wspr-recorder, `wd-kiwi-record`).
+   Resolution: §16.3.1 added; wsprdaemon-client declares `kind = "file"`
+   per instance with `details.upstream_client`. The radiod-side
+   obligations live on the upstream client where they actually exist.
 7. §16.4 obligation 1 (still bind by `radiod_id`): is there a
    non-radiod data source we want to model that nonetheless wants
    sigmond's per-radiod env-var resolution? Current draft says no —
    non-radiod clients skip §2 entirely — but flag if you've seen a
    counterexample.
+8. **Forthcoming Path B candidate (2026-05-04):** David Goncalves'
+   RX888 WebSDR-style client may be the first real `radiod-direct`
+   client. Discussions opened with Rob (AI6VN) and Michael (AC0G).
+   No design impact yet, but worth tracking — it will be the first
+   end-to-end exercise of §16.4's obligations.
 
 ---
 
@@ -999,12 +1053,13 @@ to publish `data_path` explicitly.
 - **Phase D** — hf-timestd adds the parallel unix-socket surface
   (web API stays). Independent planning per the existing project
   notes — its surface is more involved.
-- **Phase D2 (parallel)** — `data_path` field added to existing
-  conformant clients' inventory output (psk-recorder, hf-timestd,
-  wspr-recorder all report `radiod-ka9q-python`). Trivial change;
-  unblocks §16 reasoning in `smd status` and `smd diag`. The first
-  Path B client (whichever lands first — `wsprdaemon-client` if it
-  retains its own radiod talk, or a new KiwiSDR-source client)
-  validates the §16.4 / §16.5 obligations end-to-end.
+- **Phase D2 (parallel) — DONE 2026-05-04.** `data_path` field landed
+  in all four conformant clients: psk-recorder, hf-timestd,
+  wspr-recorder all declare `radiod-ka9q-python`; wsprdaemon-client
+  declares `kind = "file"` per §16.3.1 (meta-client). Sigmond
+  consumption of `data_path` (annotation in `smd status`, scoping
+  of harmonization rules) is the next user of these fields.
+  The first real Path B client (David Goncalves' RX888 WebSDR-style
+  client, in early discussion) will validate §16.4 / §16.5 end-to-end.
 - **Phase E** — fold v0.5 into `CLIENT-CONTRACT.md` proper, retire
   this draft.
