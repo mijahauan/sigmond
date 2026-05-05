@@ -74,7 +74,8 @@ done
 USB_VID_DID=""
 for id in "${!USB_BY_ID[@]}"; do
     count_total="$(lspci -nn | grep -c "\\[${id}\\]" || true)"
-    count_usb="$(grep -cE "\\[${id}\\]" <<<"${USB_LINES[*]}" || true)"
+    # Count matching *USB* lines: pipe one-per-line into grep -c.
+    count_usb="$(printf '%s\n' "${USB_LINES[@]}" | grep -cE "\\[${id}\\]" || true)"
     if [[ "$count_total" == "$count_usb" && "$count_usb" -ge 1 ]]; then
         USB_VID_DID="$id"
         USB_ADDRS_FOR_ID="${USB_BY_ID[$id]## }"
