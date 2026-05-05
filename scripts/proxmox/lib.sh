@@ -57,10 +57,16 @@ state_advance() {
 }
 
 # ─── SSH to Proxmox host ──────────────────────────────────────────────────────
+# Always pin to /root/.ssh/id_ed25519 with IdentitiesOnly=yes so behavior is
+# identical between interactive sudo runs (where SSH_AUTH_SOCK may leak in
+# via sudo -E) and systemd-resume runs (where it won't).
+SIGMOND_SSH_KEY="${SIGMOND_SSH_KEY:-/root/.ssh/id_ed25519}"
+
 ssh_host() {
     : "${PROXMOX_HOST:?PROXMOX_HOST not set}"
     ssh -o BatchMode=yes -o ConnectTimeout=10 \
         -o StrictHostKeyChecking=accept-new \
+        -i "$SIGMOND_SSH_KEY" -o IdentitiesOnly=yes \
         "${PROXMOX_USER:-root}@${PROXMOX_HOST}" "$@"
 }
 
@@ -68,6 +74,7 @@ scp_to_host() {
     : "${PROXMOX_HOST:?PROXMOX_HOST not set}"
     scp -q -o BatchMode=yes -o ConnectTimeout=10 \
         -o StrictHostKeyChecking=accept-new \
+        -i "$SIGMOND_SSH_KEY" -o IdentitiesOnly=yes \
         "$@" "${PROXMOX_USER:-root}@${PROXMOX_HOST}:/tmp/"
 }
 

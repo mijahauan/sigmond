@@ -112,18 +112,28 @@ phase_pre_host() {
 
     # ─── prompt for Proxmox host ──────────────────────────────────────────────
     local host
-    host="$(prompt "Proxmox host name or IP")"
+    host="$(prompt "Proxmox host name or IP" "${PROXMOX_HOST:-}")"
     [[ -n "$host" ]] || die "Proxmox host required"
 
     # ─── ssh-copy-id (one-time interactive) ───────────────────────────────────
-    if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
+    # Test specifically with the generated root key — not whatever agent or
+    # other key happens to be available — because that's what systemd-resume
+    # will use after the host reboot (no agent in that context).
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=accept-new \
+        -i "$key" -o IdentitiesOnly=yes \
         "root@${host}" true 2>/dev/null; then
-        ok "passwordless SSH to root@${host} already works"
+        ok "root@${host} already trusts our generated key"
     else
         info "Installing this VM's public key on root@${host}."
         info "You will be prompted ONCE for the host's root password."
         ssh-copy-id -i "${key}.pub" -o StrictHostKeyChecking=accept-new "root@${host}" </dev/tty
         ok "key installed on host"
+        # Verify post-install with the specific key (no agent fallback).
+        ssh -o BatchMode=yes -o ConnectTimeout=5 \
+            -i "$key" -o IdentitiesOnly=yes \
+            "root@${host}" true \
+            || die "key install reported success but specific-key SSH still fails — check host's /root/.ssh/authorized_keys"
     fi
 
     PROXMOX_HOST="$host"
