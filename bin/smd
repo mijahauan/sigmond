@@ -3528,9 +3528,12 @@ def _print_status_table(rows: list[dict]) -> None:
     if not rows:
         _info('(no components)')
         return
-    # Two-line block per component for readability — the wide table format
-    # blew up on narrow terminals.  First line: name, lifecycle, verdict,
-    # policy.  Second line (indented): local → upstream commits + dates.
+    # Two-line block per component.  Line 1: name, lifecycle, policy —
+    # all variable-length, so we use ` · ` separators rather than fixed
+    # widths (lifecycle hints like "available — needs: smd install X"
+    # routinely exceed 40 chars and any fixed column overflows visibly).
+    # Line 2 (indented): verdict + local → upstream commits.  The
+    # verdict pairs naturally with the git refs that produced it.
     for r in rows:
         name = r['name']
         col = r['lifecycle_color']
@@ -3548,13 +3551,14 @@ def _print_status_table(rows: list[dict]) -> None:
         else:
             vcol = ''
         vreset = '\033[0m' if vcol else ''
-        print(f'  {col}{name:22s}{reset} {r["lifecycle"]:18s}'
-              f' {vcol}{v}{vreset}  [{r["policy"]}]')
+        print(f'  {col}{name:22s}{reset} {r["lifecycle"]}  ·  [{r["policy"]}]')
         if r['repo_dir']:
             local = f'{r["local"]} ({r["local_date"]})' if r['local'] else '—'
             up    = (f'{r["upstream"]} ({r["upstream_date"]})'
                      if r['upstream'] else '—')
-            print(f'    {"":22s} {local}  →  {up}')
+            print(f'    {"":22s} {vcol}{v}{vreset}  ·  {local}  →  {up}')
+        else:
+            print(f'    {"":22s} {vcol}{v}{vreset}')
 
 
 def _print_action_hint(rows: list[dict]) -> None:
