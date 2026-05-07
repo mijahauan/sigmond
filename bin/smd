@@ -3387,12 +3387,30 @@ def _git_commit_date(repo_dir: Path, ref: str = 'HEAD') -> str:
     return r.stdout.strip() if r.returncode == 0 else ''
 
 
+def _git_commit_index(repo_dir: Path, ref: str = 'HEAD') -> int:
+    """Linear depth of `ref` (count of reachable commits).
+
+    Acts as a monotonic local identifier — every new commit on a linear
+    branch increments this by 1, so the operator can compare "where is
+    each repo on its timeline" at a glance.  Returns 0 on failure.
+    """
+    sd = f'safe.directory={repo_dir}'
+    r = subprocess.run(
+        ['git', '-c', sd, '-C', str(repo_dir), 'rev-list', '--count', ref],
+        capture_output=True, text=True,
+    )
+    try:
+        return int(r.stdout.strip()) if r.returncode == 0 else 0
+    except ValueError:
+        return 0
+
+
 def _component_statuses(args, *, fetch: bool) -> list[dict]:
     """Build a status row per catalog component.
 
     Returns a list of dicts: {name, kind, lifecycle, repo_dir, local,
-    local_date, upstream, upstream_date, behind, ahead, dirty, dirty_reason,
-    policy, verdict}.
+    local_date, upstream, upstream_date, behind, ahead, commit_index,
+    dirty, dirty_reason, policy, verdict}.
 
     `fetch=True` runs `git fetch --quiet` per repo first so divergence is
     live; otherwise relies on whatever upstream refs were last cached.
@@ -3459,6 +3477,7 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                 'upstream_date': '',
                 'behind': 0,
                 'ahead': 0,
+                'commit_index': 0,
                 'dirty': False,
                 'dirty_reason': '',
                 'policy': policy,
@@ -3474,7 +3493,8 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
             )
 
         local, upstream, behind, ahead = _git_divergence(repo_dir)
-        local_date = _git_commit_date(repo_dir, 'HEAD')
+        local_date  = _git_commit_date(repo_dir, 'HEAD')
+        commit_index = _git_commit_index(repo_dir, 'HEAD')
         upstream_date = ''
         if upstream:
             up_ref = subprocess.run(
@@ -3515,6 +3535,7 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
             'upstream_date': upstream_date,
             'behind': behind,
             'ahead': ahead,
+            'commit_index': commit_index,
             'dirty': dirty,
             'dirty_reason': reason or '',
             'policy': policy,
@@ -3524,41 +3545,77 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
 
 
 def _print_status_table(rows: list[dict]) -> None:
-    _heading('components')
     if not rows:
         _info('(no components)')
         return
-    # Two-line block per component.  Line 1: name, lifecycle, policy —
-    # all variable-length, so we use ` · ` separators rather than fixed
-    # widths (lifecycle hints like "available — needs: smd install X"
-    # routinely exceed 40 chars and any fixed column overflows visibly).
-    # Line 2 (indented): verdict + local → upstream commits.  The
-    # verdict pairs naturally with the git refs that produced it.
-    for r in rows:
-        name = r['name']
-        col = r['lifecycle_color']
-        reset = '\033[0m' if col else ''
-        # Color the verdict by severity.
-        v = r['verdict']
+
+    # Fixed-width tabular layout — one line per component.  Columns are
+    # sized so the common cases (enabled/stopped, up to date, latest) fit
+    # without truncation; verbose hints in lifecycle (e.g. "missing — repo
+    # not cloned") are split on ' — ' and only the leading state token is
+    # shown.  INDEX is the linear depth of HEAD in history (a stable
+    # monotonic id); BEHIND is the count of upstream commits not in HEAD.
+    # The count moved into BEHIND, so verdict drops it ("3 behind" → "behind").
+    W_NAME, W_LIFE, W_VERDICT, W_INDEX, W_BEHIND, W_DATE, W_POLICY = (
+        22, 18, 14, 7, 8, 12, 8,
+    )
+
+    def _short_lifecycle(s: str) -> str:
+        return s.split(' — ', 1)[0] if ' — ' in s else s
+
+    def _short_verdict(v: str) -> str:
+        if v.startswith('pinned drift'):
+            return 'pinned drift'
+        if v.startswith('pinned to '):
+            return 'pinned'
+        if v.startswith('dirty:'):
+            return 'dirty'
+        if 'behind upstream' in v:
+            return 'behind'
+        if 'unpushed commit' in v:
+            return 'ahead'
+        if v == 'ignored (developer mode)':
+            return 'ignored'
+        return v
+
+    def _verdict_color(v: str) -> str:
         if v == 'up to date' or v.startswith('pinned to '):
-            vcol = '\033[32m'
-        elif v == 'ignored (developer mode)':
-            vcol = '\033[90m'
-        elif v.startswith('dirty:') or 'pinned drift' in v:
-            vcol = '\033[31m'
-        elif 'behind' in v or 'unpushed' in v:
-            vcol = '\033[33m'
-        else:
-            vcol = ''
-        vreset = '\033[0m' if vcol else ''
-        print(f'  {col}{name:22s}{reset} {r["lifecycle"]}  ·  [{r["policy"]}]')
-        if r['repo_dir']:
-            local = f'{r["local"]} ({r["local_date"]})' if r['local'] else '—'
-            up    = (f'{r["upstream"]} ({r["upstream_date"]})'
-                     if r['upstream'] else '—')
-            print(f'    {"":22s} {vcol}{v}{vreset}  ·  {local}  →  {up}')
-        else:
-            print(f'    {"":22s} {vcol}{v}{vreset}')
+            return '\033[32m'
+        if v == 'ignored (developer mode)':
+            return '\033[90m'
+        if v.startswith('dirty:') or 'pinned drift' in v:
+            return '\033[31m'
+        if 'behind' in v or 'unpushed' in v:
+            return '\033[33m'
+        return ''
+
+    print(
+        f'  \033[1m{"NAME":<{W_NAME}}{"LIFECYCLE":<{W_LIFE}}'
+        f'{"VERDICT":<{W_VERDICT}}{"INDEX":<{W_INDEX}}{"BEHIND":<{W_BEHIND}}'
+        f'{"DATE":<{W_DATE}}{"POLICY":<{W_POLICY}}\033[0m'
+    )
+    for r in rows:
+        name    = r['name']
+        ncol    = r['lifecycle_color']
+        nreset  = '\033[0m' if ncol else ''
+        life    = _short_lifecycle(r['lifecycle'])
+        verdict = _short_verdict(r['verdict'])
+        vcol    = _verdict_color(r['verdict'])
+        vreset  = '\033[0m' if vcol else ''
+        index   = str(r['commit_index']) if r['repo_dir'] and r['commit_index'] else ''
+        behind  = str(r['behind'])       if r['repo_dir'] else ''
+        date    = r['local_date']        if r['repo_dir'] else ''
+        policy  = r['policy']
+
+        print(
+            f'  {ncol}{name:<{W_NAME}.{W_NAME}}{nreset}'
+            f'{life:<{W_LIFE}.{W_LIFE}}'
+            f'{vcol}{verdict:<{W_VERDICT}.{W_VERDICT}}{vreset}'
+            f'{index:<{W_INDEX}.{W_INDEX}}'
+            f'{behind:<{W_BEHIND}.{W_BEHIND}}'
+            f'{date:<{W_DATE}.{W_DATE}}'
+            f'{policy:<{W_POLICY}.{W_POLICY}}'
+        )
 
 
 def _print_action_hint(rows: list[dict]) -> None:
