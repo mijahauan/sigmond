@@ -27,7 +27,7 @@
 #   8. Writes a default /etc/sigmond/topology.toml (all components off)
 #   9. Copies /etc/sigmond/catalog.toml from the repo
 #  10. Builds /opt/sigmond/venv with sigmond[tui] (Textual + Rich)
-#  11. Symlinks bin/smd into /usr/local/sbin/smd
+#  11. Symlinks bin/smd into /usr/local/bin/smd (on every user's PATH)
 #
 # After this script completes, run:
 #   sudo smd install               — CLI: install all catalog components
@@ -44,7 +44,12 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CANONICAL_REPO="/opt/git/sigmond/sigmond"
 SMD_BIN="$REPO_DIR/bin/smd"
 VENV_DIR="/opt/sigmond/venv"
-INSTALL_SMD="/usr/local/sbin/smd"
+# /usr/local/bin (not /usr/local/sbin) so smd is on every user's PATH out of
+# the box.  smd self-elevates per-operation via sudo (see _run sudo=True in
+# bin/smd), so non-root users get read-only verbs for free and a sudo prompt
+# only when a verb actually mutates state.
+INSTALL_SMD="/usr/local/bin/smd"
+LEGACY_INSTALL_SMD="/usr/local/sbin/smd"
 
 # ─── terminal helpers ────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -360,12 +365,12 @@ chmod a+x "$SMD_BIN"
 $SUDO ln -sf "$SMD_BIN" "$INSTALL_SMD"
 ok "smd installed at $INSTALL_SMD"
 
-# ─── PATH reminder ────────────────────────────────────────────────────────────
-if ! command -v smd &>/dev/null; then
-    warn "/usr/local/sbin is not in your PATH."
-    warn "Add this to ~/.bashrc or ~/.profile:"
-    warn "  export PATH=\"\$PATH:/usr/local/sbin\""
-    warn "Or use the full path:  $INSTALL_SMD"
+# Older installs put smd in /usr/local/sbin (root-only PATH on Debian).  Clean
+# that up so we don't leave two symlinks pointing at the same target — and so
+# `which smd` returns the canonical bin/ location.
+if [[ -L "$LEGACY_INSTALL_SMD" ]]; then
+    info "Removing legacy symlink $LEGACY_INSTALL_SMD"
+    $SUDO rm -f "$LEGACY_INSTALL_SMD"
 fi
 
 # ─── done ─────────────────────────────────────────────────────────────────────
