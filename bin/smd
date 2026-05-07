@@ -3889,6 +3889,12 @@ def cmd_list(args) -> int:
     if getattr(args, 'catalog', False):
         return _print_catalog(args)
 
+    # `--apply` requires root, and _need_root re-execvps the whole command
+    # under sudo when invoked as a non-root user — so any output produced
+    # before this check is duplicated by the re-exec.  Check first.
+    if getattr(args, 'apply', False) and _need_root('list --apply'):
+        return 1
+
     fetch = getattr(args, 'fetch', False)
     rows = _component_statuses(args, fetch=fetch)
 

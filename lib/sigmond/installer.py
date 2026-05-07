@@ -17,37 +17,38 @@ from .catalog import CatalogEntry
 GIT_BASE = Path('/opt/git/sigmond')
 
 
+def _git(repo_dir: Path, *git_args: str) -> subprocess.CompletedProcess:
+    """Run a `git -C <repo_dir>` command with safe.directory pre-set.
+
+    Sigmond often invokes git as root over repos owned by the `sigmond`
+    system user — that trips git's dubious-ownership check.  Passing
+    `-c safe.directory=<repo_dir>` per call avoids the need for any
+    /etc/gitconfig edit and works regardless of who's running.
+    """
+    return subprocess.run(
+        ['git', '-c', f'safe.directory={repo_dir}',
+         '-C', str(repo_dir), *git_args],
+        capture_output=True, text=True,
+    )
+
+
 def _normalize_remote_url(repo_dir: Path, https_url: str) -> None:
     """Switch the origin remote to HTTPS if it's currently SSH.
 
     Root typically has no SSH host keys, so HTTPS is safer for automated pulls.
     """
-    cur = subprocess.run(
-        ['git', '-C', str(repo_dir), 'remote', 'get-url', 'origin'],
-        capture_output=True, text=True,
-    )
+    cur = _git(repo_dir, 'remote', 'get-url', 'origin')
     if cur.stdout.strip().startswith('git@'):
         normalized = https_url.rstrip('/')
         if not normalized.endswith('.git'):
             normalized += '.git'
-        subprocess.run(
-            ['git', '-C', str(repo_dir), 'remote', 'set-url', 'origin', normalized],
-            capture_output=True, text=True,
-        )
+        _git(repo_dir, 'remote', 'set-url', 'origin', normalized)
 
 
 def git_head_ref(repo_dir: Path) -> str:
     """Return a short human-readable ref for the current HEAD (e.g. 'main@abc1234')."""
-    branch = subprocess.run(
-        ['git', '-c', f'safe.directory={repo_dir}',
-         '-C', str(repo_dir), 'rev-parse', '--abbrev-ref', 'HEAD'],
-        capture_output=True, text=True,
-    )
-    sha = subprocess.run(
-        ['git', '-c', f'safe.directory={repo_dir}',
-         '-C', str(repo_dir), 'rev-parse', '--short', 'HEAD'],
-        capture_output=True, text=True,
-    )
+    branch = _git(repo_dir, 'rev-parse', '--abbrev-ref', 'HEAD')
+    sha    = _git(repo_dir, 'rev-parse', '--short', 'HEAD')
     b = branch.stdout.strip()
     s = sha.stdout.strip()
     if b and b != 'HEAD' and s:
@@ -75,18 +76,12 @@ def clone_repo(
             if entry.repo and entry.repo.startswith('https://'):
                 _normalize_remote_url(repo_dir, entry.repo)
             if ref is not None:
-                r = subprocess.run(
-                    ['git', '-C', str(repo_dir), 'fetch', 'origin'],
-                    capture_output=True, text=True,
-                )
+                r = _git(repo_dir, 'fetch', 'origin')
                 if r.returncode != 0:
                     raise RuntimeError(
                         f"git fetch failed in {repo_dir}: {r.stderr.strip()}"
                     )
-                r = subprocess.run(
-                    ['git', '-C', str(repo_dir), 'checkout', ref],
-                    capture_output=True, text=True,
-                )
+                r = _git(repo_dir, 'checkout', ref)
                 if r.returncode != 0:
                     raise RuntimeError(
                         f"git checkout {ref!r} failed in {repo_dir}: {r.stderr.strip()}"
@@ -95,20 +90,14 @@ def clone_repo(
                 # Fetch first, then reset to origin's default branch.
                 # git pull --ff-only fails when HEAD is detached (e.g. after
                 # a previous pinned-ref checkout), so we use fetch + checkout -B.
-                r = subprocess.run(
-                    ['git', '-C', str(repo_dir), 'fetch', 'origin'],
-                    capture_output=True, text=True,
-                )
+                r = _git(repo_dir, 'fetch', 'origin')
                 if r.returncode != 0:
                     raise RuntimeError(
                         f"git fetch failed in {repo_dir}: {r.stderr.strip()}"
                     )
                 # Discover the remote's default branch (usually main).
-                sym = subprocess.run(
-                    ['git', '-C', str(repo_dir), 'symbolic-ref',
-                     '--short', 'refs/remotes/origin/HEAD'],
-                    capture_output=True, text=True,
-                )
+                sym = _git(repo_dir, 'symbolic-ref',
+                           '--short', 'refs/remotes/origin/HEAD')
                 if sym.returncode == 0 and sym.stdout.strip():
                     remote_branch = sym.stdout.strip()           # e.g. origin/main
                     local_branch  = remote_branch.split('/', 1)[-1]   # e.g. main
@@ -117,11 +106,8 @@ def clone_repo(
                     local_branch  = 'main'
                 # checkout -B resets the local branch to match origin whether
                 # we're currently on a branch or in detached HEAD.
-                r = subprocess.run(
-                    ['git', '-C', str(repo_dir),
-                     'checkout', '-B', local_branch, remote_branch],
-                    capture_output=True, text=True,
-                )
+                r = _git(repo_dir, 'checkout', '-B',
+                         local_branch, remote_branch)
                 if r.returncode != 0:
                     raise RuntimeError(
                         f"git checkout {local_branch} failed in {repo_dir}: "
@@ -133,6 +119,8 @@ def clone_repo(
         raise RuntimeError(f"{entry.name}: no repo URL in catalog")
 
     base.mkdir(parents=True, exist_ok=True)
+    # `git clone` itself doesn't trip dubious-ownership (it creates the
+    # repo so it owns the just-made .git/), so no safe.directory needed.
     r = subprocess.run(
         ['git', 'clone', entry.repo, str(repo_dir)],
         capture_output=True, text=True,
@@ -142,10 +130,7 @@ def clone_repo(
             f"git clone {entry.repo} failed: {r.stderr.strip()}"
         )
     if ref is not None:
-        r = subprocess.run(
-            ['git', '-C', str(repo_dir), 'checkout', ref],
-            capture_output=True, text=True,
-        )
+        r = _git(repo_dir, 'checkout', ref)
         if r.returncode != 0:
             raise RuntimeError(
                 f"git checkout {ref!r} failed after clone: {r.stderr.strip()}"
