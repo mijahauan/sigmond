@@ -25,7 +25,7 @@ from typing import Optional
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Static
 from textual.worker import Worker, WorkerState
@@ -87,8 +87,13 @@ class _ComponentRow:
     repo_dir: Optional[Path]
     current_ref: str         # e.g. "main@abc1234" or "—"
     version_policy: str      # "latest" | "ignore" | "<ref>"
+    enabled: bool = False    # topology.toml: [component.X] enabled = true/false
+    lifecycle: str = "—"    # "running" | "stopped" | "available" | "missing"
     commit_idx: str = "—"   # total commit count, e.g. "247"
     behind: str = "—"       # commits behind origin/main, e.g. "3" or "0"
+    ahead: str = "—"        # local commits not pushed (mirror of behind)
+    dirty: bool = False      # uncommitted/unstaged changes in working tree
+    dirty_reason: str = ""   # short explanation when dirty=True
     last_commit_date: str = "—"   # YYYY-MM-DD of most recent local commit
     last_commit_ts: float = 0.0   # unix timestamp for sorting
     log_lines: list[str] = field(default_factory=list)
@@ -239,6 +244,59 @@ def _git_behind(repo_dir: Path) -> str:
         return "—"
 
 
+def _to_int(s: str) -> int:
+    """Parse a string-numeric field, returning 0 for any non-int value
+    (including the "—" sentinel used for "not applicable")."""
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _git_ahead(repo_dir: Path) -> str:
+    """Return how many local commits are not yet on origin/main."""
+    try:
+        r = _git(repo_dir, 'rev-list', '--count', 'origin/main..HEAD')
+        v = r.stdout.strip()
+        return v if r.returncode == 0 and v.isdigit() else "—"
+    except Exception:
+        return "—"
+
+
+def _git_is_dirty(repo_dir: Path) -> tuple[bool, str]:
+    """True if the working tree has uncommitted, staged, or untracked changes.
+
+    Returns (dirty, reason).  Reason is a short summary suitable for a
+    table cell ("staged", "unstaged", "untracked", or a comma-joined mix);
+    empty when clean.  Untracked files count — a half-finished edit on
+    the side of an `apply` should still show up so the operator notices
+    before pulling on top of it.
+    """
+    try:
+        r = _git(repo_dir, 'status', '--porcelain=v1', '--untracked-files=normal')
+        if r.returncode != 0:
+            return False, ""
+        flags: set[str] = set()
+        for line in r.stdout.splitlines():
+            if not line:
+                continue
+            head = line[:2]
+            if head.startswith('??'):
+                flags.add('untracked')
+                continue
+            staged_ch, work_ch = head[0], head[1]
+            if staged_ch != ' ':
+                flags.add('staged')
+            if work_ch != ' ':
+                flags.add('unstaged')
+        if not flags:
+            return False, ""
+        order = ['staged', 'unstaged', 'untracked']
+        return True, ','.join(f for f in order if f in flags)
+    except Exception:
+        return False, ""
+
+
 def _gather(topology_components: dict, do_fetch: bool = False) -> _ComponentsView:
     """Worker: load catalog + topology, scan /opt/git/sigmond, collect git refs."""
     view = _ComponentsView()
@@ -251,6 +309,19 @@ def _gather(topology_components: dict, do_fetch: bool = False) -> _ComponentsVie
     except Exception as exc:
         view.error = str(exc)
         return view
+
+    # Lifecycle inference reuses the CLI's component_state module so the
+    # TUI's STATUS column matches `smd list` exactly.  Import is best-effort
+    # — if the module fails to load (e.g. sigmond lib path unresolved), we
+    # fall back to a coarse "installed/missing" label.
+    try:
+        from ...component_state import compute_state as _compute_state
+        from ...topology import load_topology as _load_topology
+        from ...paths import TOPOLOGY_PATH as _TOPOLOGY_PATH
+        _full_topo = _load_topology(_TOPOLOGY_PATH)
+    except Exception:
+        _compute_state = None
+        _full_topo = None
 
     # Collect repo dirs first so we can batch-fetch before reading state.
     repo_dirs: list[tuple[str, Path]] = []
@@ -279,14 +350,53 @@ def _gather(topology_components: dict, do_fetch: bool = False) -> _ComponentsVie
         current_ref     = _git_ref(repo_dir)             if repo_dir else '—'
         commit_idx      = _git_commit_idx(repo_dir)      if repo_dir else '—'
         behind          = _git_behind(repo_dir)          if repo_dir else '—'
+        ahead           = _git_ahead(repo_dir)           if repo_dir else '—'
+        dirty, dirty_reason = _git_is_dirty(repo_dir)    if repo_dir else (False, "")
         log_lines       = _git_log(repo_dir)             if repo_dir else []
         ahead_log_lines = _git_log_ahead(repo_dir)       if repo_dir else []
         last_commit_date, last_commit_ts = (
             _git_last_commit_date(repo_dir) if repo_dir else ('—', 0.0)
         )
 
-        comp = topology_components.get(name)
+        # Topology may key components by either the canonical catalog
+        # name or the topology_alias (legacy name, often the systemd
+        # service name).  Fall back through the alias so a host whose
+        # topology.toml still has [component.radiod] resolves correctly
+        # against the renamed [client.ka9q-radio] catalog entry.
+        comp = (topology_components.get(name)
+                or (topology_components.get(entry.topology_alias)
+                    if getattr(entry, 'topology_alias', None) else None))
         policy = (comp.version if comp else 'latest') or 'latest'
+        enabled = bool(comp.enabled) if comp else False
+
+        # Derive lifecycle keyword from the individual ComponentState flags
+        # in order: cloned → installed → configured → enabled → active.
+        # state.stage skips this ordering and returns "enabled" whenever
+        # topology says enabled=true, which mis-labels missing components
+        # the operator hasn't actually installed yet.
+        lifecycle = "missing"
+        if _compute_state is not None and _full_topo is not None:
+            try:
+                st = _compute_state(
+                    name, _full_topo,
+                    alias=getattr(entry, 'topology_alias', None),
+                )
+                if not st.cloned:
+                    lifecycle = "missing"
+                elif not st.installed:
+                    lifecycle = "available"
+                elif not st.configured:
+                    lifecycle = "needs cfg"
+                elif not st.enabled:
+                    lifecycle = "configured"
+                elif not st.active:
+                    lifecycle = "stopped"
+                else:
+                    lifecycle = "running"
+            except Exception:
+                lifecycle = "installed" if installed else "missing"
+        else:
+            lifecycle = "installed" if installed else "missing"
 
         view.rows.append(_ComponentRow(
             name=name,
@@ -297,8 +407,13 @@ def _gather(topology_components: dict, do_fetch: bool = False) -> _ComponentsVie
             repo_dir=repo_dir,
             current_ref=current_ref,
             version_policy=policy,
+            enabled=enabled,
+            lifecycle=lifecycle,
             commit_idx=commit_idx,
             behind=behind,
+            ahead=ahead,
+            dirty=dirty,
+            dirty_reason=dirty_reason,
             last_commit_date=last_commit_date,
             last_commit_ts=last_commit_ts,
             log_lines=log_lines,
@@ -500,10 +615,9 @@ class ComponentDetailModal(ModalScreen):
                 yield Static("", id="cdm-log")
             with Horizontal(id="cdm-btn-row"):
                 yield Button(
-                    "↑ Update this",
+                    "↑ Update this" if row.installed else "+ Install",
                     id="cdm-update",
                     variant="success",
-                    disabled=not row.installed,
                 )
                 yield Button("↑ Set: latest",    id="cdm-latest",  variant="success")
                 yield Button("⊙ Pin to current", id="cdm-pin",     variant="warning",
@@ -551,7 +665,10 @@ class ComponentDetailModal(ModalScreen):
         if bid == "cdm-close":
             self.dismiss(self._changed)
         elif bid == "cdm-update":
-            self._do_update()
+            if self._row.installed:
+                self._do_update()
+            else:
+                self._do_install()
         elif bid in ("cdm-latest", "cdm-pin", "cdm-ignore"):
             self._set_policy(bid)
 
@@ -576,6 +693,52 @@ class ComponentDetailModal(ModalScreen):
             status.update(f"[green]✔[/]  {msg}")
         else:
             status.update(f"[red]{msg}[/]")
+
+    def _do_install(self) -> None:
+        row = self._row
+        smd = _smd_binary()
+
+        body_lines = [f"Clone and install [bold]{row.name}[/]"]
+        if row.kind:
+            body_lines[0] += f" [dim]({row.kind})[/]"
+        body_lines[0] += "."
+        if row.description:
+            body_lines.append("")
+            body_lines.append(row.description)
+        body_lines.append("")
+        body_lines.append(
+            "sigmond will dispatch to the right build path: a catalog "
+            "install.sh for clients that ship one, or for C projects "
+            "(ka9q-radio) a native build that apt-installs the library "
+            "deps and then runs `make install`."
+        )
+
+        def _after_confirm(confirmed: bool) -> None:
+            if not confirmed:
+                return
+
+            def _after_modal(_result: object) -> None:
+                self._changed = True
+                self.query_one("#cdm-status", Static).update(
+                    f"[dim]{row.name}: install complete — reopen the screen to refresh.[/]"
+                )
+
+            self.app.push_screen(
+                UpdateOutputModal(
+                    title=f"Installing {row.name}",
+                    cmd=['sudo', smd, 'install', row.name],
+                ),
+                _after_modal,
+            )
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"Install {row.name}?",
+                body="\n".join(body_lines),
+                cmd_preview=f"sudo {smd} install {row.name}",
+            ),
+            _after_confirm,
+        )
 
     def _do_update(self) -> None:
         row = self._row
@@ -637,6 +800,12 @@ class ComponentDetailModal(ModalScreen):
 class ComponentsScreen(Vertical):
     """Software versions — component install status, git refs, and version policy."""
 
+    BINDINGS = [
+        Binding("space",  "toggle_select", "Toggle selection", show=True),
+        Binding("a",      "select_all",    "Select all visible", show=False),
+        Binding("n",      "clear_select",  "Clear selection",  show=False),
+    ]
+
     DEFAULT_CSS = """
     ComponentsScreen {
         padding: 1;
@@ -664,6 +833,18 @@ class ComponentsScreen(Vertical):
     ComponentsScreen #cv-actions Button {
         margin-right: 1;
     }
+    ComponentsScreen #cv-filters {
+        height: auto;
+        margin-bottom: 1;
+    }
+    ComponentsScreen #cv-filters Button {
+        margin-right: 1;
+        min-width: 9;
+    }
+    ComponentsScreen #cv-summary {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
     ComponentsScreen #cv-last {
         color: $text-muted;
     }
@@ -675,22 +856,37 @@ class ComponentsScreen(Vertical):
         self._rows: list[_ComponentRow] = []
         self._last_click_name: Optional[str] = None
         self._last_click_time: float = 0.0
+        self._selected: set[str] = set()  # row names currently checked
+        self._filter: str = "all"          # all|missing|behind|dirty|ahead
 
     def compose(self) -> ComposeResult:
         yield Static("Software Versions", classes="cv-title")
         yield Static(
-            "Double-click a row to view details, set policy, or update that component.",
+            "Space toggles selection · Enter or double-click opens details · "
+            "filters limit the visible rows.",
             id="cv-hint",
         )
+        with Horizontal(id="cv-filters"):
+            yield Button("All",       id="cv-filter-all",     variant="primary")
+            yield Button("Missing",   id="cv-filter-missing", variant="default")
+            yield Button("Behind",    id="cv-filter-behind",  variant="default")
+            yield Button("Dirty",     id="cv-filter-dirty",   variant="default")
+            yield Button("Ahead",     id="cv-filter-ahead",   variant="default")
         yield Static("[dim]fetching from remote…[/]", id="cv-status")
         table = DataTable(id="cv-table", cursor_type="row", zebra_stripes=True)
         table.add_columns(
-            "Name", "Kind", "Installed", "Current Ref", "Commit #", "Sync", "Last Commit", "Policy"
+            "Sel", "Name", "En", "Status",
+            "Index", "Behind", "Ahead", "Dirty",
+            "Date", "Policy",
         )
         yield table
+        yield Static("", id="cv-summary")
         with Horizontal(id="cv-actions"):
-            yield Button("⟳ Fetch + Refresh", id="cv-fetch",      variant="success")
-            yield Button("↑ Update All Now",  id="cv-update-all", variant="warning")
+            yield Button("+ Install",        id="cv-install",  variant="success")
+            yield Button("↑ Update",         id="cv-update",   variant="warning")
+            yield Button("⇄ Toggle enable",  id="cv-toggle",   variant="primary")
+            yield Button("⟳ Refresh",        id="cv-fetch",    variant="default")
+            yield Button("Detail…",          id="cv-detail",   variant="default")
         yield Static("", id="cv-last")
 
     def on_mount(self) -> None:
@@ -725,33 +921,99 @@ class ComponentsScreen(Vertical):
             status.update(f"[red]{view.error}[/]")
             return
 
-        installed_count = sum(1 for r in view.rows if r.installed)
-        status.update(
-            f"{len(view.rows)} components  •  "
-            f"[green]{installed_count} installed[/]  •  "
-            f"{len(view.rows) - installed_count} not installed"
-        )
+        self._rows = list(view.rows)
+        self._render_table()
+        self._render_summary()
 
+    def _matches_filter(self, row: _ComponentRow) -> bool:
+        f = self._filter
+        if f == "all":
+            return True
+        if f == "missing":
+            return row.lifecycle == "missing"
+        if f == "behind":
+            return _to_int(row.behind) > 0
+        if f == "dirty":
+            return row.dirty
+        if f == "ahead":
+            return _to_int(row.ahead) > 0
+        return True
+
+    def _render_table(self) -> None:
+        """Re-render the DataTable from self._rows + self._filter + self._selected.
+
+        Called whenever the underlying data refreshes, the filter changes,
+        or the selection set changes.  Each render is a full clear+repopulate
+        — cheap because we have ~10 rows.
+        """
         table = self.query_one("#cv-table", DataTable)
         table.clear()
-        self._rows = list(view.rows)
-
-        for row in view.rows:
-            inst_cell   = ("[green]✔[/]" if row.installed else "[dim]✘[/]")
-            policy_cell = self._policy_markup(row.version_policy)
-            ref_cell    = Text(row.current_ref, no_wrap=True)
-            idx_cell    = f"#{row.commit_idx}" if row.commit_idx != "—" else "[dim]—[/]"
-            sync_cell   = self._sync_markup(row.commit_idx, row.behind)
+        for row in self._rows:
+            if not self._matches_filter(row):
+                continue
+            # Unicode checkboxes — literal "[x]" / "[ ]" are mis-parsed as
+            # Rich markup tags (style="x", "= ") and render blank.
+            sel = "[green]☑[/]" if row.name in self._selected else "☐"
+            en  = (
+                "[green]✓[/]" if row.enabled
+                else ("[dim]·[/]" if row.lifecycle != "missing" else "[dim]—[/]")
+            )
+            status_cell = self._lifecycle_markup(row.lifecycle)
+            idx_cell    = row.commit_idx if row.commit_idx != "—" else "[dim]—[/]"
+            behind_cell = self._behind_markup(row.behind)
+            ahead_cell  = self._ahead_markup(row.ahead)
+            dirty_cell  = (
+                f"[red]![/] [dim]{row.dirty_reason}[/]"
+                if row.dirty
+                else ("[dim]·[/]" if row.repo_dir else "[dim]—[/]")
+            )
             date_cell   = (
                 f"[dim]{row.last_commit_date}[/]"
                 if row.last_commit_date == "—"
                 else row.last_commit_date
             )
+            policy_cell = self._policy_markup(row.version_policy)
             table.add_row(
-                row.name, row.kind, inst_cell,
-                ref_cell, idx_cell, sync_cell, date_cell, policy_cell,
+                sel, row.name, en, status_cell,
+                idx_cell, behind_cell, ahead_cell, dirty_cell,
+                date_cell, policy_cell,
                 key=row.name,
             )
+
+    def _render_summary(self) -> None:
+        """Update #cv-status (totals) and #cv-summary (selection breakdown)."""
+        rows = self._rows
+        n_total    = len(rows)
+        n_missing  = sum(1 for r in rows if r.lifecycle == "missing")
+        n_behind   = sum(1 for r in rows if _to_int(r.behind) > 0)
+        n_dirty    = sum(1 for r in rows if r.dirty)
+        n_ahead    = sum(1 for r in rows if _to_int(r.ahead) > 0)
+        self.query_one("#cv-status", Static).update(
+            f"{n_total} components  •  "
+            f"[red]{n_missing} missing[/]  •  "
+            f"[yellow]{n_behind} behind[/]  •  "
+            f"[red]{n_dirty} dirty[/]  •  "
+            f"[yellow]{n_ahead} ahead[/]"
+        )
+
+        sel = self._selected
+        if not sel:
+            self.query_one("#cv-summary", Static).update(
+                "[dim]nothing selected — space toggles the focused row.[/]"
+            )
+            return
+
+        installable = [r for r in rows if r.name in sel and r.lifecycle == "missing"]
+        updatable   = [r for r in rows if r.name in sel and _to_int(r.behind) > 0
+                       and not r.dirty]
+        skipped     = [r for r in rows if r.name in sel
+                       and r not in installable and r not in updatable]
+        self.query_one("#cv-summary", Static).update(
+            f"selected: {len(sel)}  •  "
+            f"[green]{len(installable)} installable[/]  •  "
+            f"[yellow]{len(updatable)} updatable[/]  •  "
+            f"[dim]{len(skipped)} skipped[/]"
+        )
 
     def _policy_markup(self, policy: str) -> str:
         if policy == "latest":
@@ -760,19 +1022,32 @@ class ComponentsScreen(Vertical):
             return "[dim]ignore[/]"
         return f"[yellow]pin: {policy}[/]"
 
-    def _sync_markup(self, idx: str, behind: str) -> str:
-        """Return the sync-status cell: ✔, +N behind, or blank."""
-        if idx == "—":
+    def _lifecycle_markup(self, stage: str) -> str:
+        if stage == "running":
+            return "[green]running[/]"
+        if stage == "stopped":
+            return "[yellow]stopped[/]"
+        if stage == "missing":
+            return "[red]missing[/]"
+        if stage == "available":
+            return "[yellow]available[/]"
+        if stage in ("needs cfg", "configured"):
+            return f"[yellow]{stage}[/]"
+        return f"[dim]{stage}[/]"
+
+    def _behind_markup(self, behind: str) -> str:
+        if behind == "—" or behind == "":
             return "[dim]—[/]"
         if behind == "0":
-            return "[green]✔[/]"
-        if behind == "—":
-            return ""
-        try:
-            n = int(behind)
-            return f"[yellow]+{n} behind[/]"
-        except ValueError:
-            return ""
+            return "0"
+        return f"[yellow]{behind}[/]"
+
+    def _ahead_markup(self, ahead: str) -> str:
+        if ahead == "—" or ahead == "":
+            return "[dim]—[/]"
+        if ahead == "0":
+            return "0"
+        return f"[yellow]{ahead}[/]"
 
     # ------------------------------------------------------------------
     # row selection — double-click opens detail modal
@@ -810,13 +1085,109 @@ class ComponentsScreen(Vertical):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
+        if bid is None:
+            return
+
+        # Filter pills — set self._filter and re-render the table.
+        filter_map = {
+            "cv-filter-all":     "all",
+            "cv-filter-missing": "missing",
+            "cv-filter-behind":  "behind",
+            "cv-filter-dirty":   "dirty",
+            "cv-filter-ahead":   "ahead",
+        }
+        if bid in filter_map:
+            self._filter = filter_map[bid]
+            self._update_filter_button_variants()
+            self._render_table()
+            self._render_summary()
+            return
+
         if bid == "cv-fetch":
             self._refresh(do_fetch=True)
-        elif bid == "cv-update-all":
-            self._update_all()
+        elif bid == "cv-install":
+            self._bulk_install()
+        elif bid == "cv-update":
+            self._bulk_update()
+        elif bid == "cv-toggle":
+            self._bulk_toggle_enable()
+        elif bid == "cv-detail":
+            self._open_focused_detail()
 
-    def _update_all(self) -> None:
+    def _update_filter_button_variants(self) -> None:
+        """Highlight the active filter pill, dim the rest."""
+        for fid, fname in [
+            ("cv-filter-all",     "all"),
+            ("cv-filter-missing", "missing"),
+            ("cv-filter-behind",  "behind"),
+            ("cv-filter-dirty",   "dirty"),
+            ("cv-filter-ahead",   "ahead"),
+        ]:
+            try:
+                btn = self.query_one(f"#{fid}", Button)
+                btn.variant = "primary" if self._filter == fname else "default"
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # selection actions (keybindings)
+    # ------------------------------------------------------------------
+
+    def _visible_rows(self) -> list[_ComponentRow]:
+        return [r for r in self._rows if self._matches_filter(r)]
+
+    def action_toggle_select(self) -> None:
+        table = self.query_one("#cv-table", DataTable)
+        cursor = table.cursor_row
+        visible = self._visible_rows()
+        if cursor is None or cursor < 0 or cursor >= len(visible):
+            return
+        name = visible[cursor].name
+        if name in self._selected:
+            self._selected.discard(name)
+        else:
+            self._selected.add(name)
+        self._render_table()
+        self._render_summary()
+        # Restore cursor after clear+repopulate.
+        try:
+            table.move_cursor(row=cursor)
+        except Exception:
+            pass
+
+    def action_select_all(self) -> None:
+        self._selected.update(r.name for r in self._visible_rows())
+        self._render_table()
+        self._render_summary()
+
+    def action_clear_select(self) -> None:
+        self._selected.clear()
+        self._render_table()
+        self._render_summary()
+
+    # ------------------------------------------------------------------
+    # bulk actions (button handlers)
+    # ------------------------------------------------------------------
+
+    def _bulk_install(self) -> None:
+        """Install all selected rows whose lifecycle == "missing"."""
+        targets = [r for r in self._rows
+                   if r.name in self._selected and r.lifecycle == "missing"]
+        if not targets:
+            self.query_one("#cv-last", Static).update(
+                "[yellow]no missing components in selection — nothing to install.[/]"
+            )
+            return
+
         smd = _smd_binary()
+        names = [r.name for r in targets]
+        names_csv = ','.join(names)
+        cmd = ['sudo', smd, 'install', '--components', names_csv, '--yes']
+        skipped = len(self._selected) - len(targets)
+        skipped_note = (
+            f"\n\n[dim]{skipped} other selected row(s) skipped — already installed.[/]"
+            if skipped else ""
+        )
 
         def _after_confirm(confirmed: bool) -> None:
             if not confirmed:
@@ -824,26 +1195,159 @@ class ComponentsScreen(Vertical):
 
             def _after_modal(_result: object) -> None:
                 self.query_one("#cv-last", Static).update(
-                    "[dim]update complete — refreshing…[/]"
+                    f"[dim]install of {len(targets)} component(s) complete — refreshing…[/]"
                 )
                 self._refresh()
 
             self.app.push_screen(
                 UpdateOutputModal(
-                    title="Update All Components",
-                    cmd=['sudo', smd, 'list', '--apply'],
+                    title=f"Installing {len(targets)} component(s)",
+                    cmd=cmd,
                 ),
                 _after_modal,
             )
 
         self.app.push_screen(
             ConfirmModal(
-                title="Update All Components?",
+                title=f"Install {len(targets)} component(s)?",
                 body=(
-                    "Pull the latest commits for all managed components and re-apply.\n\n"
-                    "Components with policy=[bold]ignore[/] will be skipped."
+                    f"Will install: [bold]{', '.join(names)}[/]"
+                    f"{skipped_note}"
                 ),
-                cmd_preview=f"sudo {smd} update",
+                cmd_preview=' '.join(cmd),
             ),
             _after_confirm,
         )
+
+    def _bulk_update(self) -> None:
+        """Update all selected rows that are behind upstream and not dirty.
+
+        Dirty rows are deliberately skipped: pulling on top of uncommitted
+        local changes is a footgun.  The user can stash/commit first, or
+        use the per-component detail modal to force-update one at a time.
+        """
+        targets = [r for r in self._rows
+                   if r.name in self._selected
+                   and _to_int(r.behind) > 0
+                   and not r.dirty]
+        if not targets:
+            self.query_one("#cv-last", Static).update(
+                "[yellow]no clean+behind components in selection — nothing to update.[/]"
+            )
+            return
+
+        smd = _smd_binary()
+        names = [r.name for r in targets]
+        names_csv = ','.join(names)
+        cmd = ['sudo', smd, 'list', '--apply', '--components', names_csv]
+        skipped = len(self._selected) - len(targets)
+        skipped_note = (
+            f"\n\n[dim]{skipped} other selected row(s) skipped (dirty / up-to-date / missing).[/]"
+            if skipped else ""
+        )
+
+        def _after_confirm(confirmed: bool) -> None:
+            if not confirmed:
+                return
+
+            def _after_modal(_result: object) -> None:
+                self.query_one("#cv-last", Static).update(
+                    f"[dim]update of {len(targets)} component(s) complete — refreshing…[/]"
+                )
+                self._refresh()
+
+            self.app.push_screen(
+                UpdateOutputModal(
+                    title=f"Updating {len(targets)} component(s)",
+                    cmd=cmd,
+                ),
+                _after_modal,
+            )
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"Update {len(targets)} component(s)?",
+                body=(
+                    f"Will pull and re-apply: [bold]{', '.join(names)}[/]"
+                    f"{skipped_note}"
+                ),
+                cmd_preview=' '.join(cmd),
+            ),
+            _after_confirm,
+        )
+
+    def _bulk_toggle_enable(self) -> None:
+        """Flip the [component.X] enabled flag in topology.toml for each selected row.
+
+        Writes via the existing _write_topology_toml / _sudo_write_topology
+        path so failures fall back to a sudo cp.  Refreshes the data layer
+        after so the EN/STATUS columns reflect the new state.
+        """
+        if not self._selected:
+            self.query_one("#cv-last", Static).update(
+                "[yellow]no rows selected — nothing to toggle.[/]"
+            )
+            return
+
+        from ...paths import TOPOLOGY_PATH
+        from ...topology import load_topology
+
+        try:
+            topo = load_topology(TOPOLOGY_PATH)
+        except Exception as exc:
+            self.query_one("#cv-last", Static).update(
+                f"[red]error loading topology: {exc}[/]"
+            )
+            return
+
+        flipped: list[str] = []
+        skipped: list[str] = []
+        for name in sorted(self._selected):
+            comp = topo.components.get(name)
+            if comp is None:
+                skipped.append(name)
+                continue
+            comp.enabled = not comp.enabled
+            flipped.append(f"{name}={'on' if comp.enabled else 'off'}")
+            local = self._topo_components.get(name)
+            if local is not None:
+                local.enabled = comp.enabled
+
+        if not flipped:
+            self.query_one("#cv-last", Static).update(
+                f"[yellow]no selected rows are in topology.toml: {', '.join(skipped)}[/]"
+            )
+            return
+
+        try:
+            _write_topology_toml(topo, TOPOLOGY_PATH)
+            via = "saved"
+        except PermissionError:
+            if not _sudo_write_topology(topo, TOPOLOGY_PATH):
+                self.query_one("#cv-last", Static).update(
+                    f"[red]permission denied writing {TOPOLOGY_PATH}[/]"
+                )
+                return
+            via = "saved via sudo"
+        except Exception as exc:
+            self.query_one("#cv-last", Static).update(
+                f"[red]error saving topology: {exc}[/]"
+            )
+            return
+
+        self.query_one("#cv-last", Static).update(
+            f"[green]✔[/] toggled: {', '.join(flipped)}  ({via})"
+        )
+        self._refresh()
+
+    def _open_focused_detail(self) -> None:
+        """Open the per-component detail modal for the row under the cursor."""
+        table = self.query_one("#cv-table", DataTable)
+        cursor = table.cursor_row
+        visible = self._visible_rows()
+        if cursor is None or cursor < 0 or cursor >= len(visible):
+            self.query_one("#cv-last", Static).update(
+                "[yellow]move the cursor to a row first.[/]"
+            )
+            return
+        self._open_detail_modal(visible[cursor])

@@ -61,7 +61,6 @@ class ComponentTree(Tree):
         operate.add_leaf("\u21bb Lifecycle", data={"screen": "lifecycle"})
         operate.add_leaf("\u21c4 Apply",     data={"screen": "apply"})
         operate.add_leaf("\u2a09 FFT Wisdom", data={"screen": "fft_wisdom"})
-        operate.add_leaf("+ Software install", data={"screen": "install"})
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         data = event.node.data
