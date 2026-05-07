@@ -41,8 +41,11 @@ What you need before starting:
 Quick start:
 
 ```bash
-git clone https://github.com/mijahauan/sigmond ~/sigmond
-bash ~/sigmond/install.sh
+sudo mkdir -p /opt/git/sigmond
+sudo chown $USER /opt/git/sigmond
+git clone https://github.com/mijahauan/sigmond /opt/git/sigmond/sigmond
+cd /opt/git/sigmond/sigmond
+./install.sh
 # answer "y" to the "Proxmox passthrough setup?" prompt
 # enter the Proxmox host name/IP when asked
 # enter the host root password once when ssh-copy-id prompts
@@ -107,37 +110,42 @@ sudo apt-get install -y git python3-pip python3-venv chrony \
 
 ## 2. Clone the Repositories
 
-Sigmond has a required sibling dependency: **ka9q-python**. Both repos must
-live next to each other (the path `../ka9q-python` is hard-coded in
-`pyproject.toml`).
+Sigmond and its sibling dependency **ka9q-python** both live under
+`/opt/git/sigmond/`. The relative path `../ka9q-python` referenced in
+`pyproject.toml` resolves to `/opt/git/sigmond/ka9q-python` when sigmond
+is at the canonical `/opt/git/sigmond/sigmond` location.
 
 ```bash
-cd ~
-git clone https://github.com/mijahauan/sigmond.git
-git clone https://github.com/mijahauan/ka9q-python.git
+sudo mkdir -p /opt/git/sigmond
+sudo chown $USER /opt/git/sigmond
+git clone https://github.com/mijahauan/sigmond.git     /opt/git/sigmond/sigmond
+git clone https://github.com/mijahauan/ka9q-python.git /opt/git/sigmond/ka9q-python
 ```
 
 The directory layout must look like this:
 
 ```
-~/
+/opt/git/sigmond/
 ├── sigmond/        ← this repo
 └── ka9q-python/    ← sibling dependency
 ```
 
+After install.sh runs, the whole tree is owned by the system user
+`sigmond` (members of group `sigmond` get write access).
+
 > **Bug note (tracked):** `pyproject.toml` uses a hard-coded relative path
 > `../ka9q-python` under `[tool.uv.sources]`. If ka9q-python is absent the
 > install fails immediately with:
-> `error: Distribution not found at: file:///home/<user>/ka9q-python`
-> The fix is to clone ka9q-python before running `install.sh`.
+> `error: Distribution not found at: file:///opt/git/sigmond/ka9q-python`
+> The fix is to clone ka9q-python alongside sigmond before running `install.sh`.
 
 ---
 
 ## 3. Run the Bootstrap Installer
 
 ```bash
-cd ~/sigmond
-bash install.sh
+cd /opt/git/sigmond/sigmond
+./install.sh
 ```
 
 The script will:

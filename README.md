@@ -41,26 +41,28 @@ service lifecycle, log aggregation, diagnostics, and resource arbitration.
 
 ### 1. Install sigmond
 
+Sigmond installs at `/opt/git/sigmond/sigmond/`, peer to its managed
+components. Clone and install from there:
+
 ```bash
-git clone https://github.com/mijahauan/sigmond ~/sigmond
-bash ~/sigmond/install.sh
+sudo mkdir -p /opt/git/sigmond
+sudo chown $USER /opt/git/sigmond
+git clone https://github.com/mijahauan/sigmond /opt/git/sigmond/sigmond
+cd /opt/git/sigmond/sigmond
+./install.sh
 ```
 
-This installs the `smd` command to `/usr/local/sbin/smd` and creates
-`/etc/sigmond/`.
+`install.sh` creates a `sigmond` system user that owns
+`/opt/git/sigmond/*`, adds you to the `sigmond` group so you can edit
+sources as yourself, sets up `/opt/sigmond/venv`, and symlinks `smd` to
+`/usr/local/sbin/smd`. Open a new shell after install (or
+`newgrp sigmond`) to pick up the group membership.
 
 > **Running under Proxmox?** `install.sh` detects KVM guests and offers
 > to configure the Proxmox host (PCIe passthrough, CPU isolation, vfio,
 > hookscript) before installing sigmond — one prompt, one host reboot,
 > automatic resume. See [`docs/installation-guide.md`](docs/installation-guide.md)
 > "Running under Proxmox VE? Read this first."
-
-For the legacy in-place layout under `/opt/git/sigmond`:
-
-```bash
-sudo git clone https://github.com/mijahauan/sigmond /opt/git/sigmond
-sudo /opt/git/sigmond/bin/smd install
-```
 
 ### 2. See what's available
 

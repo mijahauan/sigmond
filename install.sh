@@ -1,29 +1,47 @@
 #!/usr/bin/env bash
 # install.sh — Bootstrap Sigmond (Dr. SigMonD) on any Linux host.
 #
-# Run as any user who has sudo access — no need to be wsprdaemon or root:
+# Recommended install:
 #
-#   git clone https://github.com/mijahauan/sigmond
-#   cd sigmond
+#   sudo mkdir -p /opt/git/sigmond
+#   sudo chown $USER /opt/git/sigmond
+#   git clone https://github.com/mijahauan/sigmond /opt/git/sigmond/sigmond
+#   cd /opt/git/sigmond/sigmond
 #   ./install.sh
 #
+# Sigmond installs at /opt/git/sigmond/sigmond/, peer to its managed
+# components (hf-timestd, ka9q-python, wsprdaemon-client, etc., all of
+# which live at /opt/git/sigmond/<name>/).  This script will refuse to
+# run from any other location.
+#
 # What this script does:
-#   1. Verifies sudo access
-#   2. Installs git and Python 3.11+ if missing
-#   3. Creates FHS directories (/etc/sigmond, /var/lib/sigmond, etc.)
-#   4. Writes a default /etc/sigmond/topology.toml (all components off)
-#   5. Copies /etc/sigmond/catalog.toml from the repo
-#   6. Builds /opt/sigmond/venv with sigmond[tui] (Textual + Rich)
-#   7. Symlinks bin/smd into /usr/local/sbin/smd
+#   1. Validates the canonical install path
+#   2. Creates the `sigmond` system user + group (owns /opt/git/sigmond)
+#   3. Verifies sudo access
+#   4. Installs git and Python 3.11+ if missing
+#   5. Creates FHS directories (/etc/sigmond, /var/lib/sigmond, etc.)
+#   6. Sets ownership of /opt/git/sigmond to sigmond:sigmond + setgid on
+#      directories so future writes inherit the group
+#   7. Adds the invoking user to the sigmond group (so they can edit
+#      /opt/git/sigmond/* as themselves)
+#   8. Writes a default /etc/sigmond/topology.toml (all components off)
+#   9. Copies /etc/sigmond/catalog.toml from the repo
+#  10. Builds /opt/sigmond/venv with sigmond[tui] (Textual + Rich)
+#  11. Symlinks bin/smd into /usr/local/sbin/smd
 #
 # After this script completes, run:
 #   sudo smd install               — CLI: install all catalog components
 #   sudo smd install wspr-recorder — CLI: install one component
 #   sudo smd tui                   — TUI: browse and install components
+#
+# Note: the sigmond group membership applies to sessions started AFTER
+# install.sh.  Open a new shell (or `newgrp sigmond`) before editing
+# files in /opt/git/sigmond as yourself.
 
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CANONICAL_REPO="/opt/git/sigmond/sigmond"
 SMD_BIN="$REPO_DIR/bin/smd"
 VENV_DIR="/opt/sigmond/venv"
 INSTALL_SMD="/usr/local/sbin/smd"
@@ -80,6 +98,73 @@ else
     fi
     SUDO="sudo"
 fi
+
+# ─── canonical-path enforcement ──────────────────────────────────────────────
+# Sigmond's source-of-truth lives at /opt/git/sigmond/sigmond/, peer to
+# the components it manages.  Refuse to install from any other location;
+# the install would otherwise leave Pattern A symlinks pointing at a
+# non-canonical clone (that's the bug we keep fixing manually).
+if [[ "$REPO_DIR" != "$CANONICAL_REPO" ]]; then
+    die "install.sh must be run from $CANONICAL_REPO (got: $REPO_DIR)
+       To fix:
+         sudo mkdir -p /opt/git/sigmond
+         sudo chown \$USER /opt/git/sigmond
+         git clone https://github.com/mijahauan/sigmond $CANONICAL_REPO
+         cd $CANONICAL_REPO
+         ./install.sh"
+fi
+
+# ─── sigmond user + group ────────────────────────────────────────────────────
+# A single non-human user `sigmond` owns /opt/git/sigmond/*.  Humans (Rob,
+# Michael, anyone collaborating) become members of the `sigmond` group and
+# edit as themselves, with setgid keeping group ownership consistent.
+if ! getent passwd sigmond >/dev/null 2>&1; then
+    info "Creating system user/group: sigmond"
+    $SUDO useradd --system --user-group --home-dir /opt/git/sigmond \
+                  --shell /usr/sbin/nologin sigmond
+fi
+ok "sigmond user/group ready: $(getent passwd sigmond | cut -d: -f1,3,4,7)"
+
+# Add the invoking user to the sigmond group so they can edit
+# /opt/git/sigmond/* as themselves.  $SUDO_USER is set when running via
+# sudo; falls back to $USER for direct-as-root invocations.
+INVOKER="${SUDO_USER:-${USER:-}}"
+if [[ -n "$INVOKER" && "$INVOKER" != "root" ]]; then
+    if ! id -nG "$INVOKER" 2>/dev/null | tr ' ' '\n' | grep -qx sigmond; then
+        info "Adding $INVOKER to sigmond group"
+        $SUDO usermod -aG sigmond "$INVOKER"
+        warn "$INVOKER must log out and back in (or 'newgrp sigmond') for group membership to take effect"
+    else
+        ok "$INVOKER is already in the sigmond group"
+    fi
+fi
+
+# ─── /opt/git/sigmond/ ownership + setgid ───────────────────────────────────
+# Make /opt/git/sigmond/* a group-shared tree:  files are sigmond:sigmond,
+# group has read+write, directories have setgid so newly-created files
+# inherit the sigmond group automatically.
+info "Setting /opt/git/sigmond ownership: sigmond:sigmond + setgid"
+$SUDO chown -R sigmond:sigmond /opt/git/sigmond
+$SUDO chmod -R g+rwX /opt/git/sigmond
+$SUDO find /opt/git/sigmond -type d -exec chmod g+s {} +
+ok "/opt/git/sigmond ownership and permissions set"
+
+# ─── git safe.directory for /opt/git/sigmond/* ──────────────────────────────
+# When sigmond's UID doesn't match the human's UID (the common case — sigmond
+# is a system user, humans are uid 1000+), git refuses to operate with a
+# "dubious ownership" error.  System-wide safe.directory entries scoped to
+# /opt/git/sigmond/* let any user in the sigmond group use git there without
+# per-user config.  We enumerate (rather than use `*`) so the trust scope is
+# bounded.
+info "Adding system-wide git safe.directory entries for /opt/git/sigmond/*"
+for _repo_dir in /opt/git/sigmond/*/; do
+    _repo_dir="${_repo_dir%/}"  # strip trailing slash
+    if ! $SUDO git config --system --get-all safe.directory 2>/dev/null \
+            | grep -Fxq "$_repo_dir"; then
+        $SUDO git config --system --add safe.directory "$_repo_dir"
+    fi
+done
+ok "git safe.directory entries set"
 
 # ─── package manager detection ────────────────────────────────────────────────
 _PKG_MGR=""
