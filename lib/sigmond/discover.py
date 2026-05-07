@@ -121,7 +121,7 @@ def synthesize_catalog_entry(deploy_path: Path):
     # Fall back to the source repo's actual remote when the deploy.toml
     # didn't declare one.  Without this, components like hfdl-recorder /
     # gpsdo-monitor that have a real GitHub remote but no [client] repo=
-    # in their deploy.toml are silently skipped by `smd update`.
+    # in their deploy.toml are silently skipped by `smd list --apply`.
     if not repo:
         try:
             import subprocess as _sp

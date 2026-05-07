@@ -188,7 +188,7 @@ smd --help
 
 ```bash
 # List all available components from the catalog
-sudo smd list --available
+sudo smd list --catalog
 
 # Check service status (all disabled at this point — that's expected)
 sudo smd status
@@ -282,9 +282,9 @@ enabled = true
 | `sudo smd log <client>` | Follow logs for a client |
 | `sudo smd diag` | Run cross-component diagnostics |
 | `sudo smd validate` | Check cross-client harmonization rules |
-| `sudo smd update` | Pull latest code and re-apply |
-| `sudo smd list` | Show configured units |
-| `sudo smd list --available` | Show full component catalog |
+| `smd list` | Show per-component status (git ref, upstream divergence, version policy) |
+| `sudo smd list --apply` | Pull latest code per topology version policy and reapply |
+| `smd list --catalog` | Show full component catalog (what could be installed) |
 
 ---
 
@@ -351,7 +351,7 @@ for d in /opt/git/sigmond/*/; do
 done
 ```
 
-Verify with `sudo smd list --available` — every previously-installed
+Verify with `smd list --catalog` — every previously-installed
 client should still show as installed (the symlinks at
 `/usr/local/bin/<client>` now resolve through the new path).
 

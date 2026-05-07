@@ -609,7 +609,7 @@ class ComponentDetailModal(ModalScreen):
             self.app.push_screen(
                 UpdateOutputModal(
                     title=f"Updating {row.name}",
-                    cmd=['sudo', smd, 'update', '--components', row.name],
+                    cmd=['sudo', smd, 'list', '--apply', '--components', row.name],
                 ),
                 _after_modal,
             )
@@ -831,7 +831,7 @@ class ComponentsScreen(Vertical):
             self.app.push_screen(
                 UpdateOutputModal(
                     title="Update All Components",
-                    cmd=['sudo', smd, 'update'],
+                    cmd=['sudo', smd, 'list', '--apply'],
                 ),
                 _after_modal,
             )

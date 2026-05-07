@@ -20,9 +20,9 @@ class Component:
     enabled: bool = False
     managed: bool = True
     description: str = ""
-    # Version policy for `smd update`:
+    # Version policy honoured by `smd list --apply`:
     #   "latest"  — always pull the newest commit (default)
-    #   "ignore"  — skip this component during updates
+    #   "ignore"  — skip this component (developer mode)
     #   any other — a specific git ref (commit sha, branch, or tag) to pin to
     version: str = "latest"
     rac_id: str = ""        # frpc proxy name, e.g. "AI6VN-0" (RAC tunnel)

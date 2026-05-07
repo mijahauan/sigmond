@@ -105,7 +105,7 @@ class ConfirmModal(ModalScreen[bool]):
 
 
 class UpdateOutputModal(ModalScreen):
-    """Scrollable live-output modal for long-running commands (e.g. smd update, wd-ctl apply).
+    """Scrollable live-output modal for long-running commands (e.g. smd list --apply, wd-ctl apply).
 
     Streams stdout+stderr into a scrollable pane.  The Dismiss button is
     disabled until the command exits so the operator can't accidentally

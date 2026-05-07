@@ -62,7 +62,6 @@ class ComponentTree(Tree):
         operate.add_leaf("\u21c4 Apply",     data={"screen": "apply"})
         operate.add_leaf("\u2a09 FFT Wisdom", data={"screen": "fft_wisdom"})
         operate.add_leaf("+ Software install", data={"screen": "install"})
-        operate.add_leaf("\u2191 Software update", data={"screen": "update"})
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         data = event.node.data
@@ -97,8 +96,6 @@ class ComponentTree(Tree):
             self.app.action_show_lifecycle()
         elif screen == "install":
             self.app.action_show_install()
-        elif screen == "update":
-            self.app.action_show_update()
         elif screen == "rac":
             self.app.action_show_rac()
         elif screen == "backup":

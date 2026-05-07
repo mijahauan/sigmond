@@ -10,10 +10,10 @@ Usage:
     smd stop       [<component> [<instance>]]
     smd restart    [<component> [<instance>]]
     smd reload     [--via=auto|systemd|socket]  [<component>]
-    smd list       [--json]  [--available | --all]  [<component>]
+    smd list       [--apply | --catalog]  [--components C1,C2]  [--ref R]
+                   [--fetch]  [--dry-run]  [--json]
     smd log        [--files | --level LEVEL]  [<client>]
     smd status     [<component>]
-    smd update
     smd diag
     smd environment list|probe|describe    (situational awareness)
 
@@ -3216,142 +3216,6 @@ def cmd_status(args) -> int:
     return 1 if any_bad else 0
 
 
-def cmd_list(args) -> int:
-    show_available = getattr(args, 'available', False)
-    show_all = getattr(args, 'all', False)
-
-    if show_available or show_all:
-        return _list_catalog(args, include_configured=show_all)
-    return _list_configured(args)
-
-
-def _list_catalog(args, *, include_configured: bool) -> int:
-    import json as _json
-
-    try:
-        catalog = load_catalog()
-    except FileNotFoundError as exc:
-        _err(str(exc))
-        return 1
-
-    if args.json:
-        out = []
-        for name, entry in sorted(catalog.items()):
-            d = {
-                'name': entry.name,
-                'kind': entry.kind,
-                'description': entry.description,
-                'repo': entry.repo,
-                'uses': list(entry.uses),
-                'contract': entry.contract,
-                'install_script': entry.install_script,
-                'installed': entry.is_installed(),
-            }
-            out.append(d)
-        print(_json.dumps(out, indent=2))
-    else:
-        servers = [(n, e) for n, e in sorted(catalog.items()) if e.kind == 'server']
-        clients = [(n, e) for n, e in sorted(catalog.items()) if e.kind == 'client']
-        infra   = [(n, e) for n, e in sorted(catalog.items()) if e.kind == 'infra']
-
-        _heading('catalog — available')
-        if servers:
-            print(f'\n  Servers ({len(servers)})')
-            for _, entry in servers:
-                _print_catalog_entry(entry)
-        if clients:
-            print(f'\n  Clients ({len(clients)})')
-            for _, entry in clients:
-                _print_catalog_entry(entry)
-        if infra:
-            print(f'\n  Infra ({len(infra)})')
-            for _, entry in infra:
-                _print_catalog_entry(entry)
-
-    if include_configured:
-        print()
-        return _list_configured(args)
-    return 0
-
-
-def _print_catalog_entry(entry) -> None:
-    installed = entry.is_installed()
-    sym = '✓' if installed else '·'
-    color = '\033[32m' if installed else '\033[90m'
-    contract_tag = f'  contract={entry.contract}' if entry.contract else ''
-    print(f'    {color}{sym}\033[0m  {entry.name:22s} {entry.description}{contract_tag}')
-
-
-def _list_configured(args) -> int:
-    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-    only = _resolve_only_list(args, topology)
-    if only is not None and not only:
-        return 0  # operator named only not-enabled components; already warned
-    enabled = _enabled_components(topology, only)
-
-    try:
-        units = resolve_units(enabled, enabled)
-    except ValueError as exc:
-        _err(f"component resolution failed: {exc}")
-        return 1
-
-    if args.json:
-        import json as _json
-        units_data = []
-        for unit_ref in units:
-            r = _run(['systemctl', 'is-active', unit_ref.unit])
-            state = r.stdout.strip() or 'unknown'
-            units_data.append({
-                'component': unit_ref.component,
-                'unit': unit_ref.unit,
-                'template': unit_ref.template,
-                'instance': unit_ref.instance,
-                'kind': unit_ref.kind,
-                'source': unit_ref.source,
-                'active_state': state,
-                'orphaned': unit_ref.orphaned,
-            })
-        print(_json.dumps(units_data, indent=2))
-    else:
-        # Component-level lifecycle summary — one line per real component.
-        # Drops library-kind entries (synthesized for pip metadata, no repo
-        # to clone, no install steps).  Per-unit detail belongs to
-        # `smd status`, not here.
-        try:
-            from sigmond.catalog import load_catalog
-            from sigmond.component_state import compute_state
-            full_catalog = load_catalog()
-            full_topo = _load_topology(TOPOLOGY_PATH)
-        except Exception:
-            full_catalog = {}
-            full_topo = topology
-
-        _heading('components')
-        for name in sorted(full_catalog):
-            entry = full_catalog[name]
-            # Skip pip-metadata library entries — they're not operator-
-            # facing components, just dependency declarations.
-            if getattr(entry, 'kind', None) == 'library':
-                continue
-            try:
-                state = compute_state(name, full_topo,
-                                      alias=getattr(entry, 'topology_alias', None))
-            except Exception:
-                continue
-            # Color: green if running, yellow if enabled-but-stopped or
-            # configured-but-disabled, dim/uncolored otherwise.
-            if state.active:
-                color = '\033[32m'
-            elif state.enabled or state.configured:
-                color = '\033[33m'
-            else:
-                color = ''
-            reset = '\033[0m' if color else ''
-            print(f'  {color}{name:22s}{reset}  {state.display_status}')
-
-    return 0
-
-
 # ---------------------------------------------------------------------------
 # smd log
 # ---------------------------------------------------------------------------
@@ -3450,24 +3314,329 @@ def cmd_log(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# smd update
+# smd list — unified status surface (formerly `smd list` + `smd update`)
 # ---------------------------------------------------------------------------
 
-def cmd_update(args) -> int:
-    """Pull the latest commit for every installed catalog component.
+def _resolve_repo_dir(name: str, repo_url: str) -> Path | None:
+    """Return the cloned repo path for a catalog entry, or None.
 
-    For each catalog entry that has a repo URL and a clone under /opt/git/sigmond/,
-    runs `git pull --ff-only` (or `git fetch + checkout <ref>` when --ref is
-    given).  radiod is source-only and requires a ka9q-update rebuild to
-    produce a new binary; smd warns rather than silently skipping it.
-    After all pulls, `smd apply` is run to reload any changed systemd units.
+    Sigmond clients live under /opt/git/sigmond/<name>; non-sigmond infra
+    repos (ka9q-radio, ka9q-web, ka9q-python) live in the general /opt/git/
+    space and are matched by the URL stem.
     """
-    if _need_root('update'):
+    primary = Path('/opt/git/sigmond') / name
+    if primary.exists():
+        return primary
+    if repo_url:
+        stem = repo_url.rstrip('/').rsplit('/', 1)[-1].removesuffix('.git')
+        if stem and stem != name:
+            fallback = Path('/opt/git') / stem
+            if fallback.exists():
+                return fallback
+    return None
+
+
+def _git_divergence(repo_dir: Path) -> tuple[str, str, int, int]:
+    """Return (local_short, upstream_short, behind, ahead) for a repo.
+
+    Uses cached upstream refs (no network). Empty strings + zeros if the
+    repo has no upstream branch configured. behind = commits in upstream
+    that are not in HEAD; ahead = commits in HEAD not in upstream.
+    """
+    sd = f'safe.directory={repo_dir}'
+    local = subprocess.run(
+        ['git', '-c', sd, '-C', str(repo_dir), 'rev-parse', '--short', 'HEAD'],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    up_ref = subprocess.run(
+        ['git', '-c', sd, '-C', str(repo_dir),
+         'rev-parse', '--abbrev-ref', '@{u}'],
+        capture_output=True, text=True,
+    )
+    if up_ref.returncode != 0 or not up_ref.stdout.strip():
+        return local, '', 0, 0
+    upstream_name = up_ref.stdout.strip()
+    upstream_sha = subprocess.run(
+        ['git', '-c', sd, '-C', str(repo_dir), 'rev-parse', '--short',
+         upstream_name],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    counts = subprocess.run(
+        ['git', '-c', sd, '-C', str(repo_dir), 'rev-list',
+         '--left-right', '--count', f'{upstream_name}...HEAD'],
+        capture_output=True, text=True,
+    )
+    behind = ahead = 0
+    if counts.returncode == 0 and counts.stdout.strip():
+        try:
+            parts = counts.stdout.strip().split()
+            behind, ahead = int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            pass
+    return local, upstream_sha, behind, ahead
+
+
+def _git_commit_date(repo_dir: Path, ref: str = 'HEAD') -> str:
+    """Short commit date (YYYY-MM-DD) of the given ref, or '' on failure."""
+    sd = f'safe.directory={repo_dir}'
+    r = subprocess.run(
+        ['git', '-c', sd, '-C', str(repo_dir), 'log', '-1',
+         '--format=%cs', ref],
+        capture_output=True, text=True,
+    )
+    return r.stdout.strip() if r.returncode == 0 else ''
+
+
+def _component_statuses(args, *, fetch: bool) -> list[dict]:
+    """Build a status row per catalog component.
+
+    Returns a list of dicts: {name, kind, lifecycle, repo_dir, local,
+    local_date, upstream, upstream_date, behind, ahead, dirty, dirty_reason,
+    policy, verdict}.
+
+    `fetch=True` runs `git fetch --quiet` per repo first so divergence is
+    live; otherwise relies on whatever upstream refs were last cached.
+    """
+    try:
+        catalog = load_catalog()
+    except FileNotFoundError as exc:
+        _err(str(exc))
+        return []
+
+    components_filter: set[str] | None = None
+    if getattr(args, 'components', None):
+        components_filter = {c.strip() for c in args.components.split(',')}
+
+    from sigmond.topology import load_topology as _lib_load_topology
+    topo = _lib_load_topology(
+        Path(args.topology) if args.topology else TOPOLOGY_PATH
+    )
+    try:
+        from sigmond.component_state import compute_state
+    except Exception:
+        compute_state = None
+
+    rows: list[dict] = []
+    for name in sorted(catalog):
+        entry = catalog[name]
+        if components_filter and name not in components_filter:
+            continue
+        # library-kind entries (e.g. ka9q-python) have no systemd units but
+        # do have a repo on disk and a version policy — surface them so the
+        # operator sees git divergence and can target them with --apply.
+
+        comp = topo.components.get(name)
+        policy = (comp.version if comp else 'latest') or 'latest'
+
+        # Lifecycle state via existing component_state module.
+        lifecycle_label = '—'
+        lifecycle_color = ''
+        if compute_state is not None:
+            try:
+                state = compute_state(
+                    name, topo,
+                    alias=getattr(entry, 'topology_alias', None),
+                )
+                lifecycle_label = state.display_status
+                if state.active:
+                    lifecycle_color = '\033[32m'
+                elif state.enabled or state.configured:
+                    lifecycle_color = '\033[33m'
+            except Exception:
+                pass
+
+        repo_dir = _resolve_repo_dir(name, entry.repo)
+        if repo_dir is None:
+            rows.append({
+                'name': name,
+                'kind': getattr(entry, 'kind', ''),
+                'lifecycle': lifecycle_label,
+                'lifecycle_color': lifecycle_color,
+                'repo_dir': None,
+                'local': '',
+                'local_date': '',
+                'upstream': '',
+                'upstream_date': '',
+                'behind': 0,
+                'ahead': 0,
+                'dirty': False,
+                'dirty_reason': '',
+                'policy': policy,
+                'verdict': 'not installed',
+            })
+            continue
+
+        if fetch:
+            subprocess.run(
+                ['git', '-c', f'safe.directory={repo_dir}', '-C',
+                 str(repo_dir), 'fetch', '--quiet'],
+                capture_output=True, text=True,
+            )
+
+        local, upstream, behind, ahead = _git_divergence(repo_dir)
+        local_date = _git_commit_date(repo_dir, 'HEAD')
+        upstream_date = ''
+        if upstream:
+            up_ref = subprocess.run(
+                ['git', '-c', f'safe.directory={repo_dir}', '-C',
+                 str(repo_dir), 'rev-parse', '--abbrev-ref', '@{u}'],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            if up_ref:
+                upstream_date = _git_commit_date(repo_dir, up_ref)
+        dirty, reason = _repo_is_dirty(repo_dir)
+
+        # Verdict ladder — first match wins.
+        if dirty:
+            verdict = f'dirty: {reason}'
+        elif policy == 'ignore':
+            verdict = 'ignored (developer mode)'
+        elif policy != 'latest':
+            # Pinned ref. Drift either direction is a finding.
+            verdict = (f'pinned to {policy}'
+                       if local.startswith(policy[:7]) or local == policy
+                       else f'pinned drift: at {local} (want {policy})')
+        elif behind > 0:
+            verdict = f'{behind} commit{"s" if behind != 1 else ""} behind upstream'
+        elif ahead > 0:
+            verdict = f'{ahead} unpushed commit{"s" if ahead != 1 else ""}'
+        else:
+            verdict = 'up to date'
+
+        rows.append({
+            'name': name,
+            'kind': getattr(entry, 'kind', ''),
+            'lifecycle': lifecycle_label,
+            'lifecycle_color': lifecycle_color,
+            'repo_dir': str(repo_dir),
+            'local': local,
+            'local_date': local_date,
+            'upstream': upstream,
+            'upstream_date': upstream_date,
+            'behind': behind,
+            'ahead': ahead,
+            'dirty': dirty,
+            'dirty_reason': reason or '',
+            'policy': policy,
+            'verdict': verdict,
+        })
+    return rows
+
+
+def _print_status_table(rows: list[dict]) -> None:
+    _heading('components')
+    if not rows:
+        _info('(no components)')
+        return
+    # Two-line block per component for readability — the wide table format
+    # blew up on narrow terminals.  First line: name, lifecycle, verdict,
+    # policy.  Second line (indented): local → upstream commits + dates.
+    for r in rows:
+        name = r['name']
+        col = r['lifecycle_color']
+        reset = '\033[0m' if col else ''
+        # Color the verdict by severity.
+        v = r['verdict']
+        if v == 'up to date' or v.startswith('pinned to '):
+            vcol = '\033[32m'
+        elif v == 'ignored (developer mode)':
+            vcol = '\033[90m'
+        elif v.startswith('dirty:') or 'pinned drift' in v:
+            vcol = '\033[31m'
+        elif 'behind' in v or 'unpushed' in v:
+            vcol = '\033[33m'
+        else:
+            vcol = ''
+        vreset = '\033[0m' if vcol else ''
+        print(f'  {col}{name:22s}{reset} {r["lifecycle"]:18s}'
+              f' {vcol}{v}{vreset}  [{r["policy"]}]')
+        if r['repo_dir']:
+            local = f'{r["local"]} ({r["local_date"]})' if r['local'] else '—'
+            up    = (f'{r["upstream"]} ({r["upstream_date"]})'
+                     if r['upstream'] else '—')
+            print(f'    {"":22s} {local}  →  {up}')
+
+
+def _print_action_hint(rows: list[dict]) -> None:
+    needs_apply = [r for r in rows
+                   if r['repo_dir'] and not r['dirty']
+                   and r['policy'] != 'ignore'
+                   and (r['behind'] > 0 or
+                        (r['policy'] != 'latest' and 'pinned drift' in r['verdict']))]
+    if needs_apply:
+        names = ', '.join(r['name'] for r in needs_apply)
+        print()
+        _info(f'{len(needs_apply)} component(s) have updates available: {names}')
+        _info('run: sudo smd list --apply  (preview: sudo smd list --apply --dry-run)')
+
+
+def _emit_status_json(rows: list[dict]) -> int:
+    import json as _json
+    print(_json.dumps(rows, indent=2))
+    return 0
+
+
+def _print_catalog(args) -> int:
+    """Catalog of known clients (replaces old `smd list --available`)."""
+    import json as _json
+    try:
+        catalog = load_catalog()
+    except FileNotFoundError as exc:
+        _err(str(exc))
         return 1
 
-    dry_run  = getattr(args, 'dry_run', False)
-    ref      = getattr(args, 'ref', None)
+    if getattr(args, 'json', False):
+        out = []
+        for name, entry in sorted(catalog.items()):
+            out.append({
+                'name': entry.name,
+                'kind': entry.kind,
+                'description': entry.description,
+                'repo': entry.repo,
+                'uses': list(entry.uses),
+                'contract': entry.contract,
+                'install_script': entry.install_script,
+                'installed': entry.is_installed(),
+            })
+        print(_json.dumps(out, indent=2))
+        return 0
 
+    def _print_entry(entry):
+        sym = '✓' if entry.is_installed() else '·'
+        col = '\033[32m' if entry.is_installed() else '\033[90m'
+        contract_tag = f'  contract={entry.contract}' if entry.contract else ''
+        print(f'    {col}{sym}\033[0m  {entry.name:22s} {entry.description}{contract_tag}')
+
+    servers = [(n, e) for n, e in sorted(catalog.items()) if e.kind == 'server']
+    clients = [(n, e) for n, e in sorted(catalog.items()) if e.kind == 'client']
+    infra   = [(n, e) for n, e in sorted(catalog.items()) if e.kind == 'infra']
+
+    _heading('catalog — known clients')
+    if servers:
+        print(f'\n  Servers ({len(servers)})')
+        for _, e in servers: _print_entry(e)
+    if clients:
+        print(f'\n  Clients ({len(clients)})')
+        for _, e in clients: _print_entry(e)
+    if infra:
+        print(f'\n  Infra ({len(infra)})')
+        for _, e in infra: _print_entry(e)
+    return 0
+
+
+def _apply_updates(args, rows: list[dict]) -> int:
+    """Pull each catalog repo per its version policy, then run `smd apply`.
+
+    This is the action half of `smd list` — invoked when --apply is given.
+    Honors per-component version from topology.toml: 'ignore' is skipped,
+    pinned refs are checked out, 'latest' (or absent) does ff-only pull.
+    --ref overrides the policy.  Refuses to clobber dirty repos.
+    """
+    if _need_root('list --apply'):
+        return 1
+
+    dry_run = getattr(args, 'dry_run', False)
+    ref = getattr(args, 'ref', None)
     components_filter: set[str] | None = None
     if getattr(args, 'components', None):
         components_filter = {c.strip() for c in args.components.split(',')}
@@ -3478,22 +3647,22 @@ def cmd_update(args) -> int:
         _err(str(exc))
         return 1
 
-    errors   = 0
-    pulled   = 0   # count of repos whose HEAD actually advanced
-    opt_git  = Path('/opt/git/sigmond')
-
-    # Load topology once using the library object API (version field required).
     from sigmond.topology import load_topology as _lib_load_topology
-    _topo_obj = _lib_load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    _topo_obj = _lib_load_topology(
+        Path(args.topology) if args.topology else TOPOLOGY_PATH
+    )
 
-    # --- sigmond self-update (only on full update, not component-targeted) ---
+    errors = 0
+    pulled = 0  # count of repos whose HEAD actually advanced
+
+    # --- sigmond self-update (only on full apply, not component-targeted) ---
     if not components_filter:
         sigmond_dir = Path(__file__).resolve().parent.parent
         if (sigmond_dir / '.git').exists():
             dirty, reason = _repo_is_dirty(sigmond_dir)
             if dirty:
                 _warn(f'sigmond: skipping pull — {reason}')
-                _warn('         commit, stash, or push before running smd update')
+                _warn('         commit, stash, or push before running smd list --apply')
             elif dry_run:
                 _info('sigmond: (dry-run) would pull and sync catalog')
             else:
@@ -3511,7 +3680,6 @@ def cmd_update(args) -> int:
                         pulled += 1
                     else:
                         _ok(f'sigmond: up to date ({after})')
-                # Sync catalog only if its bytes differ — silent no-op otherwise.
                 catalog_src = sigmond_dir / 'etc' / 'catalog.toml'
                 catalog_dst = Path('/etc/sigmond/catalog.toml')
                 if catalog_src.exists():
@@ -3524,7 +3692,6 @@ def cmd_update(args) -> int:
                     except Exception as _exc:
                         _warn(f'sigmond: could not sync catalog: {_exc}')
 
-    # --- pull each installed catalog repo ---
     for name in sorted(catalog):
         entry = catalog[name]
         if components_filter and name not in components_filter:
@@ -3532,40 +3699,26 @@ def cmd_update(args) -> int:
         if not entry.repo:
             continue
 
-        repo_dir = opt_git / name
-        if not repo_dir.exists():
-            # Non-sigmond infra repos (e.g. catalog 'radiod' → repo at
-            # /opt/git/ka9q-radio) live in the general-use /opt/git/
-            # space, not the sigmond namespace.  Fall back to url-stem.
-            if entry.repo:
-                stem = entry.repo.rstrip('/').rsplit('/', 1)[-1].removesuffix('.git')
-                if stem and stem != name:
-                    fallback = Path('/opt/git') / stem
-                    if fallback.exists():
-                        repo_dir = fallback
-        if not repo_dir.exists():
-            # Not installed; skip silently unless explicitly requested.
+        repo_dir = _resolve_repo_dir(name, entry.repo)
+        if repo_dir is None:
             if components_filter:
-                _warn(f'{name}: not found at {repo_dir} — install first with: smd install {name}')
+                _warn(f'{name}: not installed — install first with: smd install {name}')
             continue
 
-        # Respect the per-component version policy from topology.toml.
         comp = _topo_obj.components.get(name)
         comp_version = (comp.version if comp else 'latest') or 'latest'
-        effective_ref = ref  # --ref flag overrides topology setting
+        effective_ref = ref
         if effective_ref is None:
             if comp_version == 'ignore':
                 _info(f'{name}: version = ignore — skipping')
                 continue
             elif comp_version != 'latest':
-                effective_ref = comp_version  # pinned ref from topology
+                effective_ref = comp_version
 
-        # Refuse to pull over uncommitted work or unpushed local commits.
-        # _clone_repo's `git checkout -B main origin/main` would discard them.
         dirty, reason = _repo_is_dirty(repo_dir)
         if dirty:
             _warn(f'{name}: skipping pull — {reason}')
-            _warn(f'         commit, stash, or push in {repo_dir} before running smd update')
+            _warn(f'         commit, stash, or push in {repo_dir} before running smd list --apply')
             continue
 
         before = _git_head_ref(repo_dir) if not dry_run else '?'
@@ -3596,10 +3749,6 @@ def cmd_update(args) -> int:
         _info('(dry-run) no changes made')
         return 0
 
-    # --- apply: only reload systemd units when something was actually pulled.
-    # On a no-op update there's nothing to reconcile and apply would just
-    # produce an empty heading + summary.  Operators can still run `sudo
-    # smd apply` directly when they need to force reconciliation.
     if pulled > 0:
         args.dry_run = False
         apply_rc = cmd_apply(args)
@@ -3607,10 +3756,44 @@ def cmd_update(args) -> int:
             errors += 1
 
     if errors:
-        _warn(f'update finished with {errors} error(s)')
+        _warn(f'apply finished with {errors} error(s)')
         return 1
     _ok('all components up to date')
     return 0
+
+
+def cmd_list(args) -> int:
+    """Unified status surface: per-component lifecycle + git state + version policy.
+
+    Default (no flags): print the status table — read-only, safe to run as
+    any user.  Adds an action hint at the bottom if anything is updatable.
+
+    Flags:
+      --apply     Pull + reconcile (the old `smd update`). Requires root.
+      --catalog   Show the catalog of known clients (was `smd list --available`).
+      --fetch     Run `git fetch` per repo before computing divergence.
+      --json      Machine-readable output of the chosen mode.
+      --components C1,C2  Restrict to these components.
+      --ref R     With --apply: force a specific ref.
+      --dry-run   With --apply: preview without making changes.
+    """
+    if getattr(args, 'catalog', False):
+        return _print_catalog(args)
+
+    fetch = getattr(args, 'fetch', False)
+    rows = _component_statuses(args, fetch=fetch)
+
+    if getattr(args, 'json', False):
+        return _emit_status_json(rows)
+
+    _print_status_table(rows)
+
+    if not getattr(args, 'apply', False):
+        _print_action_hint(rows)
+        return 0
+
+    print()
+    return _apply_updates(args, rows)
 
 
 # ---------------------------------------------------------------------------
@@ -3937,7 +4120,7 @@ _smd_complete() {
         cword=$COMP_CWORD
     }
 
-    local top_cmds="install apply start stop status restart reload list log update diag validate config tui completion"
+    local top_cmds="install apply start stop status restart reload list log diag validate config tui completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -3980,13 +4163,10 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "$components --components --via --topology" -- "$cur"))
                     ;;
                 list)
-                    COMPREPLY=($(compgen -W "--json --available --all --components --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "--apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
                     ;;
                 log)
                     COMPREPLY=($(compgen -W "$log_clients --files --level --topology" -- "$cur"))
-                    ;;
-                update)
-                    COMPREPLY=($(compgen -W "$components --components --ref --dry-run --topology" -- "$cur"))
                     ;;
                 diag)
                     COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
@@ -4020,13 +4200,10 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "$components --components --via --topology" -- "$cur"))
                     ;;
                 list)
-                    COMPREPLY=($(compgen -W "--json --available --all --components --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "--apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
                     ;;
                 log)
                     COMPREPLY=($(compgen -W "$log_clients --files --level --topology" -- "$cur"))
-                    ;;
-                update)
-                    COMPREPLY=($(compgen -W "$components --components --ref --dry-run --topology" -- "$cur"))
                     ;;
                 diag)
                     case "${words[2]}" in
@@ -4470,16 +4647,28 @@ def main() -> int:
     p.add_argument('--via', choices=['auto', 'systemd', 'socket'], default='auto',
                    help='routing strategy for reload (default: auto)')
 
-    # list (NEW)
-    p = sub.add_parser('list', help='list resolved units for components')
-    p.add_argument('--components', metavar='C1,C2')
+    # list — unified status surface (was: smd list + smd update)
+    p = sub.add_parser('list',
+                       help='show component status (lifecycle + git + version policy); '
+                            '--apply pulls and re-applies updates')
+    p.add_argument('--components', metavar='C1,C2',
+                   help='comma-separated subset of components')
+    p.add_argument('--catalog', action='store_true',
+                   help='show catalog of known clients (what could be installed)')
+    p.add_argument('--apply', action='store_true',
+                   help='pull latest code per topology version policy and reapply '
+                        '(was: smd update; requires root)')
+    p.add_argument('--fetch', action='store_true',
+                   help='run `git fetch` per repo before computing divergence '
+                        '(default: use cached upstream refs)')
+    p.add_argument('--ref', metavar='COMMIT_OR_BRANCH',
+                   help='with --apply: force a specific git ref instead of '
+                        'using each component\'s topology version policy')
+    p.add_argument('--dry-run', action='store_true',
+                   help='with --apply: preview what would be pulled without '
+                        'making changes')
     p.add_argument('--json', action='store_true',
                    help='emit machine-readable JSON')
-    list_scope = p.add_mutually_exclusive_group()
-    list_scope.add_argument('--available', action='store_true',
-                            help='show catalog of known clients (what could be installed)')
-    list_scope.add_argument('--all', action='store_true',
-                            help='show catalog + configured units together')
 
     # log
     p = sub.add_parser('log', help='view logs or set log level for a client')
@@ -4489,15 +4678,6 @@ def main() -> int:
                    help='tail file logs from inventory log_paths instead of journal')
     p.add_argument('--level', metavar='LEVEL',
                    help='set log level (DEBUG/INFO/WARNING/ERROR/CRITICAL) in coordination.env + SIGHUP')
-
-    # update
-    p = sub.add_parser('update', help='pull latest code for all installed components and re-apply')
-    p.add_argument('--components', metavar='C1,C2',
-                   help='comma-separated subset of components to update (default: all installed)')
-    p.add_argument('--ref', metavar='COMMIT_OR_BRANCH',
-                   help='git ref to check out (default: latest on current branch)')
-    p.add_argument('--dry-run', action='store_true',
-                   help='show what would be updated without making changes')
 
     # diag  (with its own sub-commands)
     p_diag = sub.add_parser('diag', help='run cross-component diagnostics')
@@ -4660,7 +4840,6 @@ def main() -> int:
         'list':    cmd_list,
         'log':     cmd_log,
         'status':  cmd_status,
-        'update':  cmd_update,
         'tui':     cmd_tui,
     }
 

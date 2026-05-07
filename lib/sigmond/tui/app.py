@@ -277,17 +277,19 @@ class SigmondApp(App):
         center.mount(ComponentsScreen(self.topology.components))
 
         self.query_one(ContextPanel).show_help(
-            "Software versions",
-            "Every catalog component with its install status, "
-            "current git ref, and version policy.\n\n"
+            "List",
+            "Every catalog component with its install status, current "
+            "git ref, divergence from upstream, and version policy.\n\n"
             "Version policies:\n"
             "  latest — always pull the newest commit\n"
-            "  ignore — skip during smd update\n"
+            "  ignore — skip when applying updates (developer mode)\n"
             "  <ref>  — pin to a specific commit / branch\n\n"
             "Select a row to see the recent git history for that "
             "component, then use the buttons to change its policy.\n\n"
             "Changes are written to /etc/sigmond/topology.toml "
-            "(requires write permission — run sudo smd tui if needed).",
+            "(requires write permission — run sudo smd tui if needed).\n\n"
+            "CLI equivalent: `smd list` (status); `sudo smd list --apply` "
+            "(pull + reapply per policy).",
         )
 
     def action_show_topology(self) -> None:
@@ -727,21 +729,9 @@ class SigmondApp(App):
             "CLI equivalent: `smd ka9q-watch`.",
         )
 
+    # The old action_show_update mounted a duplicate UpdateScreen.  The
+    # List screen (action_show_components) now does both display and
+    # apply, so this action is just an alias kept so existing keybindings
+    # and component_tree clicks keep working.
     def action_show_update(self) -> None:
-        from .screens.update import UpdateScreen
-        center = self.query_one("#center")
-        center.remove_children()
-        center.mount(UpdateScreen(self.topology.components))
-
-        self.query_one(ContextPanel).show_help(
-            "Update",
-            "Pull the latest code for every installed catalog component.\n\n"
-            "Update selected — pull one component by name.\n"
-            "Update all — pull all components whose policy is not 'ignore'.\n"
-            "Dry run — preview what would change without touching anything.\n\n"
-            "Version policies (set under Configure → Software versions):\n"
-            "  latest — always pull newest commit (default)\n"
-            "  ignore — skip this component during updates\n"
-            "  <ref>  — pin to a specific commit / branch / tag\n\n"
-            "Equivalent to `sudo smd update [--components <name>]`.",
-        )
+        self.action_show_components()

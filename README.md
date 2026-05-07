@@ -65,7 +65,7 @@ sudo /opt/git/sigmond/bin/smd install
 ### 2. See what's available
 
 ```bash
-smd list --available
+smd list --catalog
 ```
 
 ```
@@ -146,7 +146,9 @@ The TUI provides:
 - **Validate screen** — cross-client harmonization checks
 - **Lifecycle screen** — start/stop/restart services
 - **Apply screen** — reconcile services with current config
-- **Update screen** — pull latest code and re-apply
+- **List (Software versions) screen** — per-component status (git ref,
+  upstream divergence, version policy) with Update All / per-component
+  update buttons; replaces the old separate Update screen
 - **Backup/Restore screens** — backup and restore configuration
 
 Keybindings: `t` = topology, `i` = install, `v` = validate, `q` = quit
@@ -185,7 +187,9 @@ and any issues.
 | `smd restart [--components X]` | Restart with reset-failed |
 | `smd reload [--components X]` | Reload via SIGHUP or restart |
 | `smd status [--components X]` | Service health + client inventory |
-| `smd list [--available]` | Configured units, or catalog of known clients |
+| `smd list` | Per-component status: lifecycle + git ref + upstream divergence + version policy |
+| `smd list --apply` | Pull and reapply per topology version policy (was `smd update`; root) |
+| `smd list --catalog` | Catalog of known clients (what could be installed) |
 | `smd log <client>` | Follow systemd journal for a client |
 | `smd log <client> --files` | Tail the client's file logs |
 | `smd log --level DEBUG <client>` | Set log level + SIGHUP (no restart) |
@@ -193,7 +197,6 @@ and any issues.
 | `smd validate` | Cross-client harmonization rules |
 | `smd config show` | Dump effective coordination config |
 | `smd apply` | Reconcile services with current config |
-| `smd update` | Pull latest code and re-apply |
 | `smd environment list|probe|describe` | Situational awareness of network peers |
 
 All lifecycle commands (`start`, `stop`, `restart`, `reload`, `status`,
@@ -283,7 +286,7 @@ and timing chain verification.
 
 ```bash
 # See what's available
-smd list --available
+smd list --catalog
 
 # Install it
 sudo smd install wspr-recorder

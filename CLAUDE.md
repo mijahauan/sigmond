@@ -28,7 +28,11 @@ smd start                Start all managed services
 smd stop                 Stop all managed services
 smd restart              Restart managed services (with reset-failed)
 smd reload               Reload via signal or restart (auto-routing)
-smd list [--available]   List configured units, or catalog of known clients
+smd list                 Per-component status: lifecycle + git ref + upstream
+                         divergence + version policy + verdict.
+smd list --apply         Pull and reconcile per topology version policy
+                         (was the separate `smd update`). Requires root.
+smd list --catalog       Show catalog of known clients (was --available).
 smd log <client>         Follow journal, tail file logs, or set log level
 smd status               Service health + client inventory enrichment
 smd config show|migrate  Inspect or migrate coordination config
@@ -39,7 +43,6 @@ smd config init radiod   Sigmond-owned wizard: probe USB, render radiod@<id>.con
 smd validate             Cross-client harmonization rules (read-only)
 smd ka9q-watch           Compare pinned ka9q-radio commit vs upstream and
                          flag changes that would break RTP delivery
-smd update               Pull latest code and re-apply
 smd diag                 Network + deps + client validation diagnostics
 smd tui                  Launch interactive TUI configurator
 smd environment list|probe|describe   Situational awareness of network peers
@@ -76,7 +79,7 @@ smd environment list|probe|describe   Situational awareness of network peers
 
 8. **Lifecycle lock** (`lib/sigmond/lifecycle.py`, contract v0.5 §5.5) —
    flock-based mutual exclusion on `/var/lib/sigmond/lifecycle.lock`.
-   Mutating verbs (install, apply, start, stop, restart, reload, update)
+   Mutating verbs (install, apply, start, stop, restart, reload, list --apply)
    acquire the lock; read-only verbs (list, status, log, diag) are lock-free.
 
 9. **Start ordering** (`lib/sigmond/lifecycle.py`, contract v0.5 §5.4) —
@@ -90,7 +93,7 @@ smd environment list|probe|describe   Situational awareness of network peers
 11. **TUI configurator** (`lib/sigmond/tui/`, Textual) — three-panel layout
     accessed via `smd tui`. Left: component tree with health indicators.
     Center: various screens (topology, install, logs, validate, cpu_affinity,
-    cpu_freq, environment, gpsdo, lifecycle, apply, update, backup, restore).
+    cpu_freq, environment, gpsdo, lifecycle, apply, components, backup, restore).
     Right: contextual help. Textual is a lazy import; core smd stays stdlib-only.
 
 12. **Environment discovery** (`lib/sigmond/commands/environment.py`,
@@ -120,7 +123,9 @@ smd environment list|probe|describe   Situational awareness of network peers
 - **Validate** — cross-client harmonization checks
 - **Lifecycle** — start/stop/restart services
 - **Apply** — reconcile services with current config
-- **Update** — pull latest code and re-apply
+- **List (Software versions)** — per-component status (git ref, upstream
+  divergence, version policy) with Update All / per-component update
+  buttons; replaces the old separate Update screen.
 - **Backup/Restore** — backup and restore configuration
 - **RAC** — Remote Access Channel (frpc tunnel) configuration
 - **Config show** — dump effective coordination config
