@@ -20,6 +20,15 @@ install_script  = ""                                  # built from source via de
 topology_alias  = "ka9q-radio"                        # legacy topology.toml name
 start_priority  = 0                                   # always start first
 
+[client.clickhouse]
+kind            = "server"
+description     = "Local ClickHouse staging tier (CONTRACT §17 sinks)"
+repo            = "https://github.com/mijahauan/sigmond-clickhouse"
+uses            = []
+contract        = "0.6"
+install_script  = "/opt/git/sigmond/clickhouse/scripts/install.sh"
+start_priority  = 50                                  # after radiod, before clients
+
 [client.wspr-recorder]
 kind            = "client"
 description     = "WSPR/FST4W audio recorder (period-aligned WAVs)"

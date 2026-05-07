@@ -56,6 +56,34 @@ reserved_cpus         = ""
 owns_timestd_affinity = true
 
 # ---------------------------------------------------------------------------
+# Local storage tier.  Optional.  When [storage.clickhouse] is present,
+# sigmond installs and manages a local ClickHouse server (see
+# /opt/git/sigmond/clickhouse) and exports SIGMOND_CLICKHOUSE_* into
+# coordination.env so contract-§17 clients can write structured rows.
+# Omit this section entirely on hosts that should stay file-only.
+# ---------------------------------------------------------------------------
+
+# [storage.clickhouse]
+# host                  = "localhost"      # mirrors radiod's local-vs-LAN pattern
+# http_port             = 8123
+# native_port           = 9000
+# listen                = "loopback"       # or "lan"
+# user                  = "sigmond"
+# password_file         = "/etc/sigmond/secrets/clickhouse-sigmond.pass"
+# default_retention_days = 30
+# per_mode_retention    = { wspr = 90, psk = 14, hfdl = 14, codar = 30, timestd = 60 }
+
+# Example of a LAN-shared ClickHouse on a peer host.  Sigmond does not
+# install or tune the remote server in this mode; it only publishes the
+# resolved URL into coordination.env so local clients can reach it.
+# [storage.clickhouse]
+# host          = "shack.local"
+# http_port     = 8123
+# listen        = "lan"
+# user          = "sigmond"
+# password_file = "/etc/sigmond/secrets/clickhouse-sigmond.pass"
+
+# ---------------------------------------------------------------------------
 # Client instance registry.
 #
 # Each [[clients.<type>]] entry is one instance.  The instance name

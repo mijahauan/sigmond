@@ -26,9 +26,17 @@ class TestLoadCatalog:
     def test_repo_default_loads(self):
         entries = load_catalog(REPO_CATALOG)
         assert set(entries.keys()) == {
-            'radiod', 'wspr-recorder', 'psk-recorder', 'hf-timestd',
+            'radiod', 'clickhouse',
+            'wspr-recorder', 'psk-recorder', 'hf-timestd',
             'wsprdaemon-client',
         }
+
+    def test_clickhouse_server_entry(self):
+        entries = load_catalog(REPO_CATALOG)
+        ch = entries['clickhouse']
+        assert ch.kind == 'server'
+        assert ch.contract == '0.6'
+        assert ch.start_priority == 50
 
     def test_entry_fields_populated(self):
         entries = load_catalog(REPO_CATALOG)
