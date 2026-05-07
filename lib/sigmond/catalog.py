@@ -82,7 +82,7 @@ class CatalogEntry:
             try:
                 if importlib.util.find_spec(import_name) is not None:
                     return True
-            except (ImportError, ValueError):
+            except (ImportError, ValueError, PermissionError, OSError):
                 pass
             # Dev siblings: `git clone` location before packaging.
             # Use os.path.lexists so test monkeypatches that stub out
