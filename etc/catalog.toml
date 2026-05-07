@@ -10,14 +10,14 @@
 # auto-discovered (e.g. a server with no /opt/git/sigmond/ checkout) or to record
 # an operator-specific override.
 
-[client.radiod]
+[client.ka9q-radio]
 kind            = "server"
 description     = "ka9q-radio SDR daemon — receives and multicasts RF channels"
 repo            = "https://github.com/ka9q/ka9q-radio"
 uses            = []
 contract        = ""                                  # not contract-conformant
-install_script  = ""                                  # built from source via deps.conf
-topology_alias  = "ka9q-radio"                        # legacy topology.toml name
+install_script  = ""                                  # built natively (apt deps + make install)
+topology_alias  = "radiod"                            # systemd service name; legacy topology key
 start_priority  = 0                                   # always start first
 
 [client.clickhouse]

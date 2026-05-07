@@ -532,25 +532,36 @@ def _install_pypi_dep(section: str, dcfg: configparser.ConfigParser,
     return True
 
 
-def _build_ka9q_radio(src_dir: Path) -> bool:
+def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
     binary = Path('/usr/local/sbin/radiod')
-    # Check if installed binary matches built binary
     built = src_dir / 'src' / 'radiod'
-    if binary.exists() and built.exists():
+    if not force and binary.exists() and built.exists():
         import hashlib
         def _sha(p):
             return hashlib.sha256(p.read_bytes()).hexdigest()
         if _sha(binary) == _sha(built):
-            _ok('ka9q-radio: already installed and current')
+            _ok('ka9q-radio: already installed and current  (use --force to rebuild)')
             return True
 
+    # Disable Fobos and HydraSDR front-ends by default: their userspace
+    # libs (libfobos, libhydrasdr) aren't in Debian/Ubuntu apt, so the
+    # default build fails on `fobos.h: No such file or directory`.
+    # Operators with those rigs should build the libs from source first,
+    # then rebuild ka9q-radio manually with these flags omitted.
+    build_flags = ['ENABLE_FOBOS=0', 'ENABLE_HYDRASDR=0']
+
+    if force:
+        _info('--force: running `make clean` before rebuild')
+        _run(['make', 'clean'], cwd=str(src_dir), capture=False)
+
     nproc = str(os.cpu_count() or 2)
-    _info(f'Building ka9q-radio (make -j{nproc}) ...')
-    r = _run(['make', f'-j{nproc}'], cwd=str(src_dir), capture=False)
+    _info(f'Building ka9q-radio (make -j{nproc} {" ".join(build_flags)}) ...')
+    r = _run(['make', f'-j{nproc}', *build_flags],
+             cwd=str(src_dir), capture=False)
     if r is None or (hasattr(r, 'returncode') and r.returncode != 0):
         _err('ka9q-radio build failed')
         return False
-    r = _run(['make', 'install'], cwd=str(src_dir), sudo=True)
+    r = _run(['make', 'install', *build_flags], cwd=str(src_dir), sudo=True)
     if r.returncode != 0:
         _err(f'ka9q-radio install failed: {r.stderr.strip()}')
         return False
@@ -1643,8 +1654,9 @@ def _install_single_client(args) -> int:
             topology = _load_topology(TOPOLOGY_PATH)
             return 0 if _install_wd_rac(topology, dry_run, yes=yes) else 1
         _err(f"'{entry.name}' has no install_script in the catalog")
-        if entry.name in ('ka9q-radio', 'ka9q-web'):
-            _info(f"ka9q-radio/ka9q-web are built via ka9q-update; use: smd install  (full suite)")
+        if entry.name == 'ka9q-radio':
+            _info(f"{entry.name} is built natively by sigmond (apt deps + make install); "
+                  f"use: smd install --components ka9q-radio --yes")
         return 1
 
     _heading(f'install {entry.name}')
@@ -1716,10 +1728,16 @@ def _install_full_suite(args) -> int:
         _err(str(exc))
         return 1
 
-    # Classify components into catalog-driven vs. ka9q-update.
+    # Classify components into catalog-driven vs. native C-build.
     catalog_queue = []    # CatalogEntry objects with install_script
-    ka9q_update_needed = False
+    radiod_needed = False
     unknown = []
+
+    # C projects without install_script — built natively by sigmond
+    # (apt-install build deps + make install).  Today only ka9q-radio
+    # goes through this path; 'radiod' (the systemd service name) is a
+    # topology_alias for the same entry and resolves via get_entry().
+    C_BUILD_NAMES = ('ka9q-radio',)
 
     for comp in components:
         entry = get_entry(comp, catalog)
@@ -1728,8 +1746,8 @@ def _install_full_suite(args) -> int:
             continue
         if entry.install_script:
             catalog_queue.append(entry)
-        elif entry.name in ('ka9q-radio', 'ka9q-web'):
-            ka9q_update_needed = True
+        elif entry.name in C_BUILD_NAMES:
+            radiod_needed = True
         elif entry.kind in ('library', 'infra') and not entry.install_script:
             # Handled by sigmond itself (e.g. ka9q-python via venv, wd-rac via _install_frpc).
             pass
@@ -1738,21 +1756,15 @@ def _install_full_suite(args) -> int:
 
     # --- Show install plan ---
     _heading('install plan')
-    if ka9q_update_needed:
-        c_names = [e.name for e in sorted(catalog.values(), key=lambda e: e.name)
-                   if e.name in ('ka9q-radio', 'ka9q-web')
-                   and e.name in [get_entry(c, catalog).name
-                                  for c in components
-                                  if get_entry(c, catalog) and not get_entry(c, catalog).install_script
-                                  and get_entry(c, catalog).name in ('ka9q-radio', 'ka9q-web')]]
-        _info(f'ka9q-update:  {", ".join(c_names) or "ka9q-radio + ka9q-web"}')
+    if radiod_needed:
+        _info('native:       radiod  (apt deps + make install)')
     for entry in catalog_queue:
         _info(f'catalog:      {entry.name:22s} → {entry.install_script}')
     for comp in unknown:
         _warn(f'unknown:      {comp} (not in catalog, skipping)')
 
     wd_rac_needed = 'wd-rac' in components
-    if not catalog_queue and not ka9q_update_needed and not wd_rac_needed:
+    if not catalog_queue and not radiod_needed and not wd_rac_needed:
         _warn('nothing to install')
         return 0
     if wd_rac_needed:
@@ -1779,10 +1791,10 @@ def _install_full_suite(args) -> int:
         _warn('TUI venv setup failed — smd tui will not work')
         errors += 1
 
-    # --- 2. C projects via ka9q-update ---
-    if ka9q_update_needed:
-        _heading('ka9q-update (radiod + ka9q-web)')
-        if not _install_via_ka9q_update():
+    # --- 2. radiod (C build, sigmond-native) ---
+    if radiod_needed:
+        _heading('ka9q-radio (apt deps + make install)')
+        if not _install_radiod_native(catalog, force=getattr(args, 'force', False)):
             errors += 1
 
     # --- 3. Catalog-driven clients ---
@@ -1852,35 +1864,71 @@ def _install_full_suite(args) -> int:
     return 0
 
 
-# ka9q-update paths — searched in order.
-_KA9Q_UPDATE_CANDIDATES = [
-    Path('/home/mjh/git/ka9q-update'),
-    Path('/opt/git/ka9q-update'),
-]
+# ka9q-radio (radiod) build deps, mirrored from upstream docs/INSTALL.md
+# at https://github.com/ka9q/ka9q-radio.  Update if upstream's prereq list
+# changes — sigmond now owns this recipe directly rather than delegating
+# to an external ka9q-update wrapper.
+_RADIOD_APT_DEPS = (
+    'git', 'avahi-utils', 'build-essential', 'make', 'gcc',
+    'libairspy-dev', 'libairspyhf-dev', 'libavahi-client-dev',
+    'libbsd-dev', 'libfftw3-dev', 'libhackrf-dev',
+    'libiniparser-dev', 'libncurses5-dev', 'libncursesw5-dev',
+    'libopus-dev', 'librtlsdr-dev', 'libusb-1.0-0-dev', 'libusb-dev',
+    'portaudio19-dev', 'libasound2-dev', 'uuid-dev', 'rsync',
+    'libogg-dev', 'libsamplerate-dev', 'libliquid-dev',
+    'libbladerf-dev',
+)
+_RADIOD_PI_EXTRA = ('libpigpio-dev',)
 
 
-def _find_ka9q_update() -> Path | None:
-    """Locate the ka9q-update repo."""
-    for p in _KA9Q_UPDATE_CANDIDATES:
-        script = p / 'install-ka9q.sh'
-        if script.exists():
-            return script
-    return None
-
-
-def _install_via_ka9q_update() -> bool:
-    """Delegate radiod + ka9q-web build/install to ka9q-update."""
-    script = _find_ka9q_update()
-    if script is None:
-        _err('ka9q-update not found — install it to /opt/git/ka9q-update')
-        _info('  git clone https://github.com/mijahauan/ka9q-update /opt/git/ka9q-update')
+def _is_raspberry_pi() -> bool:
+    """True if /proc/device-tree/model identifies this host as a Raspberry Pi."""
+    try:
+        return Path('/proc/device-tree/model').read_bytes().startswith(b'Raspberry Pi')
+    except OSError:
         return False
-    _info(f'running {script} /opt/git ...')
-    r = _run([str(script), '/opt/git'], capture=False, sudo=True)
-    if r.returncode != 0:
-        _err('ka9q-update install-ka9q.sh failed')
+
+
+def _install_radiod_deps() -> bool:
+    """apt-install the build-deps required by ka9q-radio."""
+    deps = list(_RADIOD_APT_DEPS)
+    if _is_raspberry_pi():
+        deps.extend(_RADIOD_PI_EXTRA)
+    _info(f'apt: ensuring {len(deps)} build deps for ka9q-radio…')
+    r = _run(['apt-get', 'install', '-y'] + deps, sudo=True, capture=False)
+    if r is None or (hasattr(r, 'returncode') and r.returncode != 0):
+        _err('failed to install ka9q-radio build deps via apt')
         return False
-    _ok('ka9q-update: radiod + ka9q-web installed')
+    _ok(f'apt deps for ka9q-radio installed ({len(deps)} packages)')
+    return True
+
+
+def _install_radiod_native(catalog, *, force: bool = False) -> bool:
+    """Install ka9q-radio natively under /opt/git/sigmond/radiod.
+
+    Recipe (mirrors github.com/ka9q/ka9q-radio docs/INSTALL.md):
+      1. apt-install the build deps in _RADIOD_APT_DEPS
+      2. clone (or pull if cloned) ka9q-radio via the catalog
+      3. make -j<nproc>  +  sudo make install   (via _build_ka9q_radio)
+      4. start any radiod@ instances declared in /etc/systemd
+
+    `force=True` triggers a `make clean` and bypasses the
+    "binary already current" short-circuit so the operator can rebuild
+    after changing apt deps or build flags.
+    """
+    entry = get_entry('ka9q-radio', catalog)
+    if entry is None:
+        _err('ka9q-radio not in catalog — cannot determine repo URL')
+        return False
+    if not _install_radiod_deps():
+        return False
+    try:
+        src_dir = _clone_repo(entry, pull_if_exists=True)
+    except RuntimeError as exc:
+        _err(f'ka9q-radio clone failed: {exc}')
+        return False
+    if not _build_ka9q_radio(src_dir, force=force):
+        return False
     _ensure_radiod_running()
     return True
 
@@ -4662,6 +4710,9 @@ def main() -> int:
                    help='show what would be done without making changes')
     p.add_argument('--yes', '-y', action='store_true',
                    help='accept defaults, no interactive prompts')
+    p.add_argument('--force', '-f', action='store_true',
+                   help='rebuild/reinstall even if the binary appears current '
+                        '(skips SHA short-circuits and `make` rebuild gating)')
 
     # apply
     p = sub.add_parser('apply', help='reconcile services with current config')
