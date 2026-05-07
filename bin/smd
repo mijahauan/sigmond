@@ -2085,6 +2085,32 @@ def cmd_apply(args) -> int:
         except Exception:
             pass  # non-fatal
 
+    # Apply ClickHouse schema migrations declared by every installed
+    # client's deploy.toml `[clickhouse]` block, BEFORE radiod fragments
+    # and the ensure-running block — so any client whose readiness
+    # check probes its CH sink finds the table already created.  The
+    # runner is a no-op when [storage.clickhouse] isn't in
+    # coordination.toml (operators who don't enable CH stay file-only).
+    if _HAS_SIGMOND_LIB:
+        try:
+            from sigmond.commands.ch_apply import apply_ch_schemas, summarise
+            from sigmond.coordination import load_coordination
+            from sigmond.paths import COORDINATION_PATH
+            coord = load_coordination(COORDINATION_PATH)
+            results = apply_ch_schemas(coord, dry_run=dry_run)
+            for line in summarise(results):
+                if "error" in line:
+                    _err(f'ch: {line}')
+                else:
+                    _ok(f'ch: {line}')
+            if any(not r.error and r.applied for r in results) and not dry_run:
+                something_changed = True
+        except ImportError as exc:
+            _info(f'ch_apply: clickhouse-connect not installed ({exc}); '
+                  'skipping schema migrations')
+        except Exception as exc:
+            _warn(f'ch_apply failed: {exc}')
+
     # Apply radiod channel fragments declared by enabled clients before the
     # ensure-running block — so fragments are in place when each radiod
     # instance starts (or restarts) and picks up its conf.d/ contents.
