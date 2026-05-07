@@ -1,14 +1,16 @@
-"""`smd config show` and `smd config migrate`."""
+"""`smd config show`, `smd config migrate`, and `smd config identity`."""
 
 from __future__ import annotations
 
 import configparser
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
 
-from ..paths import COORDINATION_PATH, WSPRDAEMON_CONF
+from ..coordination import Host, load_coordination, render_env
+from ..paths import COORDINATION_ENV, COORDINATION_PATH, WSPRDAEMON_CONF
 from ..sysview import build_system_view
 from ..ui import err, heading, info, ok, warn
 
@@ -272,3 +274,156 @@ def _clientview_to_dict(cv) -> dict:
         ],
         "issues": cv.issues,
     }
+
+
+# ---------------------------------------------------------------------------
+# smd config identity
+# ---------------------------------------------------------------------------
+
+def cmd_config_identity(args) -> int:
+    """Capture or display sigmond's operator identity (callsign + grid).
+
+    These values live in the [host] block of coordination.toml and are
+    rendered to coordination.env as STATION_CALL / STATION_GRID /
+    STATION_LAT / STATION_LON (CLIENT-CONTRACT v0.5 §14.2).  Sigmond
+    publishes them so client config wizards (wsprdaemon-client,
+    hf-timestd, psk-recorder, …) can use them as defaults instead of
+    re-prompting for the same fields per-client.
+    """
+    coord = load_coordination(COORDINATION_PATH)
+
+    if getattr(args, 'json', False):
+        json.dump({"call": coord.host.call,
+                   "grid": coord.host.grid,
+                   "lat":  coord.host.lat,
+                   "lon":  coord.host.lon},
+                  sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    arg_call = (getattr(args, 'call', None) or '').strip().upper() or None
+    arg_grid = (getattr(args, 'grid', None) or '').strip()         or None
+    arg_lat  = getattr(args, 'lat', None)
+    arg_lon  = getattr(args, 'lon', None)
+
+    interactive = (arg_call is None and arg_grid is None
+                   and arg_lat is None and arg_lon is None
+                   and sys.stdin.isatty())
+
+    if interactive:
+        heading('operator identity')
+        info('callsign + grid live in /etc/sigmond/coordination.toml [host];')
+        info('client wizards read STATION_CALL/STATION_GRID from coordination.env')
+        info('and use them as defaults instead of re-prompting per-client.')
+        print()
+        new_call = _prompt_default('callsign',                        coord.host.call).upper()
+        new_grid = _prompt_default('grid (Maidenhead 4/6 char)',      coord.host.grid)
+        lat_s    = _prompt_default('latitude  (decimal, optional)',   _fmt_float(coord.host.lat))
+        lon_s    = _prompt_default('longitude (decimal, optional)',   _fmt_float(coord.host.lon))
+        new_lat  = float(lat_s) if lat_s.strip() else 0.0
+        new_lon  = float(lon_s) if lon_s.strip() else 0.0
+    else:
+        new_call = arg_call if arg_call is not None else coord.host.call
+        new_grid = arg_grid if arg_grid is not None else coord.host.grid
+        new_lat  = float(arg_lat) if arg_lat is not None else coord.host.lat
+        new_lon  = float(arg_lon) if arg_lon is not None else coord.host.lon
+
+    if not new_call:
+        err('callsign cannot be empty (pass --call CALL or fill in the prompt)')
+        return 1
+    if new_grid and not _looks_like_grid(new_grid):
+        warn(f'grid "{new_grid}" does not look like a Maidenhead locator (proceeding anyway)')
+
+    coord.host = Host(call=new_call, grid=new_grid, lat=new_lat, lon=new_lon)
+
+    try:
+        _patch_host_block(COORDINATION_PATH, coord.host)
+    except PermissionError:
+        err(f'permission denied writing {COORDINATION_PATH}; re-run smd as root')
+        return 1
+    ok(f'updated {COORDINATION_PATH}')
+
+    try:
+        env_text = render_env(coord)
+        COORDINATION_ENV.parent.mkdir(parents=True, exist_ok=True)
+        COORDINATION_ENV.write_text(env_text)
+    except PermissionError:
+        warn(f'wrote coordination.toml but could not refresh {COORDINATION_ENV} '
+             '(permission denied) — re-run as root to publish env vars')
+        return 0
+    ok(f'rendered {COORDINATION_ENV}')
+
+    print()
+    info(f'operator: {coord.host.call} / {coord.host.grid}')
+    info('clients pick up the new values on next service start or reload.')
+    return 0
+
+
+def _prompt_default(label: str, default: str) -> str:
+    s = input(f'  {label} [{default}]: ').strip()
+    return s if s else default
+
+
+def _fmt_float(v: float) -> str:
+    return '' if not v else f'{v:g}'
+
+
+def _looks_like_grid(s: str) -> bool:
+    """Crude Maidenhead 4/6/8-char locator check."""
+    s = s.upper().strip()
+    if len(s) not in (4, 6, 8):
+        return False
+    return (s[0:2].isalpha() and s[2:4].isdigit()
+            and (len(s) == 4 or s[4:6].isalpha())
+            and (len(s) <= 6 or s[6:8].isdigit()))
+
+
+def _patch_host_block(path: Path, host: Host) -> None:
+    """Rewrite the [host] block of coordination.toml in place.
+
+    Other sections are preserved verbatim; only the [host] body is
+    replaced (or a [host] block prepended if absent).  Comments inside
+    the [host] block are not preserved — the body is rebuilt from the
+    Host dataclass fields.
+    """
+    new_block = ['[host]', f'call = "{host.call}"', f'grid = "{host.grid}"']
+    if host.lat:
+        new_block.append(f'lat  = {host.lat}')
+    if host.lon:
+        new_block.append(f'lon  = {host.lon}')
+    new_block.append('')
+
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        header = ['# /etc/sigmond/coordination.toml',
+                  '# Authored by `smd config identity`.', '']
+        path.write_text('\n'.join(header + new_block) + '\n')
+        return
+
+    lines = path.read_text().splitlines()
+    out: list[str] = []
+    in_host = False
+    found = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == '[host]':
+            in_host = True
+            found = True
+            out.extend(new_block)
+            continue
+        if in_host:
+            if stripped.startswith('['):
+                in_host = False
+                out.append(line)
+            # else: drop — the old [host] body is replaced above
+            continue
+        out.append(line)
+
+    if not found:
+        # Insert [host] after any leading comments / blank lines.
+        i = 0
+        while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith('#')):
+            i += 1
+        out = lines[:i] + new_block + lines[i:]
+
+    path.write_text('\n'.join(out).rstrip() + '\n')

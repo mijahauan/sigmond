@@ -65,7 +65,7 @@ for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
 try:
     from sigmond.commands.validate    import cmd_validate
     from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
-    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate
+    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity
     from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
     from sigmond.commands.environment import (
         cmd_environment_list,
@@ -4948,6 +4948,20 @@ def main() -> int:
                               help='dump effective coordination + client view')
     p.add_argument('--json', action='store_true')
 
+    p = config_sub.add_parser('identity',
+                              help='operator identity (callsign + grid) — '
+                                   'shared default for all client wizards')
+    p.add_argument('--call', metavar='CALL',
+                   help='operator callsign (e.g. AI6VN); uppercased automatically')
+    p.add_argument('--grid', metavar='GRID',
+                   help='Maidenhead 4/6-char grid (e.g. CM87us)')
+    p.add_argument('--lat', type=float, metavar='DEG',
+                   help='latitude in decimal degrees')
+    p.add_argument('--lon', type=float, metavar='DEG',
+                   help='longitude in decimal degrees')
+    p.add_argument('--json', action='store_true',
+                   help='emit current identity as JSON, no prompts')
+
     p = config_sub.add_parser('migrate',
                               help='extract coordination.toml from wsprdaemon.conf')
     p.add_argument('--from', dest='from_', metavar='FILE',
@@ -5080,6 +5094,13 @@ def main() -> int:
         sub_cmd = getattr(args, 'config_command', None)
         if sub_cmd == 'show':
             return cmd_config_show(args)
+        if sub_cmd == 'identity':
+            # Writing /etc/sigmond/coordination.toml + .env requires root.
+            # _need_root re-execvps under sudo when run as a normal user, so
+            # the prompts (if any) run after elevation.
+            if not getattr(args, 'json', False) and _need_root('config identity'):
+                return 1
+            return cmd_config_identity(args)
         if sub_cmd == 'migrate':
             return cmd_config_migrate(args)
         if sub_cmd == 'backup':
