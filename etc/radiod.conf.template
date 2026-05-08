@@ -16,11 +16,16 @@ hardware  = ${FRONTEND}        # which front-end driver to load
 status    = ${STATUS_DNS}      # mDNS name for status + control multicast
 samprate  = 24000              # default channel output sample rate (Hz)
 mode      = usb                # default demod mode for unspecified channels
-ttl       = 1                  # multicast TTL; 0 keeps traffic off the wire
-                               # (only safe with IGMP-aware switches)
+ttl       = 0                  # 0 = loopback-only (single-host default,
+                               # safe on every network).  Set to 1 to
+                               # publish on the LAN — only safe when an
+                               # IGMP-aware switch (with a v2 querier or
+                               # snooping) sits between this host and the
+                               # consumers.  See `smd diag net` for a
+                               # readiness check.
 fft-threads = 1
 affinity  = false              # let systemd CPUAffinity= confine us
-iface     = ${IFACE}           # network interface to publish multicast on
+iface     = ${IFACE}           # publish iface — ignored when ttl=0
 
 [${FRONTEND}]
 device      = "${FRONTEND}"    # required so this isn't parsed as a demod
