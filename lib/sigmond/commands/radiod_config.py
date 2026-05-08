@@ -122,18 +122,60 @@ def cmd_radiod_init(args) -> int:
         info(f"  - {s.fields.get('sdr_type')} on bus "
              f"{s.fields.get('bus')}/{s.fields.get('device')}  serial={sn}")
 
+    # Build serial→id and id-set views of already-registered radiods so we
+    # can (a) skip SDRs whose USB serial is already in coordination.toml
+    # and (b) suggest an instance id that doesn't collide with one that
+    # already exists.  Without this the wizard would re-prompt for every
+    # SDR on every re-run, including the ones the operator named months ago.
+    known_serial_to_id: dict[str, str] = {}
+    known_ids: set[str] = set()
+    try:
+        coord = load_coordination(COORDINATION_PATH)
+        for r in coord.radiods.values():
+            known_ids.add(r.id)
+            if r.sdr_serial:
+                known_serial_to_id[r.sdr_serial] = r.id
+    except (OSError, FileNotFoundError):
+        pass
+
+    new_sdrs = []
+    for sdr in sdrs:
+        serial = (sdr.fields.get("serial") or "").strip()
+        if serial and serial in known_serial_to_id:
+            ok(f"already registered: {sdr.fields.get('sdr_type')} "
+               f"serial {serial} → radiod@{known_serial_to_id[serial]}  "
+               f"(skipping)")
+            continue
+        new_sdrs.append(sdr)
+
+    if not new_sdrs:
+        print()
+        ok(f"all {len(sdrs)} attached SDR(s) already registered — nothing to do")
+        info("To change settings on an existing instance, run:  "
+             "smd config edit radiod <id>")
+        return 0
+
+    if len(new_sdrs) < len(sdrs):
+        print()
+        info(f"{len(new_sdrs)} new SDR(s) to register, "
+             f"{len(sdrs) - len(new_sdrs)} already known")
+
     written: list[Path] = []
     coord_blocks: list[str] = []
     iface = _suggest_iface()
     hostname_short = socket.gethostname().split(".")[0]
 
-    for i, sdr in enumerate(sdrs):
+    for i, sdr in enumerate(new_sdrs):
         print()
-        info(f"--- SDR {i + 1}/{len(sdrs)} "
+        info(f"--- SDR {i + 1}/{len(new_sdrs)} "
              f"({sdr.fields.get('sdr_type')}) ---")
-        plan = _collect_per_sdr_values(sdr, args, hostname_short, iface)
+        plan = _collect_per_sdr_values(sdr, args, hostname_short, iface,
+                                       known_ids=known_ids)
         if plan is None:
             return 2  # operator aborted
+        # Each newly-named id joins known_ids so subsequent SDRs in the same
+        # run get a non-colliding default suggestion.
+        known_ids.add(plan["instance_id"])
         if _refuse_overwrite(plan["target"], args):
             return 1
         body = _render(plan)
@@ -262,12 +304,24 @@ def _suggest_iface() -> str:
 
 
 def _collect_per_sdr_values(sdr, args, hostname_short: str,
-                            iface: str) -> Optional[dict]:
+                            iface: str,
+                            known_ids: Optional[set] = None) -> Optional[dict]:
     sdr_type = sdr.fields.get("sdr_type", "")
     profile = _profile_for(sdr_type)
     serial = sdr.fields.get("serial", "")
 
     suggested_id = _default_instance_id(hostname_short, sdr_type, sdr.fields)
+    # Bump the suggestion until it doesn't collide with an already-named
+    # instance — usb_sdr's `index` distinguishes same-type SDRs on the bus,
+    # but it doesn't know about earlier `smd config init radiod` runs.  An
+    # operator who plugged in their second RX-888 should be offered
+    # `<host>-rx888-2` automatically rather than the colliding default.
+    if known_ids:
+        base_id = suggested_id
+        n = 1
+        while suggested_id in known_ids:
+            n += 1
+            suggested_id = f"{base_id}-{n}"
     suggested_status = f"{suggested_id}-status.local"
     suggested_desc = _default_description(sdr_type)
 
