@@ -336,6 +336,24 @@ def render_env(coord: Coordination,
             lines.append(f'{prefix}_SAMPRATE={r.samprate_hz}')
         lines.append('')
 
+    # Cross-radiod summary for clients (CLIENT-CONTRACT v0.5 §14.2):
+    # SIGMOND_RADIOD_COUNT is always set when any radiod is declared, so a
+    # client knows whether it needs to disambiguate by instance.
+    # SIGMOND_RADIOD_STATUS is set ONLY when exactly one radiod is
+    # declared — that's the §14.2 resolution rule (2): "if exactly one
+    # [radiod.<id>] is declared, use its status_dns".  With >1 radiod, we
+    # leave it unset so clients have to consult RADIOD_<ID>_STATUS by
+    # instance.  Rule (1) (per-instance lookup via [[clients.X]]) is a
+    # config-init-time concern that the wizard handles separately —
+    # there's no static answer that fits a host-wide env file.
+    if coord.radiods:
+        lines.append(f'SIGMOND_RADIOD_COUNT={len(coord.radiods)}')
+        if len(coord.radiods) == 1:
+            only = next(iter(coord.radiods.values()))
+            if only.status_dns:
+                lines.append(f'SIGMOND_RADIOD_STATUS={only.status_dns}')
+        lines.append('')
+
     for c in coord.clients:
         if not c.radiod_id:
             continue
