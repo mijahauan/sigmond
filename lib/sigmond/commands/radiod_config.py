@@ -104,6 +104,120 @@ def _profile_for(sdr_type: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# DFU (firmware-upgrade) bootstrap
+# ---------------------------------------------------------------------------
+
+def _is_dfu(sdr) -> bool:
+    """True if this discovered SDR appears to be in firmware-upgrade mode.
+
+    Check is a substring match on the sdr_type label produced by
+    discovery.usb_sdr — RX-888 advertises product string "RX-888 DFU"
+    until radiod uploads firmware and it re-enumerates.
+    """
+    return "DFU" in (sdr.fields.get("sdr_type") or "").upper()
+
+
+def _print_detected(sdrs: list) -> None:
+    """One-line summary per detected SDR."""
+    info(f"detected {len(sdrs)} SDR(s) on USB:")
+    for s in sdrs:
+        sn = s.fields.get("serial") or "(no readable serial)"
+        info(f"  - {s.fields.get('sdr_type')} on bus "
+             f"{s.fields.get('bus')}/{s.fields.get('device')}  serial={sn}")
+
+
+def _bootstrap_dfu_sdrs(dfu_sdrs: list, iface: str) -> bool:
+    """Upload firmware to each DFU-mode SDR by briefly running radiod against it.
+
+    Per device:
+      1. Write a transient /etc/radio/radiod@bootstrap-fw-N.conf with no
+         `serial = ...` line so radiod binds to the first matching DFU
+         device on the bus.
+      2. systemctl start radiod@bootstrap-fw-N.service — radiod reads the
+         conf, opens the SDR, and uploads firmware.
+      3. Poll discovery until the DFU count drops (the device has
+         re-enumerated as non-DFU) or a timeout expires.
+      4. systemctl stop the service and remove the transient conf.
+
+    Multiple DFU devices are bootstrapped sequentially — running two
+    transient radiod processes simultaneously would race each other to
+    grab whichever DFU SDR enumerates first.
+
+    Returns True if every input device successfully re-enumerated.
+    """
+    import subprocess
+    import time
+
+    BOOTSTRAP_TIMEOUT_S = 30
+    POLL_INTERVAL_S     = 1
+
+    success = True
+    for i, sdr in enumerate(dfu_sdrs, start=1):
+        stub_id   = f"bootstrap-fw-{i}"
+        stub_path = RADIOD_CONFIG_DIR / f"radiod@{stub_id}.conf"
+        unit      = f"radiod@{stub_id}.service"
+
+        # Map "RX-888 DFU" → "RX-888" so we pick the right frontend profile.
+        canonical_type = (sdr.fields.get("sdr_type") or "").replace(" DFU", "").strip()
+        profile = _profile_for(canonical_type)
+
+        info(f"  [{i}/{len(dfu_sdrs)}] {sdr.fields.get('sdr_type')} "
+             f"on bus {sdr.fields.get('bus')}/{sdr.fields.get('device')}")
+
+        plan = {
+            "instance_id":       stub_id,
+            "frontend":          profile["section"],
+            "status_dns":        f"{stub_id}-status.local",
+            "iface":             iface,
+            "description":       "bootstrap — transient firmware upload",
+            "serial_line":       "# (serial omitted: bind to first matching DFU device)",
+            "frontend_defaults": profile["defaults"].rstrip(),
+        }
+        try:
+            stub_path.parent.mkdir(parents=True, exist_ok=True)
+            stub_path.write_text(_render(plan))
+        except (OSError, PermissionError) as exc:
+            err(f"          could not write {stub_path}: {exc}")
+            success = False
+            continue
+
+        dfu_before = sum(1 for s in _discover_sdrs() if _is_dfu(s))
+
+        r = subprocess.run(["systemctl", "start", unit],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            err(f"          systemctl start {unit} failed: "
+                f"{(r.stderr or r.stdout).strip() or 'unknown error'}")
+            stub_path.unlink(missing_ok=True)
+            success = False
+            continue
+        info(f"          started {unit}; waiting up to "
+             f"{BOOTSTRAP_TIMEOUT_S}s for re-enumeration...")
+
+        re_enumerated = False
+        deadline = time.monotonic() + BOOTSTRAP_TIMEOUT_S
+        while time.monotonic() < deadline:
+            time.sleep(POLL_INTERVAL_S)
+            if sum(1 for s in _discover_sdrs() if _is_dfu(s)) < dfu_before:
+                re_enumerated = True
+                ok(f"          firmware loaded — SDR re-enumerated")
+                break
+
+        if not re_enumerated:
+            err(f"          timeout: SDR did not exit DFU mode within "
+                f"{BOOTSTRAP_TIMEOUT_S}s")
+            success = False
+
+        # Stop and clean up regardless of outcome — leftover transient
+        # services confuse the next run.
+        subprocess.run(["systemctl", "stop", unit],
+                       capture_output=True, text=True)
+        stub_path.unlink(missing_ok=True)
+
+    return success
+
+
+# ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
 
@@ -116,35 +230,44 @@ def cmd_radiod_init(args) -> int:
              f"a config under {RADIOD_CONFIG_DIR}/radiod@<id>.conf")
         return 1
 
-    info(f"detected {len(sdrs)} SDR(s) on USB:")
-    for s in sdrs:
-        sn = s.fields.get("serial") or "(no readable serial)"
-        info(f"  - {s.fields.get('sdr_type')} on bus "
-             f"{s.fields.get('bus')}/{s.fields.get('device')}  serial={sn}")
+    _print_detected(sdrs)
 
-    # Refuse to register SDRs still in DFU (Device Firmware Upgrade) mode.
-    # An RX-888 in DFU advertises a placeholder serial (e.g. 0000000004BE)
-    # and a "RX-888 DFU" product string; once radiod uploads the firmware
-    # and the device re-enumerates, the serial changes to the real value.
-    # Registering the DFU serial would bake a stale `sdr_serial` into
-    # coordination.toml and a wrong instance id (`*-rx888dfu`) into the
-    # radiod conf — fix once the firmware has loaded.
-    dfu_sdrs = [s for s in sdrs
-                if "DFU" in (s.fields.get("sdr_type") or "").upper()]
+    # An RX-888 in DFU (Device Firmware Upgrade) mode advertises a
+    # placeholder serial (e.g. 0000000004BE) and a "RX-888 DFU" product
+    # string; only after radiod uploads the firmware and the device
+    # re-enumerates does the real serial show up.  Registering the DFU
+    # value would bake a stale sdr_serial into coordination.toml and a
+    # wrong instance id (*-rx888dfu) on disk.  Bootstrap firmware now
+    # by running radiod transiently, then re-discover and continue with
+    # the real serial.
+    dfu_sdrs = [s for s in sdrs if _is_dfu(s)]
     if dfu_sdrs:
-        for s in dfu_sdrs:
-            err(f"{s.fields.get('sdr_type')} on bus "
-                f"{s.fields.get('bus')}/{s.fields.get('device')} is in DFU "
-                f"(firmware-upgrade) mode — its serial {s.fields.get('serial')!r} "
-                f"is a placeholder")
-        info("Recovery:")
-        info("  1. Bring up radiod once so it uploads firmware to the SDR.")
-        info("     For a hand-rolled first run, write a minimal "
-             f"{RADIOD_CONFIG_DIR}/radiod@<id>.conf without `serial=` and")
-        info("     start it via:  systemctl start radiod@<id>.service")
-        info("  2. After the device re-enumerates with its real serial,")
-        info("     re-run:  smd config init radiod")
-        return 1
+        print()
+        info(f"{len(dfu_sdrs)} SDR(s) in DFU mode — bootstrapping firmware "
+             f"upload via a transient radiod@bootstrap-fw-N.service")
+        bootstrap_iface = _suggest_iface()
+        _bootstrap_dfu_sdrs(dfu_sdrs, bootstrap_iface)
+        # Re-discover even if bootstrap reported errors — some devices
+        # may have loaded firmware successfully.
+        print()
+        sdrs = _discover_sdrs()
+        info("after firmware load:")
+        _print_detected(sdrs)
+
+        still_dfu = [s for s in sdrs if _is_dfu(s)]
+        if still_dfu:
+            print()
+            for s in still_dfu:
+                err(f"{s.fields.get('sdr_type')} on bus "
+                    f"{s.fields.get('bus')}/{s.fields.get('device')} is "
+                    f"still in DFU mode after bootstrap")
+            info("Inspect:  journalctl -u 'radiod@bootstrap-fw-*' "
+                 "(transient services may have already been removed)")
+            return 1
+
+        if not sdrs:
+            err("no SDRs detected after firmware bootstrap")
+            return 1
 
     # Build serial→id and id-set views of already-registered radiods so we
     # can (a) skip SDRs whose USB serial is already in coordination.toml
