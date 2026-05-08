@@ -36,6 +36,13 @@ class Radiod:
     samprate_hz: int = 0
     cores: str = ""
     radio_conf: str = ""
+    # USB iSerial of the locally-attached SDR this instance owns.  Empty
+    # for remote radiods or when the operator declined to lock the
+    # binding (radiod will then bind to the first matching frontend).
+    # Lets `smd config init radiod` recognise on re-run that this
+    # physical SDR is already named, and only prompt when a *new*
+    # serial appears on the USB bus.
+    sdr_serial: str = ""
 
     @property
     def is_local(self) -> bool:
@@ -170,6 +177,7 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
             samprate_hz=int(rcfg.get('samprate_hz', 0) or 0),
             cores=rcfg.get('cores', ''),
             radio_conf=rcfg.get('radio_conf', ''),
+            sdr_serial=str(rcfg.get('sdr_serial', '') or '').strip(),
         )
 
     cpu_raw = raw.get('cpu', {}) or {}

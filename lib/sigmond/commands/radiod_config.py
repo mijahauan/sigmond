@@ -401,6 +401,13 @@ def _coord_block(plan: dict) -> str:
         '# cores       = ""',
         f'radio_conf  = "/etc/radio/radiod@{plan["instance_id"]}.conf"',
     ]
+    # Lock the instance to its physical SDR by USB iSerial when we have
+    # one.  Lets a re-run of `smd config init radiod` recognise that
+    # this SDR is already registered and skip its prompts; without it,
+    # only radiod@<id>.conf carries the binding (and only after parsing).
+    serial = (plan.get("serial") or "").strip()
+    if serial:
+        lines.append(f'sdr_serial  = "{serial}"')
     return "\n".join(lines) + "\n"
 
 
