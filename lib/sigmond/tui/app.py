@@ -361,6 +361,26 @@ class SigmondApp(App):
             "gpsdo-monitor's full TUI focused on that device.",
         )
 
+    def action_show_timing(self) -> None:
+        from .screens.timing import TimingScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(TimingScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Timing — chrony sources",
+            "Live chrony source comparison with TSL3 (BPSK PPS) as "
+            "the reference.\n\n"
+            "Each row shows Δ-from-TSL3 (not from the system clock, "
+            "which is what 'chronyc sources' shows by default), reach "
+            "as N/8, sample age, sigma, and a Unicode sparkline of "
+            "the last 60 seconds.\n\n"
+            "The header shows kernel-clock-vs-UTC plus root "
+            "dispersion (chrony's conservative bound on its UTC "
+            "estimate).\n\n"
+            "Refresh: 1 s.  History: 60 s.",
+        )
+
     def action_show_wd_client(self) -> None:
         from .screens.wd_client import WdClientScreen
         center = self.query_one("#center")
