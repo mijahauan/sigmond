@@ -65,7 +65,7 @@ for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
 try:
     from sigmond.commands.validate    import cmd_validate
     from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
-    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity
+    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh
     from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
     from sigmond.commands.environment import (
         cmd_environment_list,
@@ -4962,6 +4962,12 @@ def main() -> int:
     p.add_argument('--json', action='store_true',
                    help='emit current identity as JSON, no prompts')
 
+    p = config_sub.add_parser('refresh',
+                              help='re-render /etc/sigmond/coordination.env '
+                                   'from coordination.toml (after a hand-edit)')
+    p.add_argument('--dry-run', action='store_true',
+                   help='print the rendered env file to stdout, do not write')
+
     p = config_sub.add_parser('migrate',
                               help='extract coordination.toml from wsprdaemon.conf')
     p.add_argument('--from', dest='from_', metavar='FILE',
@@ -5101,6 +5107,11 @@ def main() -> int:
             if not getattr(args, 'json', False) and _need_root('config identity'):
                 return 1
             return cmd_config_identity(args)
+        if sub_cmd == 'refresh':
+            # --dry-run is read-only; only the writing path needs root.
+            if not getattr(args, 'dry_run', False) and _need_root('config refresh'):
+                return 1
+            return cmd_config_refresh(args)
         if sub_cmd == 'migrate':
             return cmd_config_migrate(args)
         if sub_cmd == 'backup':

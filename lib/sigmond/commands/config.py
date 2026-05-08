@@ -378,6 +378,50 @@ def _looks_like_grid(s: str) -> bool:
             and (len(s) <= 6 or s[6:8].isdigit()))
 
 
+# ---------------------------------------------------------------------------
+# smd config refresh
+# ---------------------------------------------------------------------------
+
+def cmd_config_refresh(args) -> int:
+    """Re-render /etc/sigmond/coordination.env from coordination.toml.
+
+    `smd config identity` and `smd config init radiod` both keep the env
+    file in sync as they write coordination.toml.  This verb is for the
+    other case: the operator hand-edited coordination.toml and wants the
+    env file to reflect it without re-running a wizard.
+
+    With --dry-run, prints the rendered content to stdout instead of
+    writing — useful for diff-ing against the live file.
+    """
+    coord = load_coordination(COORDINATION_PATH)
+    if coord.source_path is None:
+        warn(f'{COORDINATION_PATH} does not exist — nothing to render')
+        info('  start with: smd config identity   (and: smd config init radiod)')
+        return 1
+
+    env_text = render_env(coord)
+
+    if getattr(args, 'dry_run', False):
+        print(env_text, end='' if env_text.endswith('\n') else '\n')
+        return 0
+
+    try:
+        COORDINATION_ENV.parent.mkdir(parents=True, exist_ok=True)
+        COORDINATION_ENV.write_text(env_text)
+    except PermissionError:
+        err(f'permission denied writing {COORDINATION_ENV}; re-run smd as root')
+        return 1
+    except OSError as exc:
+        err(f'failed to write {COORDINATION_ENV}: {exc}')
+        return 1
+
+    ok(f'rendered {COORDINATION_ENV}')
+    n_lines = sum(1 for line in env_text.splitlines()
+                  if line and not line.startswith('#'))
+    info(f'  {n_lines} env var(s) emitted from {COORDINATION_PATH}')
+    return 0
+
+
 def _patch_host_block(path: Path, host: Host) -> None:
     """Rewrite the [host] block of coordination.toml in place.
 
