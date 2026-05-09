@@ -182,7 +182,23 @@ class Writer:
             client = self._connect()
             if not self._schema_checked:
                 self._verify_schema(client)
-            client.insert(f"{self.database}.{self.table}", self._buffer)
+            # clickhouse-connect's client.insert(table, rows) accepts
+            # either a list-of-lists with explicit column_names, or a
+            # list-of-dicts.  When given dicts WITHOUT column_names it
+            # fails with "Insert data column count does not match column
+            # names" because the table has DEFAULT columns (e.g.
+            # ingested_at) that aren't in the row dicts.  Convert dict
+            # rows to (data, column_names) form so the inserted columns
+            # are explicit and DEFAULT columns get populated server-side.
+            if self._buffer and isinstance(self._buffer[0], dict):
+                column_names = list(self._buffer[0].keys())
+                data = [[row.get(c) for c in column_names] for row in self._buffer]
+                client.insert(
+                    f"{self.database}.{self.table}", data,
+                    column_names=column_names,
+                )
+            else:
+                client.insert(f"{self.database}.{self.table}", self._buffer)
             self._buffer = []
             if self._health != HEALTH_STALE_SCHEMA:
                 self._health = HEALTH_OK
