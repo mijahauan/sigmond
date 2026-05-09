@@ -19,6 +19,17 @@ The CLI entry point is **`smd`**.
 See `tui-configurator.md` for the full design — three-panel Textual TUI,
 topology registry, harmonization rules, screen flow, and open questions.
 
+Other design discussions in `docs/`:
+
+- `HOST-CAPACITY-PLANNING.md` — workload tiers (realtime / timing /
+  decoder / background), cache-island vs CPU-pinning as separate
+  levers, and open questions for matching client cost to host
+  topology. Discussion seed, not final policy.
+- `PACKET-LOSS-DIAGNOSTICS.md` — six-layer model for tracking RTP
+  gaps from kernel UDP buffer through USB starvation.
+- `networking.md` — IGMP-snooping silent-failure mode and the
+  igmp-querier mitigation.
+
 ## Core commands (implemented)
 
 ```

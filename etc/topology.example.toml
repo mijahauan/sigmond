@@ -14,6 +14,24 @@ wsprdaemon_client = "/home/wsprdaemon/wsprdaemon-client"
 # Where to install smd itself (must be in PATH)
 smd_bin = "/usr/local/sbin/smd"
 
+# CPU-affinity policy override (optional).  When unset, sigmond derives
+# radiod's CPU pool from the host's physical-core layout (one physical
+# core per radiod instance) and gives every other managed service the
+# remaining cores.  That heuristic doesn't know about L3 cache islands,
+# so on multi-CCX/CCD hosts (Ryzen, Threadripper, EPYC) operators may
+# want to align radiod with a whole cache island to keep its FFT
+# working set free of decoder-induced L3 pollution.
+#
+# Set radiod_cpus / other_cpus explicitly to override:
+#
+# [cpu_affinity]
+# radiod_cpus = "0 1 2 3 4 5 6 7"     # e.g. all of CCX0 on a Ryzen 5700U
+# other_cpus  = "8 9 10 11 12 13 14 15"
+#
+# `smd diag cpu-affinity --apply` writes systemd drop-ins reflecting
+# this assignment.  See docs/HOST-CAPACITY-PLANNING.md for the broader
+# discussion of how workload tiers map onto host topology.
+
 [component.ka9q-radio]
 enabled = true
 description = "ka9q-radio SDR daemon — receives and multicasts RF channels"
