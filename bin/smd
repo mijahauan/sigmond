@@ -2477,7 +2477,7 @@ def _ensure_radiod_affinity_drop_ins(radiod_units: list,
     for i, unit_ref in enumerate(sorted_units):
         core_cpus = cores[i] if i < len(cores) else cores[-1]
         label = f'radiod {unit_ref.instance or unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}'
-        if _write_affinity_drop_in(unit_ref.unit, core_cpus, label):
+        if _write_affinity_drop_in(unit_ref.unit, core_cpus, label) == 'wrote':
             _ok(f'affinity: {unit_ref.unit} → CPUs {_cpu_list_str(core_cpus)}')
             wrote_any = True
 
@@ -2531,7 +2531,7 @@ def _ensure_other_affinity_drop_ins(topology_cpu_affinity=None) -> bool:
 
     # Write template-level smd drop-ins for all AFFINITY_UNITS
     for unit in _AU:
-        if _write_affinity_drop_in(unit, other_cpus, label):
+        if _write_affinity_drop_in(unit, other_cpus, label) == 'wrote':
             wrote_any = True
 
     if wrote_any:
@@ -2718,12 +2718,13 @@ def cmd_stop(args) -> int:
 # CLI-only helpers that need _run() / _ok() / _err() stay here.
 
 
-def _write_affinity_drop_in(unit: str, cpus: set, label: str) -> bool:
+def _write_affinity_drop_in(unit: str, cpus: set, label: str) -> str:
     """Write /etc/systemd/system/<unit>.d/smd-cpu-affinity.conf.
 
-    Returns True only when the file was actually created or modified.
-    A no-op rewrite (existing content already matches) returns False so
-    callers don't trigger spurious daemon-reload / unit restart.
+    Returns:
+        'wrote' — file was created or its content changed.
+        'noop'  — existing file already matches; nothing written.
+        'error' — write failed; an _err() message has been emitted.
     """
     import tempfile
     drop_dir = Path(f'/etc/systemd/system/{unit}.d')
@@ -2732,13 +2733,13 @@ def _write_affinity_drop_in(unit: str, cpus: set, label: str) -> bool:
     if drop_in.exists():
         try:
             if drop_in.read_text() == content:
-                return False
+                return 'noop'
         except OSError:
             pass  # fall through and rewrite
     r = _run(['mkdir', '-p', str(drop_dir)], sudo=True)
     if r.returncode != 0:
         _err(f'{unit}: cannot create {drop_dir}')
-        return False
+        return 'error'
     try:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.conf',
                                          delete=False, dir='/tmp') as f:
@@ -2747,13 +2748,13 @@ def _write_affinity_drop_in(unit: str, cpus: set, label: str) -> bool:
         r = _run(['mv', tmp, str(drop_in)], sudo=True)
         if r.returncode != 0:
             _err(f'{unit}: mv failed')
-            return False
+            return 'error'
         # 644 so non-root processes (TUI) can read the configured CPU set
         _run(['chmod', '644', str(drop_in)], sudo=True)
     except OSError as e:
         _err(f'{unit}: {e}')
-        return False
-    return True
+        return 'error'
+    return 'wrote'
 
 
 def _remove_foreign_affinity_drop_ins() -> list:
@@ -2917,8 +2918,11 @@ def cmd_diag_cpu_affinity(args) -> int:
 
         for unit, cpus in radiod_plan.items():
             label = f'radiod instance → CPUs {_cpu_list_str(cpus)}'
-            if _write_affinity_drop_in(unit, cpus, label):
+            res = _write_affinity_drop_in(unit, cpus, label)
+            if res == 'wrote':
                 _ok(f'{unit}: {label}')
+            elif res == 'noop':
+                _info(f'{unit}: already up-to-date ({label})')
             else:
                 errors += 1
 
@@ -2929,8 +2933,11 @@ def cmd_diag_cpu_affinity(args) -> int:
 
         for unit in _AFFINITY_UNITS:
             label = f'other → CPUs {_cpu_list_str(other_cpus)}'
-            if _write_affinity_drop_in(unit, other_cpus, label):
+            res = _write_affinity_drop_in(unit, other_cpus, label)
+            if res == 'wrote':
                 _ok(f'{unit}: {label}')
+            elif res == 'noop':
+                _info(f'{unit}: already up-to-date ({label})')
             else:
                 errors += 1
         print()
