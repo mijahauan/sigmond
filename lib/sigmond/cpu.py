@@ -288,13 +288,26 @@ def compute_affinity_plan(
     instances = get_radiod_instances()
     ca = topology_cpu_affinity or {}
 
+    # Operator override: ``[cpu_affinity].radiod_cpus`` in topology.toml
+    # gives radiod a specific CPU pool (e.g. an entire CCX so radiod's
+    # threads share one L3 cache and aren't evicted by decoder workloads
+    # running on the other CCX).  When set, all radiod instances share
+    # the same pool — multi-instance deployments that need per-instance
+    # carving should leave this empty and let auto-compute distribute
+    # one physical core per instance.
+    radiod_override = parse_cpu_mask(ca.get('radiod_cpus', '').strip())
+
     radiod_plan: dict = {}
-    for i, unit in enumerate(instances):
-        if i < len(cores):
-            radiod_plan[unit] = cores[i]
-        else:
-            # More instances than cores — share the last one.
-            radiod_plan[unit] = cores[-1] if cores else set()
+    if radiod_override:
+        for unit in instances:
+            radiod_plan[unit] = set(radiod_override)
+    else:
+        for i, unit in enumerate(instances):
+            if i < len(cores):
+                radiod_plan[unit] = cores[i]
+            else:
+                # More instances than cores — share the last one.
+                radiod_plan[unit] = cores[-1] if cores else set()
 
     radiod_all: set = set()
     for cpus in radiod_plan.values():
