@@ -54,7 +54,11 @@ _FRONTEND_PROFILES: dict[str, dict] = {
     "RX888": {
         "section": "rx888",
         "defaults": (
-            "samprate    = 64800000     # 64.8 Msps; bump to 129600000 only on cool, modern CPUs\n"
+            "samprate    = 129600000    # 129.6 Msps — covers HF + 6m; the rof3240000\n"
+            "                           # wisdom plan optimises for this rate.  Drop to\n"
+            "                           # 64800000 (64.8 Msps; HF only) on Pi5 or other\n"
+            "                           # CPU-limited hosts where wisdom rof1620000 was\n"
+            "                           # planned instead.\n"
             "gainmode    = high\n"
             "# gain      = 1.5            # dB; uncomment to override default\n"
         ),
@@ -62,14 +66,14 @@ _FRONTEND_PROFILES: dict[str, dict] = {
     "RX-888": {
         "section": "rx888",
         "defaults": (
-            "samprate    = 64800000\n"
+            "samprate    = 129600000\n"
             "gainmode    = high\n"
         ),
     },
     "RX-888 Mk2": {
         "section": "rx888",
         "defaults": (
-            "samprate    = 64800000\n"
+            "samprate    = 129600000\n"
             "gainmode    = high\n"
         ),
     },
