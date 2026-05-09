@@ -52,6 +52,13 @@ AFFINITY_UNITS = {
     'wd-upload-wsprdaemon@.service':     'other',
     'wd-ka9q-web@.service':              'other',
     'wd-spool-clean.service':            'other',
+    # decoder clients — previously marked "manages itself" but in
+    # practice they were left unconfined and ran on radiod's CPUs,
+    # polluting radiod's L3 cache and causing USB packet drops on
+    # bee1 2026-05-09.  Adding them here lets `smd diag cpu-affinity
+    # --apply` write the standard drop-in alongside everything else.
+    'psk-recorder@.service':             'other',
+    'hfdl-recorder@.service':            'other',
     # sigmond infra group
     'wd-rac.service':       'other',
     'igmp-querier.service': 'other',
