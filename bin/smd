@@ -4655,10 +4655,40 @@ def cmd_wisdom_plan(args) -> int:
     cmd = ['taskset', '-c', '0',
            'stdbuf', '-oL', fftwf, '-v', '-T', '1',
            '-o', str(WISDOM_TMP), *FFT_WISDOM_PROFILES]
+
+    # Stage CPU 0 at its hardware-max frequency for the duration of the
+    # run, then restore.  The FFTW planner is timing-sensitive — running
+    # at a throttled `scaling_max_freq` produces both slower planning
+    # AND a wisdom plan biased toward implementations that do well at
+    # the throttled rate but not at full clock.  Best-effort: a missing
+    # cpufreq sysfs (VMs, exotic CPUs) or a denied write degrades to
+    # "run at whatever the OS picks" without aborting.
+    _CPUFREQ = Path('/sys/devices/system/cpu/cpu0/cpufreq')
+    _SCALING_MAX = _CPUFREQ / 'scaling_max_freq'
+    _HW_MAX      = _CPUFREQ / 'cpuinfo_max_freq'
+    saved_max_khz = None
+    boosted_to_khz = None
+    if _SCALING_MAX.exists() and _HW_MAX.exists():
+        try:
+            saved_max_khz = int(_SCALING_MAX.read_text().strip())
+            hw_max_khz    = int(_HW_MAX.read_text().strip())
+            if saved_max_khz < hw_max_khz:
+                _SCALING_MAX.write_text(f'{hw_max_khz}\n')
+                boosted_to_khz = hw_max_khz
+        except (OSError, ValueError) as exc:
+            _warn(f'could not raise CPU 0 max freq: {exc}')
+
     _heading(f'wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)')
     _info(f'output:   {WISDOM_TMP}')
     _info(f'log:      {WISDOM_LOG}')
     _info(f'affinity: CPU 0  (single-core for stable FFTW timing measurements)')
+    if boosted_to_khz is not None and saved_max_khz is not None:
+        _info(f'CPU 0 freq: raised {saved_max_khz/1000:.0f} → '
+              f'{boosted_to_khz/1000:.0f} MHz (will restore on exit)')
+    elif saved_max_khz is not None:
+        _info(f'CPU 0 freq: already at hardware max ({saved_max_khz/1000:.0f} MHz)')
+    else:
+        _info('CPU 0 freq: cpufreq sysfs unavailable — running at OS default')
     _info('this will take a long time — the rof3240000 transform alone '
           'can run for hours.  Open in a tmux/screen session if you '
           'plan to disconnect.')
@@ -4668,27 +4698,39 @@ def cmd_wisdom_plan(args) -> int:
 
     # Run synchronously in foreground; tee to log so disconnects don't
     # lose progress.  fftwf-wisdom emits progress lines on stderr; merge.
+    # try/finally ensures the freq restore fires even on Ctrl-C / errors.
     start = time.monotonic()
+    rc: int = 0
     try:
-        with open(WISDOM_LOG, 'a') as logf:
-            logf.write(f'\n# {time.strftime("%Y-%m-%dT%H:%M:%S%z")} '
-                       f'— smd wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)\n')
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
-            )
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-                logf.write(line)
-                logf.flush()
-            rc = proc.wait()
-    except KeyboardInterrupt:
-        proc.terminate()
-        proc.wait(timeout=5)
-        _warn('aborted by operator (Ctrl-C)')
-        return 130
+        try:
+            with open(WISDOM_LOG, 'a') as logf:
+                logf.write(f'\n# {time.strftime("%Y-%m-%dT%H:%M:%S%z")} '
+                           f'— smd wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)\n')
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                )
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    logf.write(line)
+                    logf.flush()
+                rc = proc.wait()
+        except KeyboardInterrupt:
+            proc.terminate()
+            proc.wait(timeout=5)
+            _warn('aborted by operator (Ctrl-C)')
+            return 130
+    finally:
+        if boosted_to_khz is not None and saved_max_khz is not None:
+            try:
+                _SCALING_MAX.write_text(f'{saved_max_khz}\n')
+                _info(f'CPU 0 freq: restored to {saved_max_khz/1000:.0f} MHz')
+            except (OSError, ValueError) as exc:
+                _warn(f'could not restore CPU 0 max freq to '
+                      f'{saved_max_khz/1000:.0f} MHz: {exc} — set manually with '
+                      f'`echo {saved_max_khz} | sudo tee {_SCALING_MAX}`')
 
     elapsed = time.monotonic() - start
     if rc != 0:
@@ -4696,7 +4738,8 @@ def cmd_wisdom_plan(args) -> int:
         _info(f'partial output (if any) at {WISDOM_TMP}; log at {WISDOM_LOG}')
         return rc
 
-    _ok(f'fftwf-wisdom finished in {int(elapsed // 60)}m {int(elapsed % 60)}s')
+    _ok(f'fftwf-wisdom finished in {int(elapsed // 3600)}h '
+        f'{int((elapsed % 3600) // 60)}m {int(elapsed % 60)}s')
 
     if getattr(args, 'no_install', False):
         _info(f'--no-install: leaving result at {WISDOM_TMP}')
