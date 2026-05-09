@@ -3009,21 +3009,66 @@ def cmd_diag_cpu_freq(args) -> int:
     # set on the Proxmox host; print the policy here and tell the operator
     # how to verify on the host.
     if not Path('/sys/devices/system/cpu/cpu0/cpufreq').exists():
-        _info('No /sys/cpufreq detected — running in a VM.')
-        _info('Frequency caps are applied on the Proxmox host (KVM does not')
-        _info('expose host frequency scaling to the guest, and /proc/cpuinfo')
-        _info('inside KVM only reports the boot-time TSC calibration value).')
+        # KVM doesn't expose host frequency scaling to the guest; fetch live
+        # data over SSH using the same channel install.sh used for grub edits.
+        # That requires reading /etc/sigmond/install-state.env (root-only)
+        # plus the install-time SSH key at /root/.ssh/id_ed25519, so elevate
+        # when the install-state file exists but isn't readable as us.
+        if (Path('/etc/sigmond/install-state.env').exists()
+                and not os.access('/etc/sigmond/install-state.env', os.R_OK)):
+            if _need_root('cpu'):
+                return 1
+        state = _read_install_state()
+        host = state.get('PROXMOX_HOST') if state else None
+        if not host:
+            _info('No /sys/cpufreq detected — running in a VM.')
+            _info('No /etc/sigmond/install-state.env present, so I cannot reach')
+            _info('the Proxmox host automatically.  Frequency caps are applied')
+            _info('on the host hookscript at /var/lib/vz/snippets/cpu-pin-<vmid>.sh.')
+            return 0
+
+        rows = _fetch_host_cpu_freqs(state)
+        if rows is None:
+            _err(f'could not query host {host} via SSH '
+                 f'(check /root/.ssh/id_ed25519 + reachability)')
+            return 1
+        roles = _fetch_host_cpu_pin_roles(state)
+
+        _info(f"VM detected — live data from host {host} "
+              f"(VMID {state.get('VMID', '?')})")
         print()
-        _info('Sigmond expects the host hookscript at /var/lib/vz/snippets/cpu-pin-<vmid>.sh')
-        _info('to apply these caps.  See:  docs/proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md')
+        # Header.
+        print('  pCPU   cur MHz   max MHz   hw_max MHz   role     governor')
+        print('  ' + '─' * 56)
+        for r in rows:
+            cur = r['cur_khz']  // 1000
+            mx  = r['max_khz']  // 1000
+            hw  = r['hw_max_khz'] // 1000
+            role = roles.get(r['pcpu'], 'host')   # 'host' = not pinned to VM
+            # Highlight the boosted/throttled ratio: < 50% of hw is throttled,
+            # > 90% is at-or-near max.
+            cur_frac = cur / hw if hw else 0
+            marker = ' ⚡' if cur_frac >= 0.9 else ('  ' if cur_frac > 0.5 else ' ↓')
+            print(f"  {r['pcpu']:4d}  {cur:8d}  {mx:8d}  {hw:11d}   "
+                  f"{role:7s}  {r['governor']}{marker}")
         print()
-        _info('To verify the live caps on the Proxmox host:')
-        print('       ssh root@<proxmox-host> \'for c in $(seq 0 11); do '
-              'm=$(cat /sys/devices/system/cpu/cpufreq/policy${c}/scaling_max_freq); '
-              'printf "  pCPU%-2s max %.1f GHz\\n" "$c" "$(echo "$m/1000000"|bc -l)"; done\'')
-        print()
+        # Roll-up summary so the operator doesn't have to skim 16 rows.
+        radiod = [r for r in rows if roles.get(r['pcpu']) == 'radiod']
+        worker = [r for r in rows if roles.get(r['pcpu']) == 'worker']
+        host_p = [r for r in rows if r['pcpu'] not in roles]
+        for label, group in (('radiod', radiod), ('workers', worker), ('host  ', host_p)):
+            if not group:
+                continue
+            cpus = ','.join(str(r['pcpu']) for r in group)
+            cap  = max(r['max_khz']  for r in group) // 1000
+            avg  = sum(r['cur_khz'] for r in group) // len(group) // 1000
+            _info(f'  {label}  pCPUs[{cpus}]  cap={cap} MHz  '
+                  f'avg cur={avg} MHz')
+
         if do_apply:
-            _warn('--apply has no effect inside a VM; edit the host hookscript instead')
+            print()
+            _warn('--apply has no effect inside a VM; edit the host hookscript')
+            _warn(f'(/var/lib/vz/snippets/cpu-pin-{state.get("VMID","<vmid>")}.sh)')
         return 0
 
     changes = 0
@@ -4677,6 +4722,84 @@ def _discover_pcpu_for_vcpu0(state: dict) -> int | None:
     return None
 
 
+def _fetch_host_cpu_freqs(state: dict) -> list[dict] | None:
+    """SSH to the Proxmox host and read live freq + caps for every pCPU.
+
+    Single batched shell script so we make one SSH round-trip even on a
+    16-core box.  Returns one dict per pCPU sorted by id, or None on
+    SSH/parse failure.
+    """
+    # IMPORTANT: pass as a single command string — see _wisdom_boost_cpu0
+    # for the ssh-quoting lesson (multi-arg remote commands lose quoting).
+    script = (
+        'for d in /sys/devices/system/cpu/cpufreq/policy*/; do '
+        'c=$(basename "$d" | sed "s/policy//"); '
+        'cur=$(cat "${d}scaling_cur_freq" 2>/dev/null); '
+        'mx=$(cat "${d}scaling_max_freq" 2>/dev/null); '
+        'mn=$(cat "${d}scaling_min_freq" 2>/dev/null); '
+        'hw=$(cat "${d}cpuinfo_max_freq" 2>/dev/null); '
+        'gv=$(cat "${d}scaling_governor" 2>/dev/null); '
+        'echo "$c $cur $mx $mn $hw $gv"; '
+        'done'
+    )
+    try:
+        r = _ssh_proxmox_host(state, script)
+    except subprocess.TimeoutExpired:
+        return None
+    if r.returncode != 0:
+        return None
+    out: list[dict] = []
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 6:
+            continue
+        try:
+            out.append({
+                'pcpu': int(parts[0]),
+                'cur_khz': int(parts[1]),
+                'max_khz': int(parts[2]),
+                'min_khz': int(parts[3]),
+                'hw_max_khz': int(parts[4]),
+                'governor': parts[5],
+            })
+        except ValueError:
+            continue
+    return sorted(out, key=lambda r: r['pcpu']) if out else None
+
+
+def _fetch_host_cpu_pin_roles(state: dict) -> dict:
+    """Parse /var/lib/vz/snippets/cpu-pin-<VMID>.sh on the host.
+
+    Returns {pcpu_id: 'radiod'|'worker'} for pCPUs the hookscript pinned
+    to this VM; pCPUs not in either list are presumed unpinned/host-side.
+    Empty dict if the hookscript can't be read.
+    """
+    vmid = state.get('VMID', '')
+    if not vmid:
+        return {}
+    try:
+        r = _ssh_proxmox_host(
+            state, 'cat', f'/var/lib/vz/snippets/cpu-pin-{vmid}.sh',
+        )
+    except subprocess.TimeoutExpired:
+        return {}
+    if r.returncode != 0:
+        return {}
+    roles: dict = {}
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        for prefix, role in (('RADIOD_CPUS=(', 'radiod'),
+                             ('WORKER_CPUS=(', 'worker')):
+            if line.startswith(prefix):
+                inside = line[len(prefix):].rstrip(')').strip()
+                for c in inside.split():
+                    try:
+                        roles[int(c)] = role
+                    except ValueError:
+                        pass
+    return roles
+
+
 def _wisdom_boost_cpu0() -> dict:
     """Save current scaling_max_freq and boost to cpuinfo_max_freq.
 
@@ -5437,6 +5560,19 @@ def main() -> int:
     p.add_argument('--other-max-mhz', type=int, metavar='MHZ',
                    help='override other CPU max frequency (default: from topology.toml or 1400)')
 
+    # `smd cpu` — short alias for `smd diag cpu-freq`.  When running in a
+    # Proxmox VM, fetches live per-pCPU freqs from the host via the same
+    # SSH path install.sh used for grub edits.  No sub-command needed: it
+    # just shows the live table.
+    p_cpu = sub.add_parser('cpu',
+                           help='live per-CPU frequency (uses SSH on Proxmox VMs)')
+    p_cpu.add_argument('--apply', action='store_true',
+                       help='write caps to sysfs (bare metal only; requires root)')
+    p_cpu.add_argument('--radiod-max-mhz', type=int, metavar='MHZ',
+                       help='override radiod CPU max frequency')
+    p_cpu.add_argument('--other-max-mhz', type=int, metavar='MHZ',
+                       help='override other CPU max frequency')
+
     p = diag_sub.add_parser('net',
                              help='classify network for multi-host radiod (IGMP, multicast)')
     p.add_argument('--interface', metavar='IFACE',
@@ -5610,6 +5746,17 @@ def main() -> int:
             return cmd_wisdom_status(args)
         p_wisdom.print_help()
         return 0
+
+    if args.command == 'cpu':
+        # Shortcut: `smd cpu` → cmd_diag_cpu_freq with the same topology
+        # override pipeline as `smd diag cpu-freq`.
+        topo = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+        if getattr(args, 'radiod_max_mhz', None):
+            topo['cpu_freq']['radiod_max_mhz'] = args.radiod_max_mhz
+        if getattr(args, 'other_max_mhz', None):
+            topo['cpu_freq']['other_max_mhz'] = args.other_max_mhz
+        args._topology_override = topo
+        return cmd_diag_cpu_freq(args)
 
     if args.command == 'diag':
         diag_cmd = getattr(args, 'diag_command', None)
