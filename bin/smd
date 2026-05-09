@@ -5101,6 +5101,136 @@ def cmd_wisdom_status(args) -> int:
     return 0
 
 
+def cmd_timestd_tune_storage(args) -> int:
+    """Detect disk size and install prune drop-ins for hf-timestd retention.
+
+    hf-timestd's `timestd-prune.timer` is upstream-defaulted to daily-at-
+    03:00 with `--threshold 80 --min-days 2`.  At its default 9-channel
+    metrology config raw_buffer grows ~2 GB/channel/day = ~20 GB/day.
+    On hosts with <100 GB disk the daily cadence is too slow to prevent
+    the buffer from filling the disk, and the 80 % threshold + 2-day
+    floor combine to forbid eviction below 36 GB of raw_iq — which is
+    larger than the entire disk on a typical small-VM deploy.
+
+    This verb computes appropriate values from the disk total and writes
+    sigmond drop-ins under
+    `/etc/systemd/system/timestd-prune.{timer,service}.d/`:
+
+        Disk total       Cadence    Threshold   Min raw_iq days
+        --------------   --------   ---------   ---------------
+        > 200 GB         daily      80 %        2     (upstream defaults)
+        100-200 GB       6-hourly   70 %        2
+        50-100 GB        hourly     65 %        1
+        < 50 GB          hourly     60 %        1
+
+    Default mode prints the recommendation and current state without
+    writing.  Pass `--apply` to install the drop-ins (auto-elevates).
+    """
+    target_dir = Path('/var/lib/timestd')
+    if not target_dir.exists():
+        _info(f'{target_dir} not present — hf-timestd not installed?')
+        return 0
+
+    # Disk total/used for the filesystem hosting /var/lib/timestd.
+    st = os.statvfs(str(target_dir))
+    total_bytes = st.f_blocks * st.f_frsize
+    avail_bytes = st.f_bavail * st.f_frsize
+    used_pct = 100.0 * (total_bytes - avail_bytes) / total_bytes if total_bytes else 0
+    total_gb = total_bytes / 1_000_000_000
+
+    # Pick policy from disk total.
+    if total_gb >= 200:
+        cadence, threshold, min_days = 'daily-at-03:00 UTC', 80, 2
+        cadence_calendar = '*-*-* 03:00:00 UTC'
+        rationale = 'large disk — upstream defaults are fine'
+    elif total_gb >= 100:
+        cadence, threshold, min_days = '6-hourly', 70, 2
+        cadence_calendar = '00/6:00:00'
+        rationale = 'medium disk — slightly tighter than upstream'
+    elif total_gb >= 50:
+        cadence, threshold, min_days = 'hourly', 65, 1
+        cadence_calendar = 'hourly'
+        rationale = 'small disk — hourly prune to keep ahead of fill'
+    else:
+        cadence, threshold, min_days = 'hourly', 60, 1
+        cadence_calendar = 'hourly'
+        rationale = 'very small disk — aggressive eviction needed'
+
+    _heading('hf-timestd storage tuning')
+    _info(f'  disk:     {target_dir} on filesystem with '
+          f'{total_gb:.1f} GB total ({used_pct:.0f}% used)')
+    _info(f'  policy:   {cadence}, --threshold {threshold}, '
+          f'--min-days {min_days}')
+    _info(f'  rationale: {rationale}')
+    print()
+
+    timer_drop = (
+        '# sigmond auto-tuned for this host (smd timestd-tune-storage).\n'
+        f'# Disk total: {total_gb:.1f} GB → {cadence}.\n'
+        '\n'
+        '[Timer]\n'
+        'OnCalendar=\n'
+        f'OnCalendar={cadence_calendar}\n'
+        'RandomizedDelaySec=300\n'
+    )
+    service_drop = (
+        '# sigmond auto-tuned for this host (smd timestd-tune-storage).\n'
+        f'# Disk total: {total_gb:.1f} GB → threshold={threshold}, '
+        f'min_days={min_days}.\n'
+        '\n'
+        '[Service]\n'
+        'ExecStart=\n'
+        'ExecStart=/opt/hf-timestd/venv/bin/python -m hf_timestd.quota_manager \\\n'
+        '    --data-root /var/lib/timestd \\\n'
+        f'    --threshold {threshold} \\\n'
+        f'    --min-days {min_days} \\\n'
+        '    --max-derived-days 7 \\\n'
+        '    --archive-root /mnt/timestd-archive \\\n'
+        '    -v\n'
+    )
+
+    if not getattr(args, 'apply', False):
+        _info('  (run with --apply to install drop-ins)')
+        print()
+        print(' --- timer drop-in (would write to '
+              '/etc/systemd/system/timestd-prune.timer.d/sigmond-storage.conf) ---')
+        print(timer_drop)
+        print(' --- service drop-in (would write to '
+              '/etc/systemd/system/timestd-prune.service.d/sigmond-storage.conf) ---')
+        print(service_drop)
+        return 0
+
+    if _need_root('timestd-tune-storage --apply'):
+        return 1
+
+    timer_dir = Path('/etc/systemd/system/timestd-prune.timer.d')
+    service_dir = Path('/etc/systemd/system/timestd-prune.service.d')
+    timer_drop_path = timer_dir / 'sigmond-storage.conf'
+    service_drop_path = service_dir / 'sigmond-storage.conf'
+
+    timer_dir.mkdir(parents=True, exist_ok=True)
+    service_dir.mkdir(parents=True, exist_ok=True)
+    timer_drop_path.write_text(timer_drop)
+    service_drop_path.write_text(service_drop)
+    _ok(f'wrote {timer_drop_path}')
+    _ok(f'wrote {service_drop_path}')
+
+    rc = subprocess.run(['systemctl', 'daemon-reload']).returncode
+    if rc != 0:
+        _warn('systemctl daemon-reload failed; reload manually')
+    else:
+        _ok('systemctl daemon-reload OK')
+
+    # If the timer is enabled, restart it so the new cadence takes effect.
+    if Path('/etc/systemd/system/timestd-prune.timer').exists():
+        rc = subprocess.run(
+            ['systemctl', 'try-restart', 'timestd-prune.timer']
+        ).returncode
+        if rc == 0:
+            _ok('timestd-prune.timer restarted with new cadence')
+    return 0
+
+
 def cmd_psk_watch(args) -> int:
     """Live tail of psk-recorder's PSK Reporter upload activity.
 
@@ -5674,6 +5804,12 @@ def main() -> int:
                    help='emit machine-readable JSON')
 
     # psk-watch — live tail of psk-recorder's PSK Reporter upload activity
+    p_tts = sub.add_parser('timestd-tune-storage',
+                           help='size hf-timestd retention policy to local '
+                                'disk (writes timestd-prune drop-ins)')
+    p_tts.add_argument('--apply', action='store_true',
+                       help='write the drop-ins (default: print recommendation only)')
+
     p_psk = sub.add_parser('psk-watch',
                            help='live tail of PSK Reporter upload events '
                                 '(per-poll ft8/ft4 counts + batch flushes)')
@@ -5862,6 +5998,9 @@ def main() -> int:
 
     if args.command == 'psk-watch':
         return cmd_psk_watch(args)
+
+    if args.command == 'timestd-tune-storage':
+        return cmd_timestd_tune_storage(args)
 
     if args.command in ('validate', 'config', 'environment', 'ka9q-watch'):
         if not _HAS_SIGMOND_LIB:
