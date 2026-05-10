@@ -342,10 +342,15 @@ if [[ -z "$PYTHON3" ]]; then
     esac
 fi
 
-# Ensure the venv module is present (Debian/Ubuntu split it into a sub-package).
-if ! "$PYTHON3" -m venv --help &>/dev/null 2>&1; then
-    info "Installing python3-venv…"
+# Ensure the venv module + ensurepip are present (Debian/Ubuntu split these
+# into a per-minor-version sub-package).  `python3 -m venv --help` succeeds
+# without ensurepip, so check for ensurepip directly — that's what venv
+# creation actually needs.  Sigmond itself uses uv (which doesn't need
+# ensurepip), but sibling clients invoke `python3 -m venv` directly and
+# fail with a confusing error if the package is missing.
+if ! "$PYTHON3" -c 'import ensurepip' &>/dev/null; then
     _pyver=$("$PYTHON3" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    info "Installing python${_pyver}-venv (ensurepip module missing)…"
     case "$_PKG_MGR" in
         apt) _pkg_install "python${_pyver}-venv" ;;
         dnf) _pkg_install python3-venv ;;
