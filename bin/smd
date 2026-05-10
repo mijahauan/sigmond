@@ -5283,6 +5283,7 @@ def cmd_psk_watch(args) -> int:
     # follow-by-name to survive logrotate) is the right read path.
     sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
     pattern = (r'psk-uploader-ch: queued ft8=|'
+               r'psk-uploader-ch: batch [0-9]|'
                r'uploading [0-9]+ spots using|'
                r'psk-uploader-ch (started|stopped|disabled)')
     try:
