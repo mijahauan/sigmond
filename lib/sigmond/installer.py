@@ -7,7 +7,9 @@ Each client's install.sh is authoritative — sigmond delegates, not duplicates.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from typing import Optional
@@ -15,6 +17,63 @@ from typing import Optional
 from .catalog import CatalogEntry
 
 GIT_BASE = Path('/opt/git/sigmond')
+
+
+def _apply_canonical_perms(repo_dir: Path) -> None:
+    """Chown a freshly-cloned repo to sigmond:sigmond + setgid on dirs.
+
+    `git clone` invoked as root (the smd install case) leaves the repo
+    owned root:root, which means human users in the sigmond group can't
+    edit sources without sudo.  Sigmond's own install.sh applies the same
+    treatment to /opt/git/sigmond/* once at install time; mirror that
+    here so newly-installed clients are immediately group-writable.
+
+    Also adds a system-wide git safe.directory entry so any user can run
+    plain `git` against the new repo without per-user config.
+
+    Best-effort: missing `sigmond` user, missing tools, or non-root
+    invocations are logged and skipped rather than failing the install.
+    """
+    if not repo_dir.exists():
+        return
+
+    # chown -R sigmond:sigmond
+    if shutil.which('chown'):
+        r = subprocess.run(
+            ['chown', '-R', 'sigmond:sigmond', str(repo_dir)],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            print(
+                f"[warn] chown sigmond:sigmond {repo_dir} failed: "
+                f"{r.stderr.strip()}",
+                file=sys.stderr,
+            )
+            return
+
+    # chmod -R g+rwX  (group read/write, exec only on dirs/already-exec)
+    subprocess.run(
+        ['chmod', '-R', 'g+rwX', str(repo_dir)],
+        capture_output=True, text=True,
+    )
+
+    # setgid on directories so new files inherit the sigmond group
+    subprocess.run(
+        ['find', str(repo_dir), '-type', 'd', '-exec', 'chmod', 'g+s', '{}', '+'],
+        capture_output=True, text=True,
+    )
+
+    # System-wide safe.directory so plain `git` works for any user.
+    existing = subprocess.run(
+        ['git', 'config', '--system', '--get-all', 'safe.directory'],
+        capture_output=True, text=True,
+    )
+    if str(repo_dir) not in existing.stdout.splitlines():
+        subprocess.run(
+            ['git', 'config', '--system', '--add',
+             'safe.directory', str(repo_dir)],
+            capture_output=True, text=True,
+        )
 
 
 def _git(repo_dir: Path, *git_args: str) -> subprocess.CompletedProcess:
@@ -135,6 +194,7 @@ def clone_repo(
             raise RuntimeError(
                 f"git checkout {ref!r} failed after clone: {r.stderr.strip()}"
             )
+    _apply_canonical_perms(repo_dir)
     return repo_dir
 
 
