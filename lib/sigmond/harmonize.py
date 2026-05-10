@@ -494,13 +494,15 @@ def rule_kernel_rcvbuf_adequate(view: SystemView) -> RuleResult:
 def _ka9q_radio_source_dir() -> Optional[Path]:
     """Locate a ka9q-radio source checkout on the local host.
 
-    Tries the canonical Pattern A path first, then the per-user dev
-    sibling.  Returns the first one that contains a ``.git`` dir.
-    Returns None if neither is present (the rule then skips cleanly).
+    Tries the canonical sigmond install path first, then the legacy
+    /opt/git path (pre-Pattern A), then the per-user dev sibling.
+    Returns the first one that contains a ``.git`` dir.  Returns None
+    if none are present (the rule then skips cleanly).
     """
     import os
     home = os.path.expanduser('~')
-    for candidate in (Path('/opt/git/ka9q-radio'),
+    for candidate in (Path('/opt/git/sigmond/ka9q-radio'),
+                      Path('/opt/git/ka9q-radio'),
                       Path(home) / 'ka9q-radio'):
         if (candidate / '.git').exists():
             return candidate
@@ -576,7 +578,8 @@ def rule_ka9q_python_compat(view: SystemView) -> RuleResult:
         return RuleResult(
             "ka9q_python_compat", "pass",
             "skipped: no ka9q-radio source checkout found at "
-            "/opt/git/ka9q-radio or ~/ka9q-radio", [],
+            "/opt/git/sigmond/ka9q-radio, /opt/git/ka9q-radio, "
+            "or ~/ka9q-radio", [],
         )
     actual = _git_head(source_dir)
     if actual is None:
