@@ -107,7 +107,13 @@ class RadiodScreen(Vertical):
 
         result = {"channels": [], "frontend": {}}
         try:
-            channel_dict = discover_channels(self._status_dns, listen_duration=2.0)
+            # radiod publishes channel status on a per-channel cycle that can
+            # span ~10 s with many channels (bee1 has 50+).  2 s only captures
+            # the first dozen, hiding higher-band channels (BPSK 45.375 MHz,
+            # 6 m FT4 50.318 MHz, etc.) from the operator.  10 s catches the
+            # full set on every observed deployment; the call runs in a worker
+            # thread so the UI stays responsive.
+            channel_dict = discover_channels(self._status_dns, listen_duration=10.0)
             for ssrc, ch in channel_dict.items():
                 result["channels"].append({
                     "ssrc": ssrc,
