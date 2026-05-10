@@ -208,11 +208,17 @@ def save_cache(view: EnvironmentView, path: Optional[Path] = None) -> None:
 
 
 def load_cache(path: Optional[Path] = None) -> dict:
-    """Read the cache, or return an empty skeleton if missing/corrupt."""
+    """Read the cache, or return an empty skeleton if missing/corrupt.
+
+    Tolerates PermissionError on the cache path (e.g. /var/lib/sigmond
+    is mode 750 and the calling user isn't in the owning group) — the
+    TUI runs as the invoking operator, not as sigmond, and must not
+    crash on a state file it can't read.
+    """
     p = path or cache_path()
-    if not p.exists():
-        return {"probed_at": 0.0, "observations": [], "deltas": []}
     try:
+        if not p.exists():
+            return {"probed_at": 0.0, "observations": [], "deltas": []}
         return json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
         return {"probed_at": 0.0, "observations": [], "deltas": []}
