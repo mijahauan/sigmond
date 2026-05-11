@@ -5512,8 +5512,21 @@ def _psk_watch_verbose_loop(log_path: Path, ft8_log: Path, ft4_log: Path) -> int
                   flush=True)
             for line in ft8_lines:
                 print(f'  ft8: {line}', flush=True)
+            # Blank line between the FT8 block and the FT4 block when
+            # both have content, and another blank between the two FT4
+            # cycle blocks (FT4 has two 7.5 s slots per 15 s window).
+            # Lines are already sorted by (timestamp, freq), so a
+            # timestamp change marks a cycle boundary.
+            if ft8_lines and ft4_lines:
+                print(flush=True)
+            prev_ts: str = ''
             for line in ft4_lines:
+                m = spot_re.match(line)
+                this_ts = m.group(1) if m else ''
+                if prev_ts and this_ts and this_ts != prev_ts:
+                    print(flush=True)
                 print(f'  ft4: {line}', flush=True)
+                prev_ts = this_ts
             if not ft8_lines and not ft4_lines:
                 print('  (no decodes this cycle)', flush=True)
             else:
