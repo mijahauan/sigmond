@@ -5287,7 +5287,8 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
     if has_ch_remnant:
         print("ClickHouse artifacts detected on this host:")
     else:
-        print("Post-migration cleanup pending (group / perms / explicit pin):")
+        print("Post-migration cleanup pending "
+              "(group / perms / sandbox / explicit pin):")
     print()
     if plan.group_to_create:
         print(f"  Group to create:  {plan.group_to_create}")
@@ -5298,6 +5299,10 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
     if plan.sink_dir_to_setup:
         path, group, mode = plan.sink_dir_to_setup
         print(f"  Sink dir to configure: {path} ({oct(mode)} root:{group})")
+    if plan.sandbox_dropins_to_write:
+        print("  systemd sandbox drop-ins to write (ReadWritePaths fix):")
+        for dropin_path, unit in plan.sandbox_dropins_to_write:
+            print(f"    - {dropin_path}  (for {unit})")
     if plan.env_lines_to_neutralize:
         # Show env neutralization first — it's what unblocks the
         # producers, and surfacing it up top makes the cause-and-effect
@@ -5365,6 +5370,8 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
               + ", ".join(f"{u}->{g}" for u, g in report.users_added_to_group))
     if report.sink_dir_configured:
         print(f"  sink dir:      {report.sink_dir_configured}")
+    if report.sandbox_dropins_written:
+        print(f"  drop-ins:      {', '.join(report.sandbox_dropins_written)}")
     if report.env_files_rewritten:
         print(f"  env rewritten: {', '.join(report.env_files_rewritten)}")
     if report.env_lines_appended:

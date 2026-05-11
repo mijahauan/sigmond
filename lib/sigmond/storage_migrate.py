@@ -96,6 +96,22 @@ SINK_DB_PATH = "/var/lib/sigmond/sink.db"
 SINK_GROUP = "sigmond"
 SINK_DIR_MODE = 0o775
 
+# systemd drop-in template that grants a sandboxed consumer write
+# access to the sink dir.  Producer units use ProtectSystem=strict
+# plus a ReadWritePaths= list that doesn't include /var/lib/sigmond;
+# without this drop-in the dir is read-only inside the unit's mount
+# namespace (the perms on the host don't matter — systemd binds a
+# read-only overlay) and SqliteWriter falls back to silent noop.
+SYSTEMD_DROPIN_BASENAME = "sigmond-sqlite-sink.conf"
+SYSTEMD_DROPIN_CONTENT = (
+    "# Added by `smd storage migrate-to-sqlite` so this producer can\n"
+    "# write to /var/lib/sigmond/sink.db.  Without it, ProtectSystem=strict\n"
+    "# would make the sink dir read-only inside the unit's namespace and\n"
+    "# producer flushes would silently turn into no-ops.\n"
+    "[Service]\n"
+    "ReadWritePaths=/var/lib/sigmond\n"
+)
+
 
 @dataclass
 class RemovalPlan:
@@ -124,6 +140,12 @@ class RemovalPlan:
     # (path, group, mode) — sink dir to create or fix permissions on.
     # None when the dir already matches expected mode + group.
     sink_dir_to_setup: Optional[Tuple[str, str, int]] = None
+    # [(dropin_path, unit_name), ...] systemd drop-ins to write so each
+    # sandboxed consumer can see /var/lib/sigmond as read-write.
+    # Required because producer units run with ProtectSystem=strict,
+    # which masks the sink dir to read-only inside the unit's mount
+    # namespace regardless of POSIX perms.
+    sandbox_dropins_to_write: List[Tuple[str, str]] = field(default_factory=list)
     confirmed: bool = False
 
     @property
@@ -159,6 +181,7 @@ class RemovalPlan:
             or self.group_to_create
             or self.users_to_add_to_group
             or self.sink_dir_to_setup
+            or self.sandbox_dropins_to_write
         )
 
 
@@ -297,6 +320,40 @@ class HostProbe:
             group_name = str(st.st_gid)
         return (st.st_mode & 0o777, group_name)
 
+    def unit_sandbox_blocks_sink(self, unit: str, sink_dir: str) -> bool:
+        """True iff this unit's sandbox would make `sink_dir` read-only.
+
+        Specifically: unit has ProtectSystem set to "strict" or "full"
+        AND `sink_dir` doesn't appear in its ReadWritePaths list.
+        Returns False on the cautious side when the systemctl query
+        fails — we'd rather skip a drop-in than write a wrong one.
+        """
+        try:
+            r = subprocess.run(
+                ["systemctl", "show", "-p", "ProtectSystem",
+                 "-p", "ReadWritePaths", unit],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            return False
+        if r.returncode != 0:
+            return False
+        protect = ""
+        rwpaths = ""
+        for line in r.stdout.splitlines():
+            if line.startswith("ProtectSystem="):
+                protect = line[len("ProtectSystem="):].strip()
+            elif line.startswith("ReadWritePaths="):
+                rwpaths = line[len("ReadWritePaths="):].strip()
+        # ProtectSystem=true makes /usr + /boot read-only but leaves
+        # /var writable — not a problem.  Only strict/full sandboxes
+        # the sink dir.
+        if protect not in ("strict", "full"):
+            return False
+        # ReadWritePaths is whitespace-separated; check substring after
+        # splitting to avoid false positives like /var/lib/sigmond-foo.
+        return sink_dir not in rwpaths.split()
+
 
 def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
     """Enumerate ClickHouse artifacts (and producer-side config) on this host."""
@@ -394,17 +451,34 @@ def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
         if meta is None or meta != (SINK_DIR_MODE, SINK_GROUP):
             plan.sink_dir_to_setup = (SINK_DIR, SINK_GROUP, SINK_DIR_MODE)
 
+        # systemd sandbox: any consumer with ProtectSystem=strict/full
+        # needs /var/lib/sigmond in its ReadWritePaths.  Write a drop-in
+        # per unit instead of patching the base unit, so the producer
+        # client's own systemd file stays untouched.
+        for unit in consumers:
+            if p.unit_sandbox_blocks_sink(unit, SINK_DIR):
+                dropin_dir = f"/etc/systemd/system/{unit}.d"
+                dropin_path = f"{dropin_dir}/{SYSTEMD_DROPIN_BASENAME}"
+                # Idempotent: only queue if the drop-in file doesn't
+                # already exist with the expected content.  Operators
+                # who hand-rolled their own drop-in are left alone.
+                if not p.path_exists(dropin_path):
+                    plan.sandbox_dropins_to_write.append((dropin_path, unit))
+
     # Restart consumers whenever ANY of:
     #   - env lines changed (CH neutralized or SQLite path pinned)
     #   - group membership changed (need re-exec for new supplementary
     #     group to take effect)
     #   - sink dir was just configured (defensive: consumers that
     #     started with the wrong perms have stale fd state)
+    #   - a sandbox drop-in was added (systemd needs a daemon-reload
+    #     + unit restart to remap the namespace)
     needs_restart = bool(
         plan.env_lines_to_neutralize
         or plan.env_lines_to_set
         or plan.users_to_add_to_group
         or plan.sink_dir_to_setup
+        or plan.sandbox_dropins_to_write
     )
     if needs_restart:
         plan.consumers_to_restart = list(consumers)
@@ -419,6 +493,7 @@ class _ExecutionReport:
     group_created: Optional[str] = None
     users_added_to_group: List[Tuple[str, str]] = field(default_factory=list)
     sink_dir_configured: Optional[str] = None
+    sandbox_dropins_written: List[str] = field(default_factory=list)
     env_files_rewritten: List[str] = field(default_factory=list)
     env_lines_appended: List[Tuple[str, str]] = field(default_factory=list)
     consumers_restarted: List[str] = field(default_factory=list)
@@ -444,6 +519,17 @@ class Runner:
             Path(path).unlink()
         except FileNotFoundError:
             pass
+
+    def write_text(self, path: str, content: str) -> None:
+        """Create parent dir if missing, then write `content` to `path`.
+
+        Used for systemd drop-in files.  Not idempotent re: existing
+        content — caller decides whether to call by checking
+        `HostProbe.path_exists` first.
+        """
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
 
     def rewrite_file(self, path: str, transform: Callable[[str], str]) -> str:
         """Read, transform, write back.  Returns the backup path.
@@ -618,10 +704,28 @@ def execute_removal(
         except Exception as e:
             report.errors.append(f"rewrite {env_path}: {e}")
 
-    # 1. Restart producers so they pick up the new env + group BEFORE
-    # we kill CH.  Re-exec is what makes them see the new supplementary
-    # group from step 0b; in-process getgroups() reflects creds at
-    # process start, so a SIGHUP wouldn't be enough.
+    # 0e. systemd sandbox drop-ins: producers with ProtectSystem=strict
+    # need /var/lib/sigmond explicitly in ReadWritePaths.  We write a
+    # per-unit drop-in rather than patching the client's base unit so
+    # client projects stay unmodified.  daemon-reload happens after
+    # the writes so systemd picks the new fragments up before restart.
+    if plan.sandbox_dropins_to_write:
+        for dropin_path, unit in plan.sandbox_dropins_to_write:
+            try:
+                r.write_text(dropin_path, SYSTEMD_DROPIN_CONTENT)
+                report.sandbox_dropins_written.append(dropin_path)
+            except Exception as e:
+                report.errors.append(
+                    f"write {dropin_path}: {e}"
+                )
+        # One daemon-reload after the batch.  The subsequent restart
+        # loop is what actually remaps each unit's mount namespace.
+        r.run(["systemctl", "daemon-reload"])
+
+    # 1. Restart producers so they pick up the new env + group + sandbox
+    # config BEFORE we kill CH.  Re-exec is what makes them see the new
+    # supplementary group from step 0b; in-process getgroups() reflects
+    # creds at process start, so a SIGHUP wouldn't be enough.
     for unit in plan.consumers_to_restart:
         res = r.run(["systemctl", "restart", unit])
         if res.returncode == 0:

@@ -12,6 +12,7 @@ from sigmond.storage_migrate import (
     BACKUP_SUFFIX, CH_DATA_DIRS, CH_PACKAGES, CH_SIGMOND_UNIT_FILE,
     CH_SIGMOND_VENV, DEFAULT_COORD_ENV, INSERTED_HEADER, NEUTRALIZED_PREFIX,
     SINK_DB_PATH, SINK_DIR, SINK_DIR_MODE, SINK_GROUP,
+    SYSTEMD_DROPIN_BASENAME, SYSTEMD_DROPIN_CONTENT,
     HostProbe, NotConfirmed, RemovalPlan, Runner,
     _build_env_transform, _neutralize_clickhouse_lines,
     execute_removal, plan_clickhouse_removal,
@@ -33,6 +34,7 @@ class FakeProbe(HostProbe):
         existing_groups=(),
         user_group_membership=None,
         dirs=None,
+        sandboxed_units=(),
     ):
         self._services = set(services)
         self._active = set(active_services)
@@ -50,6 +52,9 @@ class FakeProbe(HostProbe):
         self._user_groups = user_group_membership or {}
         # dirs: dict mapping path -> (mode, group_name); missing path = None
         self._dirs = dirs or {}
+        # sandboxed_units: set of units whose ProtectSystem=strict
+        # blocks the sink dir.  Membership = needs a drop-in.
+        self._sandboxed_units = set(sandboxed_units)
 
     def service_exists(self, unit: str) -> bool:
         return unit in self._services
@@ -80,6 +85,9 @@ class FakeProbe(HostProbe):
 
     def dir_meta(self, path):
         return self._dirs.get(path)
+
+    def unit_sandbox_blocks_sink(self, unit, sink_dir):
+        return unit in self._sandboxed_units
 
 
 class TestPlanBuilding(unittest.TestCase):
@@ -150,6 +158,7 @@ class FakeRunner(Runner):
         self.rmtree_calls = []
         self.unlink_calls = []
         self.rewrite_calls = []     # list of (path, transform_result)
+        self.write_text_calls = []  # list of (path, content)
         self.rewrite_should_raise = rewrite_should_raise
 
     def run(self, argv: list) -> subprocess.CompletedProcess:
@@ -176,6 +185,9 @@ class FakeRunner(Runner):
         result = transform("")
         self.rewrite_calls.append((path, result))
         return path + BACKUP_SUFFIX
+
+    def write_text(self, path, content):
+        self.write_text_calls.append((path, content))
 
 
 class TestExecuteRemoval(unittest.TestCase):
@@ -679,6 +691,118 @@ class TestExecuteGroupAndPermsOrdering(unittest.TestCase):
         report = execute_removal(plan, runner=runner)
         self.assertTrue(any("install -d" in err for err in report.errors))
         self.assertIsNone(report.sink_dir_configured)
+
+
+class TestPlanQueuesSandboxDropins(unittest.TestCase):
+    """Producer units with ProtectSystem=strict need a drop-in adding
+    /var/lib/sigmond to ReadWritePaths — without it the sink dir is
+    read-only inside the unit's namespace regardless of POSIX perms."""
+
+    def _probe(self, *, sandboxed_units=(), existing_paths=()):
+        return FakeProbe(
+            env_files={DEFAULT_COORD_ENV: "SIGMOND_CLICKHOUSE_URL=x\n"},
+            consumer_units={DEFAULT_COORD_ENV: [
+                "psk-recorder@my-rx888.service",
+                "hf-timestd.service",
+            ]},
+            unit_users={
+                "psk-recorder@my-rx888.service": "pskrec",
+                "hf-timestd.service": "hf-timestd",
+            },
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={
+                "pskrec": [SINK_GROUP], "hf-timestd": [SINK_GROUP],
+            },
+            dirs={SINK_DIR: (SINK_DIR_MODE, SINK_GROUP)},
+            sandboxed_units=sandboxed_units,
+            paths=tuple(existing_paths),
+        )
+
+    def test_plan_queues_dropin_for_sandboxed_unit(self):
+        probe = self._probe(sandboxed_units={
+            "psk-recorder@my-rx888.service",
+        })
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(len(plan.sandbox_dropins_to_write), 1)
+        path, unit = plan.sandbox_dropins_to_write[0]
+        self.assertEqual(unit, "psk-recorder@my-rx888.service")
+        self.assertEqual(
+            path,
+            f"/etc/systemd/system/{unit}.d/{SYSTEMD_DROPIN_BASENAME}",
+        )
+
+    def test_plan_skips_dropin_for_non_sandboxed_unit(self):
+        probe = self._probe(sandboxed_units=())
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(plan.sandbox_dropins_to_write, [])
+
+    def test_plan_idempotent_when_dropin_already_exists(self):
+        # Existing drop-in at the expected path → no new write queued.
+        dropin = (
+            "/etc/systemd/system/psk-recorder@my-rx888.service.d/"
+            + SYSTEMD_DROPIN_BASENAME
+        )
+        probe = self._probe(
+            sandboxed_units={"psk-recorder@my-rx888.service"},
+            existing_paths=(dropin,),
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(plan.sandbox_dropins_to_write, [])
+
+    def test_plan_dropin_triggers_consumer_restart(self):
+        # Even without env / group / perm work, a sandbox drop-in
+        # requires the unit to be restarted to remap its namespace.
+        probe = FakeProbe(
+            env_files={DEFAULT_COORD_ENV: ""},  # no CH env at all
+            consumer_units={DEFAULT_COORD_ENV: ["psk-recorder@a.service"]},
+            unit_users={"psk-recorder@a.service": "pskrec"},
+            existing_groups=(SINK_GROUP,),
+            user_group_membership={"pskrec": [SINK_GROUP]},
+            dirs={SINK_DIR: (SINK_DIR_MODE, SINK_GROUP)},
+            sandboxed_units={"psk-recorder@a.service"},
+        )
+        plan = plan_clickhouse_removal(probe=probe)
+        self.assertEqual(plan.consumers_to_restart, ["psk-recorder@a.service"])
+
+
+class TestExecuteSandboxDropins(unittest.TestCase):
+
+    def test_dropins_written_with_canonical_content(self):
+        plan = RemovalPlan(
+            sandbox_dropins_to_write=[
+                ("/etc/systemd/system/psk-recorder@a.service.d/"
+                 + SYSTEMD_DROPIN_BASENAME,
+                 "psk-recorder@a.service"),
+            ],
+            consumers_to_restart=["psk-recorder@a.service"],
+            confirmed=True,
+        )
+        runner = FakeRunner()
+        report = execute_removal(plan, runner=runner)
+        self.assertEqual(len(runner.write_text_calls), 1)
+        path, content = runner.write_text_calls[0]
+        self.assertIn("ReadWritePaths=/var/lib/sigmond", content)
+        self.assertEqual(content, SYSTEMD_DROPIN_CONTENT)
+        self.assertIn(path, report.sandbox_dropins_written)
+
+    def test_daemon_reload_run_after_dropin_writes(self):
+        plan = RemovalPlan(
+            sandbox_dropins_to_write=[
+                ("/etc/systemd/system/a.service.d/" + SYSTEMD_DROPIN_BASENAME,
+                 "a.service"),
+            ],
+            consumers_to_restart=["a.service"],
+            confirmed=True,
+        )
+        runner = FakeRunner()
+        execute_removal(plan, runner=runner)
+        # daemon-reload must come AFTER write_text and BEFORE restart.
+        verbs = [argv for argv in runner.run_calls if argv[0] == "systemctl"]
+        reload_idx = next(i for i, v in enumerate(verbs)
+                          if v[1] == "daemon-reload")
+        restart_idx = next(i for i, v in enumerate(verbs)
+                           if v[1] == "restart")
+        self.assertLess(reload_idx, restart_idx)
 
 
 class TestRunnerRewriteFile(unittest.TestCase):
