@@ -5449,11 +5449,17 @@ def cmd_psk_watch(args) -> int:
     sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
     # Match all the lines we want to forward; let grep do the prefilter so
     # the python loop only sees relevant lines (the daemon log includes
-    # ka9q.control LIFETIME chatter we want to suppress).
+    # ka9q.control LIFETIME chatter we want to suppress).  Covers both
+    # generations of uploader:
+    #   * legacy `psk-uploader-ch:` (CH-polling, with reconciliation lines)
+    #   * new    `psk-uploader-hs:` (hs-uploader pipeline; pump-with-work
+    #                                lines from psk-recorder commit-TODO)
     pattern = (r'psk-uploader-ch: queued ft8=|'
                r'psk-uploader-ch: batch [0-9]|'
                r'uploading [0-9]+ spots using|'
-               r'psk-uploader-ch (started|stopped|disabled)')
+               r'psk-uploader-ch (started|stopped|disabled)|'
+               r'psk-uploader-hs: pump shipped|'
+               r'psk-uploader-hs (started|stopped)')
     try:
         tl = subprocess.Popen(
             [*sudo_prefix, 'tail', '-n', '50', '-F', str(log_path)],
