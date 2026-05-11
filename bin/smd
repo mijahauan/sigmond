@@ -5432,10 +5432,23 @@ def cmd_psk_watch(args) -> int:
             return 1
         log_path = candidates[0]
 
+    # `recent` is the verbose-mode N: how many per-mode decoded
+    # spots to print under each "shipped" line.  0 = terse counts only.
+    n_recent = int(getattr(args, 'recent', 0) or 0)
+    # Per-mode decoded-spot logs.  These are append-only (not deleted
+    # on PSKReporter ack like the spool's .spots.txt files), so they
+    # always have history we can tail when verbose mode is requested.
+    instance_stem = log_path.stem
+    ft8_log = log_path.with_name(f'{instance_stem}-ft8.log')
+    ft4_log = log_path.with_name(f'{instance_stem}-ft4.log')
+
     _heading(f'PSK Reporter upload activity ({log_path.name})')
     _info('   ▸ hs-uploader path (PSK_USE_HS_UPLOADER=1):')
     _info('     "shipped ft8=N ft4=M"   per ~30 s pump cycle')
     _info('     each line annotated with current time and seconds since prev')
+    if n_recent > 0:
+        _info(f'     + last {n_recent} spot{"s" if n_recent != 1 else ""} '
+              f'of each mode from -ft8.log / -ft4.log per cycle')
     _info('   ▸ legacy CH-polled path (fallback when older uploader is active):')
     _info('     "queued ft8=N ft4=M"    per 5 s poll')
     _info('     "uploading N spots"    per ~30 s flush, with ✓/✗ reconciliation')
@@ -5543,6 +5556,28 @@ def cmd_psk_watch(args) -> int:
                     f'[{hhmmss} +{gap}] ft8={ft8:>3} ft4={ft4:>2}',
                     flush=True,
                 )
+                # Verbose mode: tail the last N spots from each per-mode
+                # log file.  Best-effort — a missing file (band wasn't
+                # active, or the daemon hasn't created it yet) just
+                # gets a "(no entries)" placeholder so the cadence of
+                # output stays predictable.
+                if n_recent > 0:
+                    for label, mode_log in (('ft8', ft8_log),
+                                            ('ft4', ft4_log)):
+                        try:
+                            r = subprocess.run(
+                                [*sudo_prefix, 'tail', '-n',
+                                 str(n_recent), str(mode_log)],
+                                capture_output=True, text=True, check=False,
+                            )
+                            tail_text = r.stdout
+                        except FileNotFoundError:
+                            tail_text = ''
+                        if not tail_text.strip():
+                            print(f'    {label}: (no entries)', flush=True)
+                            continue
+                        for spot_line in tail_text.rstrip('\n').splitlines():
+                            print(f'    {label}: {spot_line}', flush=True)
                 continue
             # Anything else (batch summary, started/stopped) — pass through
             # untouched, don't reset the accumulator (batch summary fires
@@ -6088,6 +6123,10 @@ def main() -> int:
     p_psk = sub.add_parser('psk-watch',
                            help='live tail of PSK Reporter upload events '
                                 '(per-poll ft8/ft4 counts + batch flushes)')
+    p_psk.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
+                       help='also print the last N decoded spots from each '
+                            'per-mode log under each "shipped" line '
+                            '(default: 0 = counts only)')
     p_psk.add_argument('--instance', metavar='RADIOD_ID', default=None,
                        help='specific radiod instance (default: most recently '
                             'modified /var/log/psk-recorder/<id>.log)')
