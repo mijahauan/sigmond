@@ -187,7 +187,19 @@ class Writer:
         if sqlite_path and not ch_url:
             # Lazy import keeps the CH path free of sqlite3 import cost
             # and avoids a hard cycle between writer.py and sqlite_writer.py.
-            from .sqlite_writer import SqliteWriter
+            from .sqlite_writer import (
+                SqliteWriter, DEFAULT_SQLITE_BATCH_ROWS,
+            )
+            # When the caller passes the CH-appropriate 50_000 default
+            # (i.e., didn't override), scale down to the SQLite default.
+            # Without this, a producer like psk-recorder would accumulate
+            # ~3 hours of spots in-memory before the first flush — a
+            # silent data-loss-on-crash trap.  Callers that genuinely
+            # want larger batches just pass an explicit batch_rows.
+            sqlite_batch_rows = (
+                DEFAULT_SQLITE_BATCH_ROWS if batch_rows == 50_000
+                else batch_rows
+            )
             effective_env = dict(e)
             effective_env["SIGMOND_SQLITE_PATH"] = sqlite_path
             return SqliteWriter.from_env(
@@ -195,7 +207,7 @@ class Writer:
                 mode=mode,
                 database=database,
                 schema_version=schema_version,
-                batch_rows=batch_rows,
+                batch_rows=sqlite_batch_rows,
                 env=effective_env,
             )
         cfg = ConnectionConfig.from_env(env)

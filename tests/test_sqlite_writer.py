@@ -305,5 +305,103 @@ class TestWriterFromEnvDispatch(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestTimeBasedAutoFlush(unittest.TestCase):
+    """auto_flush_seconds bounds in-memory residency.  Without it a slow
+    stream's buffer could sit for hours before the first write to disk —
+    a data-loss-on-crash trap and the same bug that bit psk-recorder
+    on its first SQLite run."""
+
+    def setUp(self):
+        self.db_path = _temp_db_path()
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(self.db_path + suffix)
+            if p.exists():
+                p.unlink()
+
+    def _row_count(self) -> int:
+        if not Path(self.db_path).exists():
+            return 0
+        conn = sqlite3.connect(self.db_path)
+        try:
+            r = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='pending_uploads'"
+            ).fetchone()
+            if r is None:
+                return 0
+            return conn.execute(
+                "SELECT count(*) FROM pending_uploads"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_age_trigger_fires_when_seconds_elapsed(self):
+        # batch_rows=1000 (high) so size never trips; auto_flush=0.05s.
+        w = SqliteWriter.from_env(
+            table="spots", mode="psk",
+            env={"SIGMOND_SQLITE_PATH": self.db_path},
+            batch_rows=1000, auto_flush_seconds=0.05,
+        )
+        w.insert([{"a": 1}])
+        self.assertEqual(self._row_count(), 0)  # not flushed yet
+        import time as _time
+        _time.sleep(0.08)
+        w.insert([{"a": 2}])
+        # After the sleep, the next insert sees age >= threshold and
+        # flushes the whole accumulated buffer.
+        self.assertEqual(self._row_count(), 2)
+
+    def test_age_trigger_disabled_when_zero(self):
+        w = SqliteWriter.from_env(
+            table="spots", mode="psk",
+            env={"SIGMOND_SQLITE_PATH": self.db_path},
+            batch_rows=10, auto_flush_seconds=0,
+        )
+        w.insert([{"a": 1}])
+        import time as _time
+        _time.sleep(0.05)
+        w.insert([{"a": 2}])
+        # With auto_flush_seconds=0, no age trigger; under batch_rows
+        # threshold so still buffered.
+        self.assertEqual(self._row_count(), 0)
+        self.assertEqual(w.buffered, 2)
+
+
+class TestDispatchScalesBatchRowsForSqlite(unittest.TestCase):
+    """`Writer.from_env` should hand SqliteWriter a small default
+    batch_rows even when the caller relies on the CH-shaped default
+    of 50_000 — otherwise slow streams sit in memory for hours."""
+
+    def setUp(self):
+        self.db_path = _temp_db_path()
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(self.db_path + suffix)
+            if p.exists():
+                p.unlink()
+
+    def test_default_batch_rows_scaled_down_for_sqlite(self):
+        from sigmond.hamsci_ch.sqlite_writer import DEFAULT_SQLITE_BATCH_ROWS
+        w = Writer.from_env(
+            table="spots", mode="psk",
+            env={"SIGMOND_SQLITE_PATH": self.db_path},
+            # No batch_rows arg — caller uses Writer.from_env's default.
+        )
+        self.assertIsInstance(w, SqliteWriter)
+        self.assertEqual(w.batch_rows, DEFAULT_SQLITE_BATCH_ROWS)
+
+    def test_explicit_batch_rows_honored(self):
+        w = Writer.from_env(
+            table="spots", mode="psk",
+            env={"SIGMOND_SQLITE_PATH": self.db_path},
+            batch_rows=42,
+        )
+        self.assertIsInstance(w, SqliteWriter)
+        self.assertEqual(w.batch_rows, 42)
+
+
 if __name__ == "__main__":
     unittest.main()

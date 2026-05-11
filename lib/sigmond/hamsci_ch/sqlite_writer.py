@@ -43,10 +43,28 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
+
+# Default batch trigger for the SQLite backend.  Much smaller than the
+# ClickHouse Writer's 50_000 default because this is a write-buffer,
+# not an OLAP bulk-insert: we want rows on disk in seconds, not when a
+# 50k-row batch happens to fill.  Sized so even a low-rate stream
+# (~30 spots/min from hf-timestd) flushes within a couple of minutes
+# while a high-rate one (~250 spots/min from psk-recorder) flushes
+# every ~4 cycles.  Operators can override via the `batch_rows`
+# constructor arg.
+DEFAULT_SQLITE_BATCH_ROWS = 1000
+
+# Time bound on durability: if the buffer is non-empty and this many
+# seconds have passed since the last flush, the next `insert()` will
+# flush regardless of buffer size.  Without this, a stream that goes
+# quiet (mode-change, propagation drop, etc.) could leave queued rows
+# in memory until the next active period.
+DEFAULT_SQLITE_AUTO_FLUSH_SECONDS = 30.0
 
 logger = logging.getLogger("sigmond.hamsci_ch.sqlite")
 
@@ -119,7 +137,8 @@ class SqliteWriter:
         table: str,
         *,
         schema_version: int = 0,
-        batch_rows: int = 50_000,
+        batch_rows: int = DEFAULT_SQLITE_BATCH_ROWS,
+        auto_flush_seconds: float = DEFAULT_SQLITE_AUTO_FLUSH_SECONDS,
         config: Optional[SqliteConfig] = None,
         connect_factory: Optional[Any] = None,
     ) -> None:
@@ -127,6 +146,7 @@ class SqliteWriter:
         self.table = table
         self.schema_version = schema_version
         self.batch_rows = batch_rows
+        self.auto_flush_seconds = auto_flush_seconds
         self._buffer_max = batch_rows * 2
         self._config = config
         self._connect_factory = connect_factory or _default_connect_factory
@@ -134,6 +154,10 @@ class SqliteWriter:
         self._conn: Optional[sqlite3.Connection] = None
         self._schema_initialized = False
         self._health = HEALTH_NOOP if config is None else HEALTH_OK
+        # Used by the time-based auto-flush check in insert().
+        # Initialized to "now" so we don't immediately flush a 1-row
+        # buffer on the first insert after a long idle.
+        self._last_flush_monotonic: float = time.monotonic()
 
     @classmethod
     def from_env(
@@ -143,7 +167,8 @@ class SqliteWriter:
         mode: str,
         database: Optional[str] = None,
         schema_version: int = 0,
-        batch_rows: int = 50_000,
+        batch_rows: int = DEFAULT_SQLITE_BATCH_ROWS,
+        auto_flush_seconds: float = DEFAULT_SQLITE_AUTO_FLUSH_SECONDS,
         env: Optional[dict] = None,
         connect_factory: Optional[Any] = None,
     ) -> "SqliteWriter":
@@ -161,6 +186,7 @@ class SqliteWriter:
             table=table,
             schema_version=schema_version,
             batch_rows=batch_rows,
+            auto_flush_seconds=auto_flush_seconds,
             config=cfg,
             connect_factory=connect_factory,
         )
@@ -178,10 +204,16 @@ class SqliteWriter:
         return len(self._buffer)
 
     def insert(self, rows: Sequence) -> None:
-        """Buffer rows; auto-flush when `batch_rows` is reached.
+        """Buffer rows; auto-flush on size OR age threshold.
 
         Raises `BufferFull` if the buffer would exceed `2 * batch_rows`
         (SQLite has been unwritable for too long).
+
+        Two flush triggers:
+        - Size: buffer reaches `batch_rows`.
+        - Age: buffer non-empty and `auto_flush_seconds` elapsed since
+          last successful flush.  Bounds the in-memory residency time
+          so a low-rate stream's rows still land on disk promptly.
         """
         if self.is_noop or not rows:
             return
@@ -195,7 +227,14 @@ class SqliteWriter:
                 f"max {self._buffer_max} (SQLite unwritable at "
                 f"{self._config.path if self._config else '?'})"
             )
-        if len(self._buffer) >= self.batch_rows:
+        size_trigger = len(self._buffer) >= self.batch_rows
+        age_trigger = (
+            self.auto_flush_seconds > 0
+            and self._buffer
+            and time.monotonic() - self._last_flush_monotonic
+            >= self.auto_flush_seconds
+        )
+        if size_trigger or age_trigger:
             self.flush()
 
     def flush(self) -> None:
@@ -225,6 +264,7 @@ class SqliteWriter:
             )
             conn.commit()
             self._buffer = []
+            self._last_flush_monotonic = time.monotonic()
             self._health = HEALTH_OK
         except BufferFull:
             raise

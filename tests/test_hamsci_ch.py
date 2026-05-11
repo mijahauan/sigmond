@@ -65,8 +65,21 @@ def _factory_for(client: FakeClient):
 
 
 class TestNoOpMode(unittest.TestCase):
-    """When SIGMOND_CLICKHOUSE_URL is unset, all Writer methods are no-ops
-    so a client running standalone (no sigmond) keeps working."""
+    """When SIGMOND_CLICKHOUSE_URL is unset AND the default SQLite path
+    isn't writable (true standalone), Writer.from_env returns a no-op
+    ClickHouse Writer so the client keeps working without sigmond."""
+
+    def setUp(self):
+        # Force the writability probe to return False so the default
+        # SQLite fallback doesn't pre-empt the noop path on hosts that
+        # happen to have /var/lib/sigmond present (the test host does).
+        from sigmond.hamsci_ch import writer as writer_mod
+        self._orig = writer_mod._default_sqlite_writable
+        writer_mod._default_sqlite_writable = lambda _p: False
+
+    def tearDown(self):
+        from sigmond.hamsci_ch import writer as writer_mod
+        writer_mod._default_sqlite_writable = self._orig
 
     def test_from_env_no_url_yields_noop(self):
         w = Writer.from_env(table="spots", mode="psk", env={})
