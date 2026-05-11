@@ -57,7 +57,24 @@ smd ka9q-watch           Compare pinned ka9q-radio commit vs upstream and
 smd diag                 Network + deps + client validation diagnostics
 smd tui                  Launch interactive TUI configurator
 smd environment list|probe|describe   Situational awareness of network peers
+smd storage migrate-to-sqlite   Remove leftover local ClickHouse install once
+                         SQLite (the default sink) is in use. Dry-run by
+                         default; --yes to execute. Requires root.
 ```
+
+## Sink backend selection
+
+`sigmond.hamsci_ch.Writer.from_env()` picks the producer-side sink at
+construction time:
+
+- `SIGMOND_CLICKHOUSE_URL` set → ClickHouse `Writer` (explicit opt-in).
+- `SIGMOND_SQLITE_PATH` set    → `SqliteWriter` at that path (override).
+- Neither set                  → `SqliteWriter` at `/var/lib/sigmond/sink.db`
+  if writable, else no-op (preserves standalone-safety).
+
+SQLite is the default; ClickHouse is opt-in for hosts that need the
+upstream-grade columnar tier. Use `smd storage migrate-to-sqlite` to
+clean up a stale ClickHouse install after switching.
 
 ## Architecture layers
 

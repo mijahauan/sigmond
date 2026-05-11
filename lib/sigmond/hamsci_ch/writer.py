@@ -31,6 +31,28 @@ HEALTH_DEGRADED = "degraded"
 HEALTH_NOOP = "noop"
 
 
+# Default SQLite buffer path used when no backend is explicitly configured.
+# Lives under sigmond's state dir so operators can find it for backup,
+# disk-budget accounting, and the future hs-uploader's reader.
+_DEFAULT_SQLITE_PATH = "/var/lib/sigmond/sink.db"
+
+
+def _default_sqlite_writable(path: str) -> bool:
+    """True iff the default SQLite path is usable without explicit config.
+
+    A directory is "usable" when (a) it already exists and is writable
+    by the current process, OR (b) its parent exists and is writable
+    (so the directory itself can be created on first connect).  This
+    keeps standalone clients — no sigmond install, no /var/lib/sigmond
+    — falling back to no-op instead of erroring on every flush.
+    """
+    parent = Path(path).parent
+    if parent.exists():
+        return os.access(parent, os.W_OK)
+    grandparent = parent.parent
+    return grandparent.exists() and os.access(grandparent, os.W_OK)
+
+
 class BufferFull(Exception):
     """Buffer reached `2 * batch_rows` while CH was unreachable.
 
@@ -125,10 +147,20 @@ class Writer:
         """Build a writer from coordination.env.
 
         Backend selection (in order):
-        1. `SIGMOND_SQLITE_PATH` set → `SqliteWriter` (lightweight local
-           buffer for `hs-uploader`; recommended for client hosts).
-        2. `SIGMOND_CLICKHOUSE_URL` set → ClickHouse `Writer` (this class).
-        3. Neither set → no-op writer (standalone-safe).
+        1. `SIGMOND_CLICKHOUSE_URL` set → ClickHouse `Writer` (explicit
+           opt-in; matches upstream wsprdaemon-server shape).
+        2. `SIGMOND_SQLITE_PATH` set → `SqliteWriter` at that path
+           (explicit override; useful for tests or unusual layouts).
+        3. Neither set → `SqliteWriter` at the default sigmond path
+           `/var/lib/sigmond/sink.db`, IF that directory is writable.
+           Otherwise no-op (preserves standalone-safety for clients
+           running outside a sigmond install).
+
+        SQLite is the default because a sigmond client host's local
+        sink is just a store-and-forward buffer for `hs-uploader`;
+        ClickHouse-as-buffer would burn 1-2 GB of RAM and several
+        merge-CPU cores for no benefit there.  Hosts that need the
+        upstream-grade columnar tier opt in with `SIGMOND_CLICKHOUSE_URL`.
 
         `mode` is the per-mode key (`wspr`, `psk`, `hfdl`, `codar`,
         `timestd`).  The actual database name is resolved through
@@ -140,17 +172,31 @@ class Writer:
         `insert/flush/close/health/is_noop/buffered` interface.
         """
         e = env if env is not None else os.environ
-        if (e.get("SIGMOND_SQLITE_PATH") or "").strip():
+        ch_url = (e.get("SIGMOND_CLICKHOUSE_URL") or "").strip()
+        sqlite_path = (e.get("SIGMOND_SQLITE_PATH") or "").strip()
+
+        # Default to SQLite at the sigmond state path when neither
+        # backend is explicitly configured.  Only do so when the parent
+        # directory is writable — a true standalone client (no sigmond
+        # install) should not silently start writing to /var/lib/sigmond.
+        if not ch_url and not sqlite_path:
+            default_path = _DEFAULT_SQLITE_PATH
+            if _default_sqlite_writable(default_path):
+                sqlite_path = default_path
+
+        if sqlite_path and not ch_url:
             # Lazy import keeps the CH path free of sqlite3 import cost
             # and avoids a hard cycle between writer.py and sqlite_writer.py.
             from .sqlite_writer import SqliteWriter
+            effective_env = dict(e)
+            effective_env["SIGMOND_SQLITE_PATH"] = sqlite_path
             return SqliteWriter.from_env(
                 table=table,
                 mode=mode,
                 database=database,
                 schema_version=schema_version,
                 batch_rows=batch_rows,
-                env=env,
+                env=effective_env,
             )
         cfg = ConnectionConfig.from_env(env)
         actual_db = database or resolve_db_alias(mode, env)

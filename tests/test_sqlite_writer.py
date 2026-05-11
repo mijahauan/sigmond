@@ -257,7 +257,10 @@ class TestWriterFromEnvDispatch(unittest.TestCase):
         self.assertNotIsInstance(w, SqliteWriter)
         self.assertFalse(w.is_noop)
 
-    def test_sqlite_takes_precedence_over_clickhouse(self):
+    def test_clickhouse_wins_when_both_env_vars_set(self):
+        # ClickHouse is an explicit opt-in (operator set the URL on
+        # purpose), so when both vars are present it takes precedence
+        # over a stale or coexisting SIGMOND_SQLITE_PATH.
         w = Writer.from_env(
             table="spots", mode="psk",
             env={
@@ -265,12 +268,41 @@ class TestWriterFromEnvDispatch(unittest.TestCase):
                 "SIGMOND_CLICKHOUSE_URL": "http://localhost:8123",
             },
         )
-        self.assertIsInstance(w, SqliteWriter)
-
-    def test_neither_yields_noop_clickhouse_writer(self):
-        w = Writer.from_env(table="spots", mode="psk", env={})
         self.assertIsInstance(w, Writer)
-        self.assertTrue(w.is_noop)
+        self.assertNotIsInstance(w, SqliteWriter)
+
+    def test_neither_set_with_no_default_dir_yields_noop(self):
+        # When /var/lib/sigmond doesn't exist and can't be created, the
+        # fallback is no-op (preserves standalone-safety).  We force this
+        # by monkeypatching the writability probe to return False.
+        from sigmond.hamsci_ch import writer as writer_mod
+        original = writer_mod._default_sqlite_writable
+        writer_mod._default_sqlite_writable = lambda _p: False
+        try:
+            w = Writer.from_env(table="spots", mode="psk", env={})
+            self.assertIsInstance(w, Writer)
+            self.assertTrue(w.is_noop)
+        finally:
+            writer_mod._default_sqlite_writable = original
+
+    def test_neither_set_with_writable_default_yields_sqlite(self):
+        # The new default: SQLite at /var/lib/sigmond/sink.db when the
+        # parent dir is writable.  Inject a temp dir so the test doesn't
+        # need /var/lib/sigmond on the host.
+        tmpdir = tempfile.mkdtemp()
+        try:
+            from sigmond.hamsci_ch import writer as writer_mod
+            original_path = writer_mod._DEFAULT_SQLITE_PATH
+            writer_mod._DEFAULT_SQLITE_PATH = str(Path(tmpdir) / "sink.db")
+            try:
+                w = Writer.from_env(table="spots", mode="psk", env={})
+                self.assertIsInstance(w, SqliteWriter)
+                self.assertFalse(w.is_noop)
+            finally:
+                writer_mod._DEFAULT_SQLITE_PATH = original_path
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

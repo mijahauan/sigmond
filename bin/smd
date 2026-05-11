@@ -4490,7 +4490,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate ka9q-watch psk-watch wisdom timestd-tune-storage completion"
+    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate ka9q-watch psk-watch wisdom timestd-tune-storage storage completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -4547,6 +4547,9 @@ _smd_complete() {
                 config)
                     COMPREPLY=($(compgen -W "show migrate backup restore init edit" -- "$cur"))
                     ;;
+                storage)
+                    COMPREPLY=($(compgen -W "migrate-to-sqlite" -- "$cur"))
+                    ;;
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
                     ;;
@@ -4557,6 +4560,13 @@ _smd_complete() {
             ;;
         *)
             case "${words[1]}" in
+                storage)
+                    case "${words[2]}" in
+                        migrate-to-sqlite)
+                            COMPREPLY=($(compgen -W "--yes" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
                 install)
                     COMPREPLY=($(compgen -W "$components --components --client-dir --dry-run --yes --topology" -- "$cur"))
                     ;;
@@ -5234,6 +5244,103 @@ def cmd_timestd_tune_storage(args) -> int:
     return 0
 
 
+def cmd_storage_migrate_to_sqlite(args) -> int:
+    """Remove a local ClickHouse install once SQLite is the chosen sink.
+
+    SQLite is now the sigmond default sink (see hamsci_ch.Writer.from_env).
+    On hosts that were set up when ClickHouse was the only option, the
+    `clickhouse-server` package + /var/lib/clickhouse + sigmond-clickhouse
+    service unit keep consuming RAM and merge-CPU even after producer
+    clients have moved over to SQLite.  This verb enumerates and (with
+    --yes) removes those artifacts.
+
+    Default behavior is dry-run.  --yes is required to actually stop
+    services, purge packages, and delete data.
+    """
+    try:
+        from sigmond.storage_migrate import (
+            plan_clickhouse_removal, execute_removal, NotConfirmed,
+        )
+    except ImportError as e:
+        _err(f"storage migration module not available: {e}")
+        return 1
+
+    apply = getattr(args, 'yes', False)
+    if apply and _need_root('storage migrate-to-sqlite --yes'):
+        return 1
+
+    plan = plan_clickhouse_removal()
+
+    if plan.is_empty:
+        print("No ClickHouse artifacts found on this host — nothing to do.")
+        return 0
+
+    print("ClickHouse artifacts detected on this host:")
+    print()
+    if plan.services_to_stop:
+        print("  Services to stop:")
+        for u in plan.services_to_stop:
+            print(f"    - {u}")
+    if plan.services_to_disable:
+        print("  Services to disable:")
+        for u in plan.services_to_disable:
+            print(f"    - {u}")
+    if plan.packages_to_purge:
+        print("  Debian packages to purge:")
+        for p in plan.packages_to_purge:
+            print(f"    - {p}")
+    if plan.paths_to_remove:
+        print("  Directories to delete (data + config + venv):")
+        for d in plan.paths_to_remove:
+            print(f"    - {d}")
+    if plan.files_to_remove:
+        print("  Files to delete:")
+        for f in plan.files_to_remove:
+            print(f"    - {f}")
+    print()
+
+    if not apply:
+        print("Dry run.  Re-run with --yes to perform the removal.")
+        print("WARNING: --yes will permanently delete /var/lib/clickhouse "
+              "and any rows it holds.  Drain unsent rows first if needed.")
+        return 0
+
+    print("Executing removal...")
+    plan.confirmed = True
+    try:
+        if _HAS_SIGMOND_LIB:
+            # Acquire the lifecycle lock — stopping clickhouse-server
+            # counts as a service mutation, mustn't race with
+            # smd start / stop / apply.
+            with lifecycle_lock(reason='storage migrate-to-sqlite'):
+                report = execute_removal(plan)
+        else:
+            report = execute_removal(plan)
+    except NotConfirmed as e:  # belt-and-braces; we just set confirmed
+        _err(str(e))
+        return 1
+
+    if report.stopped:
+        print(f"  stopped:      {', '.join(report.stopped)}")
+    if report.disabled:
+        print(f"  disabled:     {', '.join(report.disabled)}")
+    if report.purged:
+        print(f"  purged:       {', '.join(report.purged)}")
+    if report.removed_paths:
+        print(f"  removed dirs: {', '.join(report.removed_paths)}")
+    if report.removed_files:
+        print(f"  removed file: {', '.join(report.removed_files)}")
+    if report.errors:
+        print()
+        print("Errors (some artifacts may still be present):")
+        for err in report.errors:
+            print(f"  - {err}")
+        return 2
+    print()
+    print("ClickHouse removal complete.")
+    return 0
+
+
 def cmd_psk_watch(args) -> int:
     """Live tail of psk-recorder's PSK Reporter upload activity.
 
@@ -5656,6 +5763,8 @@ def main() -> int:
               Operate (run things now — may need sudo):
                 start / stop / restart / reload    systemd verbs
                 apply      reconcile running services with current config
+                storage    manage local sink backend (SQLite default;
+                           migrate-to-sqlite removes leftover ClickHouse)
                 tui        launch interactive TUI
 
               Other:
@@ -5856,6 +5965,23 @@ def main() -> int:
     p_tts.add_argument('--apply', action='store_true',
                        help='write the drop-ins (default: print recommendation only)')
 
+    # storage — local sink backend management (SQLite is now the default;
+    # this verb removes leftover ClickHouse installs on migrated hosts).
+    p_storage = sub.add_parser('storage',
+                               help='manage the local sink backend '
+                                    '(SQLite default; remove leftover '
+                                    'ClickHouse install)')
+    storage_sub = p_storage.add_subparsers(dest='storage_command')
+    p_mig = storage_sub.add_parser(
+        'migrate-to-sqlite',
+        help='remove a local ClickHouse install once SQLite is the '
+             'chosen sink (default: dry-run; --yes to execute)',
+    )
+    p_mig.add_argument('--yes', action='store_true',
+                       help='actually stop services, purge packages, '
+                            'and delete /var/lib/clickhouse '
+                            '(destructive; requires root)')
+
     p_psk = sub.add_parser('psk-watch',
                            help='live tail of PSK Reporter upload events '
                                 '(per-poll ft8/ft4 counts + batch flushes)')
@@ -6044,6 +6170,13 @@ def main() -> int:
 
     if args.command == 'psk-watch':
         return cmd_psk_watch(args)
+
+    if args.command == 'storage':
+        storage_cmd = getattr(args, 'storage_command', None)
+        if storage_cmd == 'migrate-to-sqlite':
+            return cmd_storage_migrate_to_sqlite(args)
+        p_storage.print_help()
+        return 0
 
     if args.command == 'timestd-tune-storage':
         return cmd_timestd_tune_storage(args)

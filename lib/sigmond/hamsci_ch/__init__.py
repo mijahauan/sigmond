@@ -3,11 +3,20 @@
 Producer clients call `Writer.from_env(...)` and get back a backend
 chosen at construction time from the environment:
 
-- `SIGMOND_SQLITE_PATH` set     → `SqliteWriter` (local FIFO queue,
-  recommended for client hosts; tens of MB RAM, no daemon).
-- `SIGMOND_CLICKHOUSE_URL` set  → ClickHouse `Writer` (matches the
-  upstream wsprdaemon-server shape; heavier, OLAP-grade).
-- Neither set                   → no-op (standalone-safe).
+- `SIGMOND_CLICKHOUSE_URL` set  → ClickHouse `Writer` (explicit opt-in;
+  matches upstream wsprdaemon-server shape; heavier, OLAP-grade).
+- `SIGMOND_SQLITE_PATH` set     → `SqliteWriter` at that path
+  (explicit override).
+- Neither set                   → `SqliteWriter` at the default sigmond
+  state path `/var/lib/sigmond/sink.db`, IF the directory is writable.
+  Otherwise no-op (preserves standalone-safety for clients running
+  outside a sigmond install).
+
+SQLite is the default because a sigmond client host's local sink is
+just a store-and-forward buffer for the future `hs-uploader`; running
+ClickHouse-as-buffer would burn 1-2 GB of RAM and several merge-CPU
+cores for no benefit there.  Hosts that need the upstream columnar
+tier opt in explicitly with `SIGMOND_CLICKHOUSE_URL`.
 
 Both writers expose the same `insert/flush/close/health/is_noop/
 buffered` interface, so callers don't branch.  `BufferFull` is the
