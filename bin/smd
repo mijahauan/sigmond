@@ -5433,32 +5433,46 @@ def cmd_psk_watch(args) -> int:
         log_path = candidates[0]
 
     _heading(f'PSK Reporter upload activity ({log_path.name})')
-    _info('   ▸ "queued ft8=N ft4=M"   per 5 s poll  (rate INTO library batch)')
-    _info('   ▸ "uploading N spots"    per ~30 s flush  (sent OUT to PSK Reporter)')
-    _info('   ▸ ✓/✗ on each upload     reconciles uploaded count vs sum of polls fed')
+    _info('   ▸ hs-uploader path (PSK_USE_HS_UPLOADER=1):')
+    _info('     "shipped ft8=N ft4=M"   per ~30 s pump cycle')
+    _info('     each line annotated with current time and seconds since prev')
+    _info('   ▸ legacy CH-polled path (fallback when older uploader is active):')
+    _info('     "queued ft8=N ft4=M"    per 5 s poll')
+    _info('     "uploading N spots"    per ~30 s flush, with ✓/✗ reconciliation')
     _info('   Ctrl-C to exit.')
     print()
 
     import re as _re
+    import time as _time
+    import datetime as _datetime
     queue_re = _re.compile(r'queued ft8=(\d+) ft4=(\d+)')
     upload_re = _re.compile(r'uploading (\d+) spots using (\w+)')
+    # New-uploader line shape:
+    #   psk-uploader-hs: shipped ft8=N ft4=M (total ft8=A ft4=B, work=W)
+    shipped_re = _re.compile(
+        r'psk-uploader-hs: shipped ft8=(\d+) ft4=(\d+)'
+    )
 
     # Per-batch accumulator: sum of queued spots since the last upload.
     pending_polls: int = 0
     pending_spots: int = 0
+    # "Seconds since previous shipped line" — None until the first
+    # shipped line is seen.  Wall-clock based, not monotonic, so
+    # operators reading the timestamp see real-world time.
+    last_shipped_at: Optional[float] = None
     sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
     # Match all the lines we want to forward; let grep do the prefilter so
     # the python loop only sees relevant lines (the daemon log includes
     # ka9q.control LIFETIME chatter we want to suppress).  Covers both
     # generations of uploader:
     #   * legacy `psk-uploader-ch:` (CH-polling, with reconciliation lines)
-    #   * new    `psk-uploader-hs:` (hs-uploader pipeline; pump-with-work
-    #                                lines from psk-recorder commit-TODO)
+    #   * new    `psk-uploader-hs:` (hs-uploader pipeline; per-mode
+    #                                shipped counts per pump cycle)
     pattern = (r'psk-uploader-ch: queued ft8=|'
                r'psk-uploader-ch: batch [0-9]|'
                r'uploading [0-9]+ spots using|'
                r'psk-uploader-ch (started|stopped|disabled)|'
-               r'psk-uploader-hs: pump shipped|'
+               r'psk-uploader-hs: shipped ft8=|'
                r'psk-uploader-hs (started|stopped)')
     try:
         tl = subprocess.Popen(
@@ -5510,6 +5524,25 @@ def cmd_psk_watch(args) -> int:
                 print(f'{line}  [{tag}]', flush=True)
                 pending_polls = 0
                 pending_spots = 0
+                continue
+            sm = shipped_re.search(line)
+            if sm:
+                # New-uploader event: annotate with wall-clock time
+                # and seconds-since-previous so operators reading the
+                # tail get a sense of cadence at a glance.
+                ft8 = int(sm.group(1))
+                ft4 = int(sm.group(2))
+                now = _time.time()
+                hhmmss = _datetime.datetime.now().strftime('%H:%M:%S')
+                if last_shipped_at is None:
+                    gap = '—'
+                else:
+                    gap = f'{int(now - last_shipped_at)}s'
+                last_shipped_at = now
+                print(
+                    f'[{hhmmss} +{gap}] ft8={ft8:>3} ft4={ft4:>2}',
+                    flush=True,
+                )
                 continue
             # Anything else (batch summary, started/stopped) — pass through
             # untouched, don't reset the accumulator (batch summary fires
