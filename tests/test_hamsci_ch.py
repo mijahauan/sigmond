@@ -46,11 +46,15 @@ class FakeClient:
             raise RuntimeError("simulated describe failure")
         return FakeQueryResult(self.describe_columns)
 
-    def insert(self, table, rows):
+    def insert(self, table, rows, column_names=None):
+        # Real clickhouse_connect accepts an optional `column_names=`
+        # kwarg; writer.py uses it when inserting list-of-dicts so
+        # default columns (e.g. ingested_at) get populated server-side.
+        # The fake stores it alongside the rows for tests that care.
         if self.fail_insert_n > 0:
             self.fail_insert_n -= 1
             raise RuntimeError("simulated insert failure")
-        self.inserts.append((table, list(rows)))
+        self.inserts.append((table, list(rows), column_names))
 
     def close(self):
         self.closed = True

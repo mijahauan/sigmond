@@ -1,0 +1,35 @@
+# Runs the sigmond test suite on every push to main and every PR.
+#
+# Why these dependencies:
+#   - pytest:   5 test modules use the pytest framework (catalog,
+#               installer, lifecycle, log_cmd, radiod_fragments).
+#   - textual:  test_tui_timing imports sigmond.tui.screens.timing,
+#               which in turn pulls textual at module load.
+# Core sigmond stays stdlib-only per CLAUDE.md; these are *test-only*
+# deps and are not implied for end users.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test-only deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest textual
+
+      - name: Run unittest suite
+        run: python -m unittest discover tests -v
