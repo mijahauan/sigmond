@@ -84,6 +84,7 @@ import shutil
 import subprocess
 import textwrap
 import time
+from typing import Optional
 
 # Bootstrap step 2 — add sibling lib/ to sys.path so `import sigmond`
 # works when running from the repo, from /usr/local/sbin/smd, or from a
@@ -5403,21 +5404,21 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
 
 def _psk_watch_cycle_loop(
     log_path: Path, ft8_log: Path, ft4_log: Path,
-    *, show_spots: bool,
+    *, max_lines_per_mode: Optional[int],
 ) -> int:
-    """Per-FT8-cycle psk-watch loop (default and -v share this).
+    """Per-FT8-cycle psk-watch loop — default, N, and -v all share this.
 
     Every 15 s (FT8 cadence), after a settle window for the decoder
-    to finish, count every new line that landed in `<instance>-ft8.log`
+    to finish, read every new line that landed in `<instance>-ft8.log`
     and `<instance>-ft4.log` since the previous fire.  Two FT4 cycles
     (2 × 7.5 s) fit inside one FT8 cycle, so a 15 s window naturally
     catches "previous two FT4 cycles + most recent FT8 cycle".
 
-    Two display modes share this loop:
-      * `show_spots=False` (default, no args) — one summary line per
-        cycle, no per-spot detail.
-      * `show_spots=True` (`-v`) — full per-spot dump grouped by mode
-        and cycle, plus the summary at the bottom.
+    `max_lines_per_mode` controls per-spot detail:
+      * `0`   (no args)  — summary line only, no per-spot detail.
+      * `N`   (positional N) — show up to N spots per mode under
+                                the summary (truncates after sort).
+      * `None` (`-v`)    — show every spot, no cap.
 
     Loop cadence is wall-clock UTC: fire at the next 15 s boundary
     plus `SETTLE` seconds (4 s — long enough for decode_ft8 to finish
@@ -5426,13 +5427,19 @@ def _psk_watch_cycle_loop(
     """
     SETTLE = 4.0
     SLOT_SEC = 15.0
+    show_spots = max_lines_per_mode != 0
     _heading(f'PSK Reporter per-cycle activity ({log_path.name})')
     _info(f'   ▸ every {int(SLOT_SEC)} s (FT8 cadence) + {SETTLE:.0f} s settle:')
-    if show_spots:
+    if max_lines_per_mode is None:
         _info(f'     ALL FT8 spots from the last {int(SLOT_SEC)} s cycle')
         _info(f'     ALL FT4 spots from the last {int(SLOT_SEC)} s (= 2 × 7.5 s)')
+    elif max_lines_per_mode > 0:
+        _info(f'     first {max_lines_per_mode} spot'
+              f'{"s" if max_lines_per_mode != 1 else ""} of each mode '
+              f'(sorted by time then freq); summary below')
     else:
-        _info(f'     summary counts only (pass -v to see every spot)')
+        _info(f'     summary counts only (pass N to see first N spots, '
+              f'-v to see all)')
     _info('   Ctrl-C to exit.')
     print(flush=True)
 
@@ -5521,41 +5528,54 @@ def _psk_watch_cycle_loop(
 
             wall = time.strftime('%H:%M:%S', time.gmtime(next_boundary))
             now_str = time.strftime('%H:%M:%S')
+
+            # Slice to max_lines_per_mode if requested.  None = no cap.
+            cap = max_lines_per_mode
+            ft8_show = ft8_lines if cap is None else ft8_lines[:cap]
+            ft4_show = ft4_lines if cap is None else ft4_lines[:cap]
+
+            # Per-FT4-cycle counts come from the FULL list — the cap
+            # only affects what we PRINT, not what we COUNT.
+            ft4_parts = [f'{ts}: {n}'
+                         for ts, n in sorted(ft4_by_cycle.items())]
+            ft4_summary = (' + '.join(ft4_parts)) if ft4_parts else '—'
+
             if show_spots:
-                # Verbose path: full per-spot dump + summary at the end.
+                # Detail path (cap=N or no-cap with -v): per-spot dump
+                # bracketed by a slot heading, summary at the end.
                 print(f'─── slot UTC {wall} ─────────────────────────────────',
                       flush=True)
-                for line in ft8_lines:
+                for line in ft8_show:
                     print(f'  ft8: {line}', flush=True)
+                if cap is not None and len(ft8_lines) > len(ft8_show):
+                    print(f'  ft8: … ({len(ft8_lines) - len(ft8_show)} more)',
+                          flush=True)
                 # Blank line between the FT8 block and the FT4 block
                 # when both have content, and another blank between
                 # the two FT4 cycle blocks.  Lines are already sorted
                 # by (timestamp, freq), so a timestamp change marks a
                 # cycle boundary.
-                if ft8_lines and ft4_lines:
+                if ft8_show and ft4_show:
                     print(flush=True)
                 prev_ts: str = ''
-                for line in ft4_lines:
+                for line in ft4_show:
                     m = spot_re.match(line)
                     this_ts = m.group(1) if m else ''
                     if prev_ts and this_ts and this_ts != prev_ts:
                         print(flush=True)
                     print(f'  ft4: {line}', flush=True)
                     prev_ts = this_ts
+                if cap is not None and len(ft4_lines) > len(ft4_show):
+                    print(f'  ft4: … ({len(ft4_lines) - len(ft4_show)} more)',
+                          flush=True)
                 if not ft8_lines and not ft4_lines:
                     print('  (no decodes this cycle)', flush=True)
                 else:
-                    ft4_parts = [f'{ts}: {n}'
-                                 for ts, n in sorted(ft4_by_cycle.items())]
-                    ft4_summary = (' + '.join(ft4_parts)) if ft4_parts else '0'
                     print(f'  → ft8 total={len(ft8_lines)}   '
                           f'ft4 total={len(ft4_lines)} ({ft4_summary})',
                           flush=True)
             else:
-                # Default path: one-line summary per cycle.
-                ft4_parts = [f'{ts}: {n}'
-                             for ts, n in sorted(ft4_by_cycle.items())]
-                ft4_summary = (' + '.join(ft4_parts)) if ft4_parts else '—'
+                # Summary path (no args, cap=0): one line per cycle.
                 print(
                     f'[{now_str}] slot UTC {wall}  '
                     f'ft8={len(ft8_lines):>3}  '
@@ -5609,19 +5629,21 @@ def cmd_psk_watch(args) -> int:
     ft8_log = log_path.with_name(f'{instance_stem}-ft8.log')
     ft4_log = log_path.with_name(f'{instance_stem}-ft4.log')
 
+    # All three modes share the per-FT8-cycle loop.  `-v` shows
+    # every spot (cap=None); N shows up to N per mode; no args
+    # shows summary only (cap=0).
     if verbose:
-        return _psk_watch_cycle_loop(
-            log_path, ft8_log, ft4_log, show_spots=True,
-        )
-    if n_recent == 0:
-        # No arguments → per-FT8-cycle summary every 15 s.  The legacy
-        # uploader-tail mode is still reachable by passing N (e.g.
-        # `smd psk-watch 5`) for hosts where per-shipped-event detail
-        # matters more than per-cycle counts.
-        return _psk_watch_cycle_loop(
-            log_path, ft8_log, ft4_log, show_spots=False,
-        )
+        cap: Optional[int] = None
+    else:
+        cap = n_recent if n_recent > 0 else 0
+    return _psk_watch_cycle_loop(
+        log_path, ft8_log, ft4_log, max_lines_per_mode=cap,
+    )
 
+    # NOTE: the legacy `psk-uploader-ch:` pump-event tail mode used to
+    # live here; removed since the per-cycle loop above is strictly
+    # more informative (counts the same events plus per-FT4-cycle
+    # breakdown).  The dead code below would never execute.
     _heading(f'PSK Reporter upload activity ({log_path.name})')
     _info('   ▸ hs-uploader path (PSK_USE_HS_UPLOADER=1):')
     _info('     "shipped ft8=N ft4=M"   per ~30 s pump cycle')
@@ -6304,15 +6326,12 @@ def main() -> int:
                            help='live tail of PSK Reporter upload events '
                                 '(per-poll ft8/ft4 counts + batch flushes)')
     p_psk.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
-                       help='also print the last N decoded spots from each '
-                            'per-mode log under each "shipped" line '
-                            '(default: 0 = counts only)')
+                       help='per-FT8-cycle mode (15 s cadence): print up to '
+                            'N spots from each mode under each cycle summary '
+                            '(default 0 = counts only; -v = print all)')
     p_psk.add_argument('-v', '--verbose', action='store_true',
-                       help='per-cycle mode: every 15 s (after slot decode '
-                            'settles), print ALL FT8 spots from the last '
-                            '15 s cycle and ALL FT4 spots from the last two '
-                            '7.5 s cycles.  Replaces the default '
-                            '"counts + age" line output.')
+                       help='per-cycle mode showing ALL spots — same '
+                            'cadence as N, no per-mode cap')
     p_psk.add_argument('--instance', metavar='RADIOD_ID', default=None,
                        help='specific radiod instance (default: most recently '
                             'modified /var/log/psk-recorder/<id>.log)')
