@@ -50,6 +50,22 @@ _SEVERITY_GLYPH = {
 }
 
 
+def _path_exists(p: Path) -> bool:
+    """Path.exists() that treats PermissionError as 'not present'.
+
+    `/home/wsprdaemon` is typically 0750 and owned by the wsprdaemon
+    service user, so probing `/home/wsprdaemon/ka9q-python` from any
+    other user trips a PermissionError out of os.stat.  We treat
+    unreadable candidates as "doesn't exist for us" — the next
+    candidate in the search path gets a chance.  Other OSErrors
+    (e.g. ELOOP, ENAMETOOLONG) are likewise swallowed.
+    """
+    try:
+        return p.exists()
+    except (PermissionError, OSError):
+        return False
+
+
 def _resolve_path(name: str, override: Optional[str], env_var: str) -> Optional[Path]:
     """Resolve a checkout path with this priority:
        1. explicit --flag override
@@ -59,20 +75,20 @@ def _resolve_path(name: str, override: Optional[str], env_var: str) -> Optional[
     """
     if override:
         p = Path(override).expanduser().resolve()
-        return p if p.exists() else None
+        return p if _path_exists(p) else None
 
     env_val = os.environ.get(env_var)
     if env_val:
         p = Path(env_val).expanduser().resolve()
-        return p if p.exists() else None
+        return p if _path_exists(p) else None
 
     standard = SIGMOND_GIT_ROOT / name
-    if standard.exists():
+    if _path_exists(standard):
         return standard.resolve()
 
     for base in DEV_LOCATIONS:
         candidate = base / name
-        if candidate.exists():
+        if _path_exists(candidate):
             return candidate.resolve()
 
     return None
