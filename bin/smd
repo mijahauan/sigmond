@@ -5746,13 +5746,15 @@ def cmd_wspr_watch(args) -> int:
 
     sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
     try:
-        # `--since "10 min ago"` so the operator sees a few recent
-        # cycles immediately instead of waiting up to 2 min for the
-        # next WSPR cycle to fire.  `-f` keeps following past that
-        # backlog.
+        # `--since "30 min ago"` so the operator sees a meaningful
+        # backlog immediately.  10 min was tight on quiet bands
+        # (several cycles per WSPR period produce zero spots, so the
+        # uploader emits no DONE line for them) — 30 min spans enough
+        # cycles to give a sense of activity regardless of band
+        # conditions.  `-f` keeps following past that backlog.
         proc = subprocess.Popen(
             [*sudo_prefix, 'journalctl', '-fu', unit, '-o', 'cat',
-             '--since', '10 min ago'],
+             '--since', '30 min ago'],
             stdout=subprocess.PIPE, text=True, bufsize=1,
         )
     except FileNotFoundError as exc:
