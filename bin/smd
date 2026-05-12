@@ -22,9 +22,10 @@ Observe (what is, read-only):
     smd log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd environment list | probe | describe                      discover network peers
-    smd ka9q-watch                                               upstream-drift watcher
-    smd psk-watch   [N | -v]                                     PSK Reporter upload events
-    smd wspr-watch  [N | -v]                                     WSPRnet upload events
+    smd watch       <wspr|psk|ka9q> [args...]                    unified service watcher
+    smd ka9q-watch                                               upstream-drift watcher (alias)
+    smd psk-watch   [N | -v]                                     PSK Reporter upload events (alias)
+    smd wspr-watch  [N | -v]                                     WSPRnet upload events (alias)
 
 Operate (run things now, may need sudo):
     smd start       [<component> [<instance>]]
@@ -4495,7 +4496,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate ka9q-watch psk-watch wspr-watch wisdom timestd-tune-storage storage completion"
+    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch ka9q-watch psk-watch wspr-watch wisdom timestd-tune-storage storage completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -4555,6 +4556,9 @@ _smd_complete() {
                 storage)
                     COMPREPLY=($(compgen -W "migrate-to-sqlite trim" -- "$cur"))
                     ;;
+                watch)
+                    COMPREPLY=($(compgen -W "wspr psk ka9q" -- "$cur"))
+                    ;;
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
                     ;;
@@ -4572,6 +4576,19 @@ _smd_complete() {
                             ;;
                         trim)
                             COMPREPLY=($(compgen -W "--max-age --db --target-db --target-table --yes" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
+                watch)
+                    case "${words[2]}" in
+                        wspr)
+                            COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
+                            ;;
+                        psk)
+                            COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
+                            ;;
+                        ka9q)
+                            COMPREPLY=($(compgen -W "--ka9q-python --ka9q-radio --remote --branch --no-fetch --json" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -6452,6 +6469,52 @@ def _reexec_into_tui_venv() -> int:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _add_wspr_watch_args(p) -> None:
+    """Argument spec shared by `smd wspr-watch` and `smd watch wspr`."""
+    p.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
+                   help='also print up to N DIAG SIMILAR per-spot rows '
+                        'per batch (default 0 = no SIMILAR rows; '
+                        '-v = print all)')
+    p.add_argument('-v', '--verbose', action='store_true',
+                   help='also print ALL DIAG SIMILAR per-spot rows '
+                        '(near-frequency duplicates flagged by WSPRnet)')
+    p.add_argument('--instance', metavar='CALL_GRID', default=None,
+                   help='specific station instance, e.g. AC0G-B4_EM38ww '
+                        '(default: first active wd-upload-wsprnet@*)')
+
+
+def _add_psk_watch_args(p) -> None:
+    """Argument spec shared by `smd psk-watch` and `smd watch psk`."""
+    p.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
+                   help='per-FT8-cycle mode (15 s cadence): print up to '
+                        'N spots from each mode under each cycle summary '
+                        '(default 0 = counts only; -v = print all)')
+    p.add_argument('-v', '--verbose', action='store_true',
+                   help='per-cycle mode showing ALL spots — same '
+                        'cadence as N, no per-mode cap')
+    p.add_argument('--instance', metavar='RADIOD_ID', default=None,
+                   help='specific radiod instance (default: most recently '
+                        'modified /var/log/psk-recorder/<id>.log)')
+
+
+def _add_ka9q_watch_args(p) -> None:
+    """Argument spec shared by `smd ka9q-watch` and `smd watch ka9q`."""
+    p.add_argument('--ka9q-python', metavar='PATH',
+                   help='path to ka9q-python checkout '
+                        '(default: $KA9Q_PYTHON_PATH or /opt/git/sigmond/ka9q-python)')
+    p.add_argument('--ka9q-radio', metavar='PATH',
+                   help='path to ka9q-radio checkout '
+                        '(default: $KA9Q_RADIO_PATH or /opt/git/sigmond/ka9q-radio)')
+    p.add_argument('--remote', default='origin',
+                   help='git remote to compare against (default: origin)')
+    p.add_argument('--branch', default='main',
+                   help='upstream branch to compare against (default: main)')
+    p.add_argument('--no-fetch', action='store_true',
+                   help="skip 'git fetch' (use local refs as-is)")
+    p.add_argument('--json', action='store_true',
+                   help='emit machine-readable JSON')
+
+
 def main() -> int:
     # Hide argparse's auto-generated subparser listing — the grouped
     # epilog covers the same verbs categorised by intent (Configure /
@@ -6486,7 +6549,8 @@ def main() -> int:
                 log        tail journal or file logs
                 diag       diagnostics  (net | cpu-affinity | cpu-freq)
                 environment   discover network peers
-                ka9q-watch upstream-drift watcher
+                watch      unified live-tail interface
+                           (wspr | psk | ka9q)
 
               Operate (run things now — may need sudo):
                 start / stop / restart / reload    systemd verbs
@@ -6745,51 +6809,54 @@ def main() -> int:
 
     p_psk = sub.add_parser('psk-watch',
                            help='live tail of PSK Reporter upload events '
-                                '(per-poll ft8/ft4 counts + batch flushes)')
-    p_psk.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
-                       help='per-FT8-cycle mode (15 s cadence): print up to '
-                            'N spots from each mode under each cycle summary '
-                            '(default 0 = counts only; -v = print all)')
-    p_psk.add_argument('-v', '--verbose', action='store_true',
-                       help='per-cycle mode showing ALL spots — same '
-                            'cadence as N, no per-mode cap')
-    p_psk.add_argument('--instance', metavar='RADIOD_ID', default=None,
-                       help='specific radiod instance (default: most recently '
-                            'modified /var/log/psk-recorder/<id>.log)')
+                                '(alias: smd watch psk)')
+    _add_psk_watch_args(p_psk)
 
     # wspr-watch — live tail of wsprdaemon-client's WSPRnet upload activity
     p_wspr = sub.add_parser('wspr-watch',
                             help='live tail of WSPRnet upload events '
-                                 '(two lines per batch: "start" + "done")')
-    p_wspr.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
-                        help='also print up to N DIAG SIMILAR per-spot rows '
-                             'per batch (default 0 = no SIMILAR rows; '
-                             '-v = print all)')
-    p_wspr.add_argument('-v', '--verbose', action='store_true',
-                        help='also print ALL DIAG SIMILAR per-spot rows '
-                             '(near-frequency duplicates flagged by WSPRnet)')
-    p_wspr.add_argument('--instance', metavar='CALL_GRID', default=None,
-                        help='specific station instance, e.g. AC0G-B4_EM38ww '
-                             '(default: first active wd-upload-wsprnet@*)')
+                                 '(alias: smd watch wspr)')
+    _add_wspr_watch_args(p_wspr)
 
     # ka9q-watch — alert on upstream ka9q-radio changes that could break clients
     p = sub.add_parser('ka9q-watch',
                        help='check ka9q-radio upstream for changes that could '
-                            'break ka9q-python RTP clients')
-    p.add_argument('--ka9q-python', metavar='PATH',
-                   help='path to ka9q-python checkout '
-                        '(default: $KA9Q_PYTHON_PATH or /opt/git/sigmond/ka9q-python)')
-    p.add_argument('--ka9q-radio', metavar='PATH',
-                   help='path to ka9q-radio checkout '
-                        '(default: $KA9Q_RADIO_PATH or /opt/git/sigmond/ka9q-radio)')
-    p.add_argument('--remote', default='origin',
-                   help='git remote to compare against (default: origin)')
-    p.add_argument('--branch', default='main',
-                   help='upstream branch to compare against (default: main)')
-    p.add_argument('--no-fetch', action='store_true',
-                   help="skip 'git fetch' (use local refs as-is)")
-    p.add_argument('--json', action='store_true',
-                   help='emit machine-readable JSON')
+                            'break ka9q-python RTP clients '
+                            '(alias: smd watch ka9q)')
+    _add_ka9q_watch_args(p)
+
+    # watch — unified live-tail / observe interface
+    #
+    # Convenience verb so each per-service watcher is reachable via a
+    # consistent `smd watch <service>` shape, in addition to the older
+    # standalone names.  Targets share their argument specs with the
+    # standalone verbs (`_add_*_watch_args` helpers), so behavior is
+    # identical — only the invocation is different.
+    p_watch = sub.add_parser('watch',
+                             help='unified live-tail interface '
+                                  '(smd watch wspr | psk | ka9q)')
+    watch_sub = p_watch.add_subparsers(dest='watch_target')
+
+    p_w_wspr = watch_sub.add_parser(
+        'wspr',
+        help='live tail of WSPRnet upload events '
+             '(two lines per batch: "start" + "done")',
+    )
+    _add_wspr_watch_args(p_w_wspr)
+
+    p_w_psk = watch_sub.add_parser(
+        'psk',
+        help='live tail of PSK Reporter upload events '
+             '(per-poll ft8/ft4 counts + batch flushes)',
+    )
+    _add_psk_watch_args(p_w_psk)
+
+    p_w_ka9q = watch_sub.add_parser(
+        'ka9q',
+        help='check ka9q-radio upstream for changes that could '
+             'break ka9q-python RTP clients',
+    )
+    _add_ka9q_watch_args(p_w_ka9q)
 
     # config (Phase 1)
     p_config = sub.add_parser('config',
@@ -6956,6 +7023,21 @@ def main() -> int:
 
     if args.command == 'wspr-watch':
         return cmd_wspr_watch(args)
+
+    if args.command == 'watch':
+        target = getattr(args, 'watch_target', None)
+        if target == 'wspr':
+            return cmd_wspr_watch(args)
+        if target == 'psk':
+            return cmd_psk_watch(args)
+        if target == 'ka9q':
+            if not _HAS_SIGMOND_LIB:
+                print('smd: sigmond library not found; install '
+                      'lib/sigmond alongside bin/smd', file=sys.stderr)
+                return 1
+            return cmd_ka9q_watch(args)
+        p_watch.print_help()
+        return 0
 
     if args.command == 'storage':
         storage_cmd = getattr(args, 'storage_command', None)
