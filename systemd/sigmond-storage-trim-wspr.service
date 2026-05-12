@@ -1,0 +1,24 @@
+# /etc/systemd/system/sigmond-storage-trim-wspr.service
+[Unit]
+Description=Sigmond storage trim — wspr.spots @ 24h
+Documentation=https://github.com/mijahauan/sigmond
+ConditionPathExists=/var/lib/sigmond/sink.db
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+
+# The legacy wd-upload-wsprdaemon@ + wd-upload-wsprnet@ services
+# ship wspr.spots to wsprdaemon.org and wsprnet.org via their own
+# tarball + HTTP flows.  The SQLite copy under pending_uploads
+# (written by wd-ch-write) is a local archive only — duplicate
+# of the same rows the legacy uploaders just shipped.  24-hour
+# retention is plenty for diagnostics + replay; the upcoming
+# hs-uploader-driven WsprdaemonTar / WsprNet path will drain
+# these rows on ack and trim becomes a no-op in steady state.
+ExecStart=/usr/local/bin/smd storage trim --target-db wspr --max-age 24h --yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-storage-trim-wspr
