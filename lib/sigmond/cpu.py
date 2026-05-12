@@ -709,6 +709,18 @@ def _is_kernel_thread(status: dict) -> bool:
     return status.get('PPid') in ('2', '0') or status.get('Pid') == '2'
 
 
+# Process `comm` prefixes that are known-benign helpers inheriting
+# radiod's cgroup cpuset.  These are advertised by ka9q-radio for mDNS
+# and run idle except for occasional network responses; their overlap
+# with radiod cores has no measurable scheduling cost AND can't be
+# fixed at the process level (radiod's `AllowedCPUs=` cpuset is
+# enforced at the cgroup, so `taskset` returns EINVAL on children).
+# Suppress them from the contention list so the harmonize rule's
+# "N pinned process(es) overlap radiod cores" warning isn't tripped
+# by a side effect of correct radiod isolation.
+_BENIGN_RADIOD_HELPER_COMMS = ('avahi-publish-',)
+
+
 def find_contending_processes(
     radiod_cpus: set,
     exclude_pids: Optional[set] = None,
@@ -721,6 +733,11 @@ def find_contending_processes(
     without being scheduled there right now.  Processes with default
     (full-range) affinity are reported with ``is_default=True`` so callers
     can choose to summarize them rather than list each one.
+
+    Known-benign helpers that ka9q-radio spawns under its own cgroup
+    (mDNS publishers via avahi-publish) are silently excluded — their
+    presence on radiod cores is a side effect of correct isolation,
+    not a contention problem.  See ``_BENIGN_RADIOD_HELPER_COMMS``.
 
     Cost: a single ``/proc`` walk (~hundreds of PIDs).  Call per report, not
     in a loop.
@@ -747,6 +764,13 @@ def find_contending_processes(
         if not overlap:
             continue
         comm = status.get('Name', '') or pid
+        # Filter out known-benign helpers — see comment on the
+        # `_BENIGN_RADIOD_HELPER_COMMS` constant.  Comparison is on
+        # the `Name:` field from /proc/<pid>/status (truncated comm,
+        # typically 15 chars); we match a prefix to handle the
+        # `avahi-publish-s` / `avahi-publish-a` variants together.
+        if comm.startswith(_BENIGN_RADIOD_HELPER_COMMS):
+            continue
         results.append(ContendingProcess(
             pid=pid,
             comm=comm,

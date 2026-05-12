@@ -189,6 +189,82 @@ class ContendingProcessTests(unittest.TestCase):
         self.assertFalse(c.is_default)
 
 
+class FindContendingProcessesBenignFilterTests(unittest.TestCase):
+    """Known-benign helpers inheriting radiod's cgroup cpuset (e.g.
+    ``avahi-publish-s/a`` spawned by ka9q-radio) must NOT appear in
+    the contention list — they can't be moved (kernel returns EINVAL)
+    and have negligible CPU cost.  See `_BENIGN_RADIOD_HELPER_COMMS`.
+    """
+
+    def _fake_proc(self, monkeypatch, proc_entries):
+        """Patch /proc walking + status reading with synthetic data.
+
+        `proc_entries` is a dict mapping pid (str) → status dict.  Each
+        status must contain at least 'Cpus_allowed_list' (and optionally
+        'Name', 'PPid', 'Pid').  Missing PPid defaults to '1' so the
+        entry is treated as a userspace process.
+        """
+        from sigmond import cpu as cpu_mod
+
+        class _FakeEntry:
+            def __init__(self, name):
+                self.name = name
+
+        def fake_iterdir(_path=None):
+            return [_FakeEntry(pid) for pid in proc_entries]
+
+        def fake_status(pid):
+            s = dict(proc_entries.get(pid, {}))
+            s.setdefault('PPid', '1')
+            s.setdefault('Pid', pid)
+            return s
+
+        monkeypatch.setattr(cpu_mod.Path, 'iterdir', fake_iterdir)
+        monkeypatch.setattr(cpu_mod, '_read_proc_status_fields', fake_status)
+
+    def test_avahi_publish_helpers_excluded(self):
+        # Use unittest's mock.patch instead of pytest's monkeypatch for
+        # stdlib-only compat with the rest of the test suite.
+        from unittest.mock import patch
+        from sigmond import cpu as cpu_mod
+
+        proc = {
+            '3201851': {'Name': 'avahi-publish-s', 'Cpus_allowed_list': '0-1'},
+            '3201852': {'Name': 'avahi-publish-a', 'Cpus_allowed_list': '0-1'},
+            '3201853': {'Name': 'avahi-publish-s', 'Cpus_allowed_list': '0-1'},
+            '3201854': {'Name': 'avahi-publish-a', 'Cpus_allowed_list': '0-1'},
+            # A real userspace process on radiod cores — should still
+            # be reported, proving the filter targets only the avahi
+            # comms and isn't a blanket suppression.
+            '9999':    {'Name': 'evil-pinned',     'Cpus_allowed_list': '0-1'},
+        }
+
+        class _FakeEntry:
+            def __init__(self, name):
+                self.name = name
+
+        with patch.object(cpu_mod.Path, 'iterdir',
+                          lambda self: [_FakeEntry(p) for p in proc]), \
+             patch.object(cpu_mod, '_read_proc_status_fields',
+                          lambda pid: {**proc[pid],
+                                       'PPid': '1', 'Pid': pid}):
+            results = cpu_mod.find_contending_processes({0, 1})
+
+        comms = [r.comm for r in results]
+        self.assertNotIn('avahi-publish-s', comms)
+        self.assertNotIn('avahi-publish-a', comms)
+        self.assertIn('evil-pinned', comms)
+
+    def test_benign_prefix_constant_is_string_tuple(self):
+        # Guard against the constant being broken to a single string
+        # (which would make str.startswith treat each character as a
+        # separate prefix).
+        from sigmond.cpu import _BENIGN_RADIOD_HELPER_COMMS
+        self.assertIsInstance(_BENIGN_RADIOD_HELPER_COMMS, tuple)
+        self.assertTrue(all(isinstance(s, str)
+                            for s in _BENIGN_RADIOD_HELPER_COMMS))
+
+
 class CacheIslandTests(unittest.TestCase):
     def test_frozen_hashable(self):
         # CacheIsland must be hashable (frozen dataclass) so it can be
