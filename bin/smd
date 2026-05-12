@@ -22,11 +22,12 @@ Observe (what is, read-only):
     smd log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd environment list | probe | describe                      discover network peers
-    smd watch       <wspr|psk|hfdl|ka9q> [args...]               unified service watcher
+    smd watch       <wspr|psk|hfdl|codar|ka9q> [args...]         unified service watcher
     smd ka9q-watch                                               upstream-drift watcher (alias)
     smd psk-watch   [N | -v]                                     PSK Reporter upload events (alias)
     smd wspr-watch  [N | -v]                                     WSPRnet upload events (alias)
     smd hfdl-watch  [N | -v]                                     HFDL decoded-frame activity (alias)
+    smd codar-watch [N | -v]                                     CODAR ionospheric soundings (alias)
 
 Operate (run things now, may need sudo):
     smd start       [<component> [<instance>]]
@@ -4497,7 +4498,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch ka9q-watch psk-watch wspr-watch hfdl-watch wisdom timestd-tune-storage storage completion"
+    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -6449,6 +6450,342 @@ def cmd_hfdl_watch(args) -> int:
         return 130
 
 
+def _format_codar_record(rec: dict) -> str:
+    """Render one codar-sounder JSONL record as a single line.
+
+    Field order chosen to match how the operator scans an ionogram —
+    time first (sub-second matters since CPI window is 15 s and
+    multi-peak records share a timestamp prefix), then SNR (was this
+    a strong return), then the propagation geometry (group range,
+    virtual height, equivalent vertical freq), then the layer label.
+    The trailing (peak_index/peak_count) makes multi-peak CPIs scan-
+    able as a group.
+    """
+    ts = rec.get('timestamp', '')
+    # ISO-8601 → HH:MM:SS.fff.  Trim to 3 sub-second digits if more
+    # precision is present; codar-sounder rounds at microsecond.
+    try:
+        time_part = ts.split('T', 1)[1].split('+', 1)[0].split('Z', 1)[0]
+        if '.' in time_part:
+            sec, frac = time_part.split('.', 1)
+            time_part = f'{sec}.{frac[:3]}'
+    except (IndexError, AttributeError):
+        time_part = '--:--:--.---'
+
+    snr = rec.get('snr_db', 0.0)
+    gr = rec.get('group_range_km', 0.0)
+    vh = rec.get('virtual_height_km', 0.0)
+    evf = rec.get('equivalent_vertical_freq_mhz', 0.0)
+    layer = rec.get('mode_layer', '?')
+    p_idx = rec.get('peak_index', 0)
+    p_cnt = rec.get('peak_count', 1)
+
+    return (f'{time_part}  SNR {snr:+5.1f} dB  GR {gr:>7.1f} km  '
+            f'VH {vh:>6.1f} km  EVF {evf:>6.3f} MHz  '
+            f'{layer:<11} ({p_idx}/{p_cnt})')
+
+
+def cmd_codar_watch(args) -> int:
+    """Live tail of codar-sounder's ionospheric-sounding records.
+
+    codar-sounder writes one JSONL record per detected peak to
+    ``/var/lib/codar-sounder/<radiod>/<station>/YYYY/MM/DD.jsonl``,
+    rotated daily.  We poll every active station file on a 15 s
+    window (matching the daemon's CPI cadence) and emit a per-window
+    rollup: total peaks, active station count, layers seen
+    (E/F1/F2/F2_extreme/below_E), and SNR range.  ``N`` adds first-N
+    records per station; ``-v`` dumps every record.
+
+    Records can be sparse — a station with no open propagation path
+    produces zero records for hours.  Watch shows ``peaks=0`` lines
+    in that case so the operator sees the watch is alive.
+
+    Date rollover is handled by recomputing today's path each window
+    and resetting cursors when the UTC date changes.  New stations
+    appearing mid-day (first detection on a previously-quiet station)
+    are picked up at the next window with their cursor primed at the
+    file's current size, so the watch doesn't dump a same-day backlog.
+    """
+    instance = getattr(args, 'instance', None)
+    if instance is None:
+        try:
+            r = subprocess.run(
+                ['systemctl', 'list-units', '--no-legend', '--no-pager',
+                 '--type=service', '--state=active',
+                 'codar-sounder@*.service'],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            _err('systemctl not available')
+            return 1
+        lines = [l for l in r.stdout.splitlines() if l.strip()]
+        if not lines:
+            # Fall back to picking up an existing data dir even if the
+            # service isn't running — useful for tailing a stopped
+            # service's recent records, and during the post-rebuild
+            # restart-pending window.
+            data_root = Path('/var/lib/codar-sounder')
+            if not data_root.is_dir():
+                _err('no active codar-sounder@* service and no '
+                     f'{data_root} directory — is codar-sounder '
+                     'installed? (smd status codar-sounder)')
+                return 1
+            candidates = sorted(
+                (p for p in data_root.iterdir() if p.is_dir()),
+                key=lambda p: p.stat().st_mtime, reverse=True,
+            )
+            if not candidates:
+                _err(f'{data_root} is empty — has any radiod instance '
+                     'recorded yet?')
+                return 1
+            instance = candidates[0].name
+            _warn(f'codar-sounder@{instance} not active — tailing '
+                  f'data dir anyway (records will only update once '
+                  f'the service starts)')
+        else:
+            unit = lines[0].split()[0]
+            try:
+                instance = unit.split('@', 1)[1].rsplit('.', 1)[0]
+            except IndexError:
+                _err(f'unexpected unit name: {unit}')
+                return 1
+
+    data_dir = Path(f'/var/lib/codar-sounder/{instance}')
+    if not data_dir.is_dir():
+        _err(f'no data directory at {data_dir} — wrong instance?')
+        return 1
+
+    # Station list = subdirectories of the radiod's data dir.  A new
+    # station added to the config but never decoded won't have a
+    # subdir yet, and stations that fall silent keep their old
+    # subdirs — both are correct (the day's JSONL is the source of
+    # truth for "did we ever produce anything").
+    def _list_stations() -> list:
+        return sorted(p.name for p in data_dir.iterdir()
+                      if p.is_dir() and not p.name.startswith('.'))
+
+    stations = _list_stations()
+    if not stations:
+        _err(f'no station subdirs under {data_dir} — '
+             f'has any peak been detected yet?')
+        return 1
+
+    n_recent = int(getattr(args, 'recent', 0) or 0)
+    verbose = bool(getattr(args, 'verbose', False))
+    if verbose:
+        cap: Optional[int] = None
+    else:
+        cap = n_recent if n_recent > 0 else 0
+    show_records = cap != 0
+
+    WIN_SEC = 15.0  # codar-sounder CPI cadence
+
+    _heading(f'CODAR ionospheric soundings ({instance})')
+    _info(f'   ▸ {len(stations)} station(s): {", ".join(stations)}')
+    _info(f'   ▸ every {int(WIN_SEC)} s (CPI cadence) — '
+          f'per-window rollup')
+    if cap is None:
+        _info('     + ALL records in this window, one line each')
+    elif cap > 0:
+        _info(f'     + first {cap} record{"s" if cap != 1 else ""} '
+              f'per station')
+    _info('   Ctrl-C to exit.')
+    print(flush=True)
+
+    sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+
+    def _file_size(p: Path) -> int:
+        try:
+            return p.stat().st_size
+        except (FileNotFoundError, PermissionError):
+            try:
+                r = subprocess.run(
+                    [*sudo_prefix, 'stat', '-c', '%s', str(p)],
+                    capture_output=True, text=True, check=False,
+                )
+                return int(r.stdout.strip()) if r.returncode == 0 else 0
+            except (FileNotFoundError, ValueError):
+                return 0
+
+    def _read_since(p: Path, start: int) -> tuple[int, str]:
+        end = _file_size(p)
+        if end <= start:
+            return start, ''
+        try:
+            r = subprocess.run(
+                [*sudo_prefix, 'tail', '-c', f'+{start + 1}', str(p)],
+                capture_output=True, text=True, check=False,
+            )
+            text = r.stdout
+        except FileNotFoundError:
+            return start, ''
+        new_end = start + len(text.encode())
+        return new_end, text
+
+    def _today_path(station: str) -> Path:
+        # Mirrors JsonlWriter._path_for: <data_dir>/<station>/YYYY/MM/DD.jsonl
+        d = time.gmtime()
+        return (data_dir / station
+                / f'{d.tm_year:04d}'
+                / f'{d.tm_mon:02d}'
+                / f'{d.tm_mday:02d}.jsonl')
+
+    # Cursor state per station path.  Prime each existing today-file
+    # at EOF so the watch doesn't dump the day's backlog on first
+    # fire.  Missing files (station hasn't produced today yet) start
+    # at 0 and will pick up records as soon as the daemon writes them.
+    positions: dict = {}
+    for st in stations:
+        p = _today_path(st)
+        positions[st] = _file_size(p) if p.exists() else 0
+    current_date = time.gmtime().tm_yday  # cheap rollover sentinel
+
+    import json as _json
+
+    try:
+        while True:
+            now = time.time()
+            next_fire = math.ceil(now / WIN_SEC) * WIN_SEC
+            time.sleep(max(0.1, next_fire - time.time()))
+
+            # Midnight UTC rollover: reset cursors so we start fresh
+            # against the new day's file (which may not exist yet —
+            # _read_since handles missing files gracefully).
+            new_yday = time.gmtime().tm_yday
+            if new_yday != current_date:
+                current_date = new_yday
+                stations = _list_stations()
+                positions = {st: 0 for st in stations}
+
+            # Re-glob stations in case a new one appeared mid-day —
+            # JsonlWriter creates the parent dir on first record, so
+            # a previously-silent station "arrives" as a new subdir.
+            for st in _list_stations():
+                if st not in positions:
+                    p = _today_path(st)
+                    positions[st] = _file_size(p) if p.exists() else 0
+                    stations.append(st) if st not in stations else None
+
+            per_station: list = []
+            total_peaks = 0
+            total_layers: set = set()
+            snr_min: Optional[float] = None
+            snr_max: Optional[float] = None
+            stations_active = 0
+
+            for st in sorted(positions):
+                p = _today_path(st)
+                new_pos, text = _read_since(p, positions[st])
+                positions[st] = new_pos
+
+                lines = [l for l in text.splitlines() if l.strip()]
+                # Trailing-line robustness: codar-sounder flushes
+                # newline-per-record so partial-line risk is small,
+                # but a SIGKILL mid-write could leave one — drop and
+                # rewind so we never half-parse.
+                if lines and not lines[-1].rstrip().endswith('}'):
+                    bad = lines[-1].encode() + b'\n'
+                    positions[st] = new_pos - len(bad)
+                    lines = lines[:-1]
+
+                recs: list = []
+                layers: set = set()
+                st_snr_min: Optional[float] = None
+                st_snr_max: Optional[float] = None
+                for raw in lines:
+                    try:
+                        rec = _json.loads(raw)
+                    except _json.JSONDecodeError:
+                        continue
+                    recs.append(rec)
+                    layer = rec.get('mode_layer')
+                    if layer:
+                        layers.add(layer)
+                    snr = rec.get('snr_db')
+                    if isinstance(snr, (int, float)):
+                        st_snr_min = snr if st_snr_min is None else min(st_snr_min, snr)
+                        st_snr_max = snr if st_snr_max is None else max(st_snr_max, snr)
+
+                rc = len(recs)
+                per_station.append({
+                    'station': st, 'peaks': rc, 'recs': recs,
+                    'layers': layers,
+                    'snr_min': st_snr_min, 'snr_max': st_snr_max,
+                })
+                total_peaks += rc
+                if rc > 0:
+                    stations_active += 1
+                    total_layers |= layers
+                    if st_snr_min is not None:
+                        snr_min = (st_snr_min if snr_min is None
+                                   else min(snr_min, st_snr_min))
+                        snr_max = (st_snr_max if snr_max is None
+                                   else max(snr_max, st_snr_max))
+
+            wall = time.strftime('%H:%M:%S', time.gmtime(next_fire))
+            now_str = time.strftime('%H:%M:%S')
+
+            if show_records:
+                print(f'─── win UTC {wall} ({int(WIN_SEC)}s) '
+                      f'──────────────────────────────────',
+                      flush=True)
+                if total_peaks == 0:
+                    print('  (no detections this window)', flush=True)
+                else:
+                    for b in per_station:
+                        if b['peaks'] == 0:
+                            continue
+                        if b['snr_min'] == b['snr_max']:
+                            snr_str = f"SNR={b['snr_min']:+.1f} dB"
+                        else:
+                            snr_str = (f"SNR={b['snr_min']:+.1f}/"
+                                       f"{b['snr_max']:+.1f} dB")
+                        layers_str = '{' + ','.join(sorted(b['layers'])) + '}'
+                        print(f"  {b['station']:<6}: peaks={b['peaks']:<3} "
+                              f"layers={layers_str}  {snr_str}",
+                              flush=True)
+                        to_show = (b['recs'] if cap is None
+                                   else b['recs'][:cap])
+                        for rec in to_show:
+                            print(f'    {_format_codar_record(rec)}',
+                                  flush=True)
+                        if cap is not None and len(b['recs']) > len(to_show):
+                            print(f"    … ({len(b['recs']) - len(to_show)} "
+                                  f"more)", flush=True)
+                    layers_total = ('{' + ','.join(sorted(total_layers)) + '}'
+                                    if total_layers else '—')
+                    print(f'  → peaks={total_peaks}  '
+                          f'stations={stations_active}/{len(stations)}  '
+                          f'layers={layers_total}',
+                          flush=True)
+            else:
+                if total_peaks == 0:
+                    print(
+                        f'[{now_str}] win UTC {wall} ({int(WIN_SEC)}s)  '
+                        f'peaks=   0  stations=0/{len(stations)}  —',
+                        flush=True,
+                    )
+                else:
+                    active_ids = ','.join(
+                        b['station'] for b in per_station if b['peaks'] > 0
+                    )
+                    layers_str = '{' + ','.join(sorted(total_layers)) + '}'
+                    if snr_min == snr_max:
+                        snr_str = f'SNR={snr_min:+.1f} dB'
+                    else:
+                        snr_str = f'SNR={snr_min:+.1f}/{snr_max:+.1f} dB'
+                    print(
+                        f'[{now_str}] win UTC {wall} ({int(WIN_SEC)}s)  '
+                        f'peaks={total_peaks:>3}  '
+                        f'stations={stations_active}/{len(stations)}'
+                        f'({active_ids})  '
+                        f'layers={layers_str}  {snr_str}',
+                        flush=True,
+                    )
+    except KeyboardInterrupt:
+        return 130
+
+
 def cmd_psk_watch(args) -> int:
     """Live tail of psk-recorder's PSK Reporter upload activity.
 
@@ -6969,6 +7306,21 @@ def _add_hfdl_watch_args(p) -> None:
                         '(default: first active hfdl-recorder@*)')
 
 
+def _add_codar_watch_args(p) -> None:
+    """Argument spec shared by `smd codar-watch` and `smd watch codar`."""
+    p.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
+                   help='per-15s-window mode (matches CPI cadence): print '
+                        'up to N records per station under the summary '
+                        '(default 0 = counts only; -v = print all)')
+    p.add_argument('-v', '--verbose', action='store_true',
+                   help='per-window mode showing ALL records — same '
+                        'cadence as N, no per-station cap')
+    p.add_argument('--instance', metavar='RADIOD_ID', default=None,
+                   help='specific radiod instance, e.g. ac0g-bee1-rx888 '
+                        '(default: first active codar-sounder@*, or '
+                        'most-recently-modified data dir if no service)')
+
+
 def _add_ka9q_watch_args(p) -> None:
     """Argument spec shared by `smd ka9q-watch` and `smd watch ka9q`."""
     p.add_argument('--ka9q-python', metavar='PATH',
@@ -7296,6 +7648,12 @@ def main() -> int:
                                  '(alias: smd watch hfdl)')
     _add_hfdl_watch_args(p_hfdl)
 
+    # codar-watch — live tail of codar-sounder per-station soundings
+    p_codar = sub.add_parser('codar-watch',
+                             help='live tail of CODAR ionospheric soundings '
+                                  '(alias: smd watch codar)')
+    _add_codar_watch_args(p_codar)
+
     # ka9q-watch — alert on upstream ka9q-radio changes that could break clients
     p = sub.add_parser('ka9q-watch',
                        help='check ka9q-radio upstream for changes that could '
@@ -7312,7 +7670,7 @@ def main() -> int:
     # identical — only the invocation is different.
     p_watch = sub.add_parser('watch',
                              help='unified live-tail interface '
-                                  '(smd watch wspr | psk | hfdl | ka9q)')
+                                  '(smd watch wspr | psk | hfdl | codar | ka9q)')
     watch_sub = p_watch.add_subparsers(dest='watch_target')
 
     p_w_wspr = watch_sub.add_parser(
@@ -7335,6 +7693,13 @@ def main() -> int:
              '(per-band frame counts + GS/aircraft tallies)',
     )
     _add_hfdl_watch_args(p_w_hfdl)
+
+    p_w_codar = watch_sub.add_parser(
+        'codar',
+        help='live tail of CODAR ionospheric soundings '
+             '(per-station peak counts + layer + SNR rollup)',
+    )
+    _add_codar_watch_args(p_w_codar)
 
     p_w_ka9q = watch_sub.add_parser(
         'ka9q',
@@ -7512,6 +7877,9 @@ def main() -> int:
     if args.command == 'hfdl-watch':
         return cmd_hfdl_watch(args)
 
+    if args.command == 'codar-watch':
+        return cmd_codar_watch(args)
+
     if args.command == 'watch':
         target = getattr(args, 'watch_target', None)
         if target == 'wspr':
@@ -7520,6 +7888,8 @@ def main() -> int:
             return cmd_psk_watch(args)
         if target == 'hfdl':
             return cmd_hfdl_watch(args)
+        if target == 'codar':
+            return cmd_codar_watch(args)
         if target == 'ka9q':
             if not _HAS_SIGMOND_LIB:
                 print('smd: sigmond library not found; install '
