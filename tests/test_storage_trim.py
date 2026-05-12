@@ -107,6 +107,56 @@ class TestPlanTrim(unittest.TestCase):
         expected = (self.now - timedelta(seconds=3600)).isoformat()
         self.assertEqual(plan.cutoff_iso, expected)
 
+    def test_target_db_filter_narrows_plan(self):
+        """`target_db='hfdl'` reports only hfdl rows; others untouched
+        even though they're past the cutoff too."""
+        conn = _seed_db(self.db_path)
+        old = self.now - timedelta(hours=25)
+        for _ in range(4):
+            _insert(conn, target_db="hfdl", target_table="spots", queued_at=old)
+        for _ in range(9):
+            _insert(conn, target_db="timestd", target_table="events", queued_at=old)
+        conn.close()
+
+        plan = plan_trim(
+            self.db_path, 24 * 3600,
+            target_db="hfdl",
+            now_fn=self.now_fn,
+        )
+        self.assertEqual(plan.rows_per_target, [("hfdl", "spots", 4)])
+        self.assertEqual(plan.target_db, "hfdl")
+        self.assertIsNone(plan.target_table)
+
+    def test_target_table_filter_further_narrows(self):
+        """`target_db='hfdl' + target_table='spots'` restricts to that
+        one (db, table) tuple even when the same target_db has
+        multiple tables."""
+        conn = _seed_db(self.db_path)
+        old = self.now - timedelta(hours=25)
+        for _ in range(3):
+            _insert(conn, target_db="hfdl", target_table="spots", queued_at=old)
+        for _ in range(5):
+            _insert(conn, target_db="hfdl", target_table="other", queued_at=old)
+        conn.close()
+
+        plan = plan_trim(
+            self.db_path, 24 * 3600,
+            target_db="hfdl", target_table="spots",
+            now_fn=self.now_fn,
+        )
+        self.assertEqual(plan.rows_per_target, [("hfdl", "spots", 3)])
+
+    def test_filter_passes_through_to_plan_for_execute(self):
+        """The plan's filter fields persist so execute_trim's DELETE
+        scope matches what the dry-run reported."""
+        plan = plan_trim(
+            self.db_path, 24 * 3600,
+            target_db="hfdl", target_table="spots",
+            now_fn=self.now_fn,
+        )
+        self.assertEqual(plan.target_db, "hfdl")
+        self.assertEqual(plan.target_table, "spots")
+
 
 # ---- execution -----------------------------------------------------------
 
@@ -165,6 +215,67 @@ class TestExecuteTrim(unittest.TestCase):
 
         self.assertEqual(report.rows_deleted, 5)
         self.assertEqual(self._count(), 3)  # the recent rows survive
+
+    def test_target_db_execute_only_deletes_filtered_rows(self):
+        """Critical for the hfdl-only timer use case: passing
+        target_db='hfdl' must NOT delete timestd rows even when they
+        are also past the cutoff."""
+        conn = _seed_db(self.db_path)
+        old = self.now - timedelta(hours=25)
+        for _ in range(4):
+            _insert(conn, target_db="hfdl", target_table="spots", queued_at=old)
+        for _ in range(6):
+            _insert(conn, target_db="timestd", target_table="events", queued_at=old)
+        conn.close()
+
+        plan = plan_trim(
+            self.db_path, 24 * 3600,
+            target_db="hfdl",
+            now_fn=lambda: self.now,
+        )
+        plan.confirmed = True
+        report = execute_trim(plan)
+
+        self.assertEqual(report.rows_deleted, 4)
+        # timestd rows survived even though they were also past cutoff.
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cur = conn.execute(
+                "SELECT target_db, COUNT(*) FROM pending_uploads GROUP BY 1"
+            )
+            rows = dict(cur.fetchall())
+        finally:
+            conn.close()
+        self.assertEqual(rows, {"timestd": 6})
+
+    def test_target_table_execute_narrows_within_db(self):
+        conn = _seed_db(self.db_path)
+        old = self.now - timedelta(hours=25)
+        for _ in range(3):
+            _insert(conn, target_db="hfdl", target_table="spots", queued_at=old)
+        for _ in range(5):
+            _insert(conn, target_db="hfdl", target_table="other", queued_at=old)
+        conn.close()
+
+        plan = plan_trim(
+            self.db_path, 24 * 3600,
+            target_db="hfdl", target_table="spots",
+            now_fn=lambda: self.now,
+        )
+        plan.confirmed = True
+        report = execute_trim(plan)
+
+        self.assertEqual(report.rows_deleted, 3)
+        # The "other" rows within hfdl survived.
+        conn = sqlite3.connect(self.db_path)
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM pending_uploads "
+                "WHERE target_db='hfdl' AND target_table='other'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(n, 5)
 
     def test_executes_idempotently(self):
         conn = _seed_db(self.db_path)

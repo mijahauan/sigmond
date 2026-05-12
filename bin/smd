@@ -4571,7 +4571,7 @@ _smd_complete() {
                             COMPREPLY=($(compgen -W "--yes" -- "$cur"))
                             ;;
                         trim)
-                            COMPREPLY=($(compgen -W "--max-age --db --yes" -- "$cur"))
+                            COMPREPLY=($(compgen -W "--max-age --db --target-db --target-table --yes" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -5443,13 +5443,21 @@ def cmd_storage_trim(args) -> int:
 
     db_path = getattr(args, "db", None) or DEFAULT_DB_PATH
     apply = getattr(args, "yes", False)
+    target_db = getattr(args, "target_db", None)
+    target_table = getattr(args, "target_table", None)
     if apply and _need_root("storage trim --yes"):
         return 1
 
-    plan = plan_trim(db_path, max_age_seconds)
+    plan = plan_trim(
+        db_path, max_age_seconds,
+        target_db=target_db, target_table=target_table,
+    )
     print(f"Trim from {plan.db_path}")
     print(f"  cutoff:  rows queued_at < {plan.cutoff_iso}")
     print(f"  max-age: {args.max_age}  ({max_age_seconds:.0f} s)")
+    if target_db is not None or target_table is not None:
+        scope = f"target_db={target_db or '*'}, target_table={target_table or '*'}"
+        print(f"  filter:  {scope}")
     print()
     if plan.is_empty:
         print("  No rows older than threshold.")
@@ -6652,6 +6660,17 @@ def main() -> int:
     p_trim.add_argument(
         '--db', metavar='PATH', default=None,
         help='sink db path (default: /var/lib/sigmond/sink.db)',
+    )
+    p_trim.add_argument(
+        '--target-db', metavar='NAME', default=None, dest='target_db',
+        help='restrict the trim to one logical sink ("hfdl", '
+             '"timestd", "psk", ...).  Required when different '
+             'producers want different TTLs.',
+    )
+    p_trim.add_argument(
+        '--target-table', metavar='NAME', default=None, dest='target_table',
+        help='further restrict to one table within --target-db '
+             '(e.g. "spots", "events"); requires --target-db.',
     )
     p_trim.add_argument(
         '--yes', action='store_true',

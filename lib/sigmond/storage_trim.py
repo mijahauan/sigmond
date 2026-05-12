@@ -51,6 +51,14 @@ class TrimPlan:
     # [(target_db, target_table, row_count), ...] for rows older than cutoff.
     # Grouped + ordered by (target_db, target_table) for stable display.
     rows_per_target: List[Tuple[str, str, int]] = field(default_factory=list)
+    # Optional filters narrowing the DELETE.  When set, only rows
+    # matching ALL set filters are eligible.  None means "any value".
+    # Used by operators who want different TTLs per producer — e.g.,
+    # hfdl gets 24 h (live-shipped to airframes.io by dumphfdl, the
+    # SQLite copy is just a local archive) while timestd.events
+    # retains for the science archive's lifetime.
+    target_db: Optional[str] = None
+    target_table: Optional[str] = None
     confirmed: bool = False
 
     @property
@@ -79,16 +87,24 @@ def plan_trim(
     db_path: str,
     max_age_seconds: float,
     *,
+    target_db: Optional[str] = None,
+    target_table: Optional[str] = None,
     now_fn: Optional[Callable[[], datetime]] = None,
     opener: Optional[Opener] = None,
 ) -> TrimPlan:
     """Inspect `db_path` and report rows with `queued_at < now - max_age`.
 
+    Optional filters narrow the eligible set:
+      - ``target_db`` ("hfdl", "timestd", "psk", ...) restricts the
+        DELETE to one logical sink.  Operators set this when they
+        want different TTLs per producer.
+      - ``target_table`` further narrows within a target_db.
+
     Empty plan when:
     - the sink db doesn't exist (no producer has flushed)
     - the pending_uploads table doesn't exist (same — first-flush race)
     - the sink db is unreadable to this user
-    - no rows match the cutoff
+    - no rows match the cutoff under the active filters
 
     None of these are errors at the planning layer; a `TrimPlan` with
     no rows means "nothing to do" and `execute_trim` becomes a no-op.
@@ -97,19 +113,33 @@ def plan_trim(
     opener = opener or _default_opener
     cutoff_dt = now_fn() - timedelta(seconds=max_age_seconds)
     cutoff_iso = cutoff_dt.isoformat()
-    plan = TrimPlan(db_path=db_path, cutoff_iso=cutoff_iso)
+    plan = TrimPlan(
+        db_path=db_path,
+        cutoff_iso=cutoff_iso,
+        target_db=target_db,
+        target_table=target_table,
+    )
     try:
         conn = opener(db_path)
     except (sqlite3.OperationalError, sqlite3.DatabaseError, OSError):
         return plan
     try:
+        clauses = ["queued_at < ?"]
+        params: list = [cutoff_iso]
+        if target_db is not None:
+            clauses.append("target_db = ?")
+            params.append(target_db)
+        if target_table is not None:
+            clauses.append("target_table = ?")
+            params.append(target_table)
+        where = " AND ".join(clauses)
         cur = conn.execute(
-            "SELECT target_db, target_table, COUNT(*) "
-            "FROM pending_uploads "
-            "WHERE queued_at < ? "
-            "GROUP BY target_db, target_table "
-            "ORDER BY target_db, target_table",
-            (cutoff_iso,),
+            f"SELECT target_db, target_table, COUNT(*) "
+            f"FROM pending_uploads "
+            f"WHERE {where} "
+            f"GROUP BY target_db, target_table "
+            f"ORDER BY target_db, target_table",
+            params,
         )
         plan.rows_per_target = [
             (str(db), str(tbl), int(n)) for db, tbl, n in cur.fetchall()
@@ -152,12 +182,21 @@ def execute_trim(
         return report
     opener = opener or _default_opener
     conn: Optional[sqlite3.Connection] = None
+    clauses = ["queued_at < ?"]
+    params: list = [plan.cutoff_iso]
+    if plan.target_db is not None:
+        clauses.append("target_db = ?")
+        params.append(plan.target_db)
+    if plan.target_table is not None:
+        clauses.append("target_table = ?")
+        params.append(plan.target_table)
+    where = " AND ".join(clauses)
     try:
         conn = opener(plan.db_path)
         with conn:
             cur = conn.execute(
-                "DELETE FROM pending_uploads WHERE queued_at < ?",
-                (plan.cutoff_iso,),
+                f"DELETE FROM pending_uploads WHERE {where}",
+                params,
             )
             report.rows_deleted = int(cur.rowcount)
     except Exception as exc:
