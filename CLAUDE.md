@@ -41,7 +41,7 @@ smd restart              Restart managed services (with reset-failed)
 smd reload               Reload via signal or restart (auto-routing)
 smd list                 Per-component status: lifecycle + git ref + upstream
                          divergence + version policy + verdict.
-smd list --apply         Pull and reconcile per topology version policy
+smd list --update         Pull and reconcile per topology version policy
                          (was the separate `smd update`). Requires root.
 smd list --catalog       Show catalog of known clients (was --available).
 smd log <client>         Follow journal, tail file logs, or set log level

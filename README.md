@@ -190,7 +190,7 @@ and any issues.
 | `smd reload [--components X]` | Reload via SIGHUP or restart |
 | `smd status [--components X]` | Service health + client inventory |
 | `smd list` | Per-component status: lifecycle + git ref + upstream divergence + version policy |
-| `smd list --apply` | Pull and reapply per topology version policy (was `smd update`; root) |
+| `smd list --update` | Pull and reapply per topology version policy (was `smd update` / `smd list --apply`; root) |
 | `smd list --catalog` | Catalog of known clients (what could be installed) |
 | `smd log <client>` | Follow systemd journal for a client |
 | `smd log <client> --files` | Tail the client's file logs |

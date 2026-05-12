@@ -291,7 +291,7 @@ enabled = true
 | `sudo smd diag` | Run cross-component diagnostics |
 | `sudo smd validate` | Check cross-client harmonization rules |
 | `smd list` | Show per-component status (git ref, upstream divergence, version policy) |
-| `sudo smd list --apply` | Pull latest code per topology version policy and reapply |
+| `smd list --update` | Pull latest code per topology version policy and reapply (root) |
 | `smd list --catalog` | Show full component catalog (what could be installed) |
 
 ---

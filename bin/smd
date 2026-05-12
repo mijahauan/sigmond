@@ -16,7 +16,7 @@ Configure (what should exist):
     smd validate                                                 cross-client harmonization
 
 Observe (what is, read-only):
-    smd list        [--apply | --catalog] [--components C1,C2]   per-component status table
+    smd list        [--update | --catalog] [--components C1,C2]  per-component status table
                     [--ref R] [--fetch] [--dry-run] [--json]
     smd status      [<component>]                                service health
     smd log         [--files | --level LEVEL] [<client>]         tail journal or file logs
@@ -3695,7 +3695,7 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
             continue
         # library-kind entries (e.g. ka9q-python) have no systemd units but
         # do have a repo on disk and a version policy — surface them so the
-        # operator sees git divergence and can target them with --apply.
+        # operator sees git divergence and can target them with --update.
 
         comp = topo.components.get(name)
         policy = (comp.version if comp else 'latest') or 'latest'
@@ -3930,7 +3930,7 @@ def _print_action_hint(rows: list[dict]) -> None:
         names = ', '.join(r['name'] for r in needs_apply)
         print()
         _info(f'{len(needs_apply)} component(s) have updates available: {names}')
-        _info('run: sudo smd list --apply  (preview: sudo smd list --apply --dry-run)')
+        _info('run: sudo smd list --update  (preview: sudo smd list --update --dry-run)')
 
 
 def _emit_status_json(rows: list[dict]) -> int:
@@ -3990,12 +3990,12 @@ def _print_catalog(args) -> int:
 def _apply_updates(args, rows: list[dict]) -> int:
     """Pull each catalog repo per its version policy, then run `smd apply`.
 
-    This is the action half of `smd list` — invoked when --apply is given.
+    This is the action half of `smd list` — invoked when --update is given.
     Honors per-component version from topology.toml: 'ignore' is skipped,
     pinned refs are checked out, 'latest' (or absent) does ff-only pull.
     --ref overrides the policy.  Refuses to clobber dirty repos.
     """
-    if _need_root('list --apply'):
+    if _need_root('list --update'):
         return 1
 
     dry_run = getattr(args, 'dry_run', False)
@@ -4025,7 +4025,7 @@ def _apply_updates(args, rows: list[dict]) -> int:
             dirty, reason = _repo_is_dirty(sigmond_dir)
             if dirty:
                 _warn(f'sigmond: skipping pull — {reason}')
-                _warn('         commit, stash, or push before running smd list --apply')
+                _warn('         commit, stash, or push before running smd list --update')
             elif dry_run:
                 _info('sigmond: (dry-run) would pull and sync catalog')
             else:
@@ -4081,7 +4081,7 @@ def _apply_updates(args, rows: list[dict]) -> int:
         dirty, reason = _repo_is_dirty(repo_dir)
         if dirty:
             _warn(f'{name}: skipping pull — {reason}')
-            _warn(f'         commit, stash, or push in {repo_dir} before running smd list --apply')
+            _warn(f'         commit, stash, or push in {repo_dir} before running smd list --update')
             continue
 
         before = _git_head_ref(repo_dir) if not dry_run else '?'
@@ -4132,21 +4132,22 @@ def cmd_list(args) -> int:
     any user.  Adds an action hint at the bottom if anything is updatable.
 
     Flags:
-      --apply     Pull + reconcile (the old `smd update`). Requires root.
+      --update    Pull + reconcile (the old `smd update` / `--apply`).
+                  Requires root.  `--apply` kept as a hidden alias.
       --catalog   Show the catalog of known clients (was `smd list --available`).
       --fetch     Run `git fetch` per repo before computing divergence.
       --json      Machine-readable output of the chosen mode.
       --components C1,C2  Restrict to these components.
-      --ref R     With --apply: force a specific ref.
-      --dry-run   With --apply: preview without making changes.
+      --ref R     With --update: force a specific ref.
+      --dry-run   With --update: preview without making changes.
     """
     if getattr(args, 'catalog', False):
         return _print_catalog(args)
 
-    # `--apply` requires root, and _need_root re-execvps the whole command
+    # `--update` requires root, and _need_root re-execvps the whole command
     # under sudo when invoked as a non-root user — so any output produced
     # before this check is duplicated by the re-exec.  Check first.
-    if getattr(args, 'apply', False) and _need_root('list --apply'):
+    if getattr(args, 'update', False) and _need_root('list --update'):
         return 1
 
     fetch = getattr(args, 'fetch', False)
@@ -4157,7 +4158,7 @@ def cmd_list(args) -> int:
 
     _print_status_table(rows)
 
-    if not getattr(args, 'apply', False):
+    if not getattr(args, 'update', False):
         _print_action_hint(rows)
         return 0
 
@@ -4535,7 +4536,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "$components --components --via --topology" -- "$cur"))
                     ;;
                 list)
-                    COMPREPLY=($(compgen -W "--apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "--update --apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
                     ;;
                 log)
                     COMPREPLY=($(compgen -W "$log_clients --files --level --topology" -- "$cur"))
@@ -4582,7 +4583,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "$components --components --via --topology" -- "$cur"))
                     ;;
                 list)
-                    COMPREPLY=($(compgen -W "--apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "--update --apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
                     ;;
                 log)
                     COMPREPLY=($(compgen -W "$log_clients --files --level --topology" -- "$cur"))
@@ -6197,22 +6198,24 @@ def main() -> int:
     # list — unified status surface (was: smd list + smd update)
     p = sub.add_parser('list',
                        help='show component status (lifecycle + git + version policy); '
-                            '--apply pulls and re-applies updates')
+                            '--update pulls and re-applies updates')
     p.add_argument('--components', metavar='C1,C2',
                    help='comma-separated subset of components')
     p.add_argument('--catalog', action='store_true',
                    help='show catalog of known clients (what could be installed)')
-    p.add_argument('--apply', action='store_true',
+    # --update is the canonical flag; --apply is kept as a hidden alias
+    # for muscle-memory and any tooling that hasn't migrated yet.
+    p.add_argument('--update', '--apply', dest='update', action='store_true',
                    help='pull latest code per topology version policy and reapply '
-                        '(was: smd update; requires root)')
+                        '(was: smd update / smd list --apply; requires root)')
     p.add_argument('--fetch', action='store_true',
                    help='run `git fetch` per repo before computing divergence '
                         '(default: use cached upstream refs)')
     p.add_argument('--ref', metavar='COMMIT_OR_BRANCH',
-                   help='with --apply: force a specific git ref instead of '
+                   help='with --update: force a specific git ref instead of '
                         'using each component\'s topology version policy')
     p.add_argument('--dry-run', action='store_true',
-                   help='with --apply: preview what would be pulled without '
+                   help='with --update: preview what would be pulled without '
                         'making changes')
     p.add_argument('--json', action='store_true',
                    help='emit machine-readable JSON')
