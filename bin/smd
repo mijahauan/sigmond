@@ -5610,6 +5610,43 @@ def _psk_watch_cycle_loop(
             freq = 0.0
         return (time_str, freq)
 
+    # Map a spot frequency to a ham-band label.  Upper bounds match
+    # the spread covered by each band's FT8/FT4 channel — generous
+    # enough that audio-offset wander (a few kHz around the channel
+    # center) stays in the right bucket.
+    _BAND_RANGES = [
+        (2.0, '160m'), (4.0, '80m'), (5.5, '60m'), (10.0, '40m'),
+        (14.0, '30m'), (18.0, '20m'), (21.0, '17m'),
+        (24.5, '15m'), (28.0, '12m'), (50.0, '10m'), (54.0, '6m'),
+    ]
+    _BAND_ORDER = {label: idx
+                   for idx, (_hi, label) in enumerate(_BAND_RANGES)}
+
+    def _band(line: str) -> str:
+        parts = line.split()
+        if len(parts) < 5:
+            return '??'
+        try:
+            mhz = float(parts[4].replace(',', '')) / 1e6
+        except ValueError:
+            return '??'
+        for hi, label in _BAND_RANGES:
+            if mhz < hi:
+                return label
+        return f'{mhz:.0f}MHz'
+
+    def _bands_summary(lines: list) -> str:
+        """Compact 'band:N band:N' string in canonical band order."""
+        counts: dict = {}
+        for line in lines:
+            b = _band(line)
+            counts[b] = counts.get(b, 0) + 1
+        if not counts:
+            return ''
+        ordered = sorted(counts,
+                         key=lambda b: _BAND_ORDER.get(b, 99))
+        return ' '.join(f'{b}:{counts[b]}' for b in ordered)
+
     try:
         while True:
             # Next fire: next 15 s UTC boundary + SETTLE.
@@ -5628,13 +5665,6 @@ def _psk_watch_cycle_loop(
             ft8_lines.sort(key=_key)
             ft4_lines.sort(key=_key)
 
-            # Count FT4 spots per unique timestamp = per FT4 cycle.
-            ft4_by_cycle: dict = {}
-            for line in ft4_lines:
-                m = spot_re.match(line)
-                if m:
-                    ft4_by_cycle[m.group(1)] = ft4_by_cycle.get(m.group(1), 0) + 1
-
             wall = time.strftime('%H:%M:%S', time.gmtime(next_boundary))
             now_str = time.strftime('%H:%M:%S')
 
@@ -5643,11 +5673,12 @@ def _psk_watch_cycle_loop(
             ft8_show = ft8_lines if cap is None else ft8_lines[:cap]
             ft4_show = ft4_lines if cap is None else ft4_lines[:cap]
 
-            # Per-FT4-cycle counts come from the FULL list — the cap
-            # only affects what we PRINT, not what we COUNT.
-            ft4_parts = [f'{ts}: {n}'
-                         for ts, n in sorted(ft4_by_cycle.items())]
-            ft4_summary = (' + '.join(ft4_parts)) if ft4_parts else '—'
+            # Per-band counts come from the FULL list — the cap only
+            # affects what we PRINT, not what we COUNT.
+            ft8_bands = _bands_summary(ft8_lines)
+            ft4_bands = _bands_summary(ft4_lines)
+            ft8_bands_part = f' ({ft8_bands})' if ft8_bands else ''
+            ft4_bands_part = f' ({ft4_bands})' if ft4_bands else ''
 
             if show_spots:
                 # Detail path (cap=N or no-cap with -v): per-spot dump
@@ -5680,15 +5711,15 @@ def _psk_watch_cycle_loop(
                 if not ft8_lines and not ft4_lines:
                     print('  (no decodes this cycle)', flush=True)
                 else:
-                    print(f'  → ft8 total={len(ft8_lines)}   '
-                          f'ft4 total={len(ft4_lines)} ({ft4_summary})',
+                    print(f'  → ft8 total={len(ft8_lines)}{ft8_bands_part}   '
+                          f'ft4 total={len(ft4_lines)}{ft4_bands_part}',
                           flush=True)
             else:
                 # Summary path (no args, cap=0): one line per cycle.
                 print(
                     f'[{now_str}] slot UTC {wall}  '
-                    f'ft8={len(ft8_lines):>3}  '
-                    f'ft4={len(ft4_lines):>3} ({ft4_summary})',
+                    f'ft8={len(ft8_lines):>3}{ft8_bands_part}  '
+                    f'ft4={len(ft4_lines):>3}{ft4_bands_part}',
                     flush=True,
                 )
     except KeyboardInterrupt:
