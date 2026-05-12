@@ -22,10 +22,11 @@ Observe (what is, read-only):
     smd log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd environment list | probe | describe                      discover network peers
-    smd watch       <wspr|psk|ka9q> [args...]                    unified service watcher
+    smd watch       <wspr|psk|hfdl|ka9q> [args...]               unified service watcher
     smd ka9q-watch                                               upstream-drift watcher (alias)
     smd psk-watch   [N | -v]                                     PSK Reporter upload events (alias)
     smd wspr-watch  [N | -v]                                     WSPRnet upload events (alias)
+    smd hfdl-watch  [N | -v]                                     HFDL decoded-frame activity (alias)
 
 Operate (run things now, may need sudo):
     smd start       [<component> [<instance>]]
@@ -4496,7 +4497,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch ka9q-watch psk-watch wspr-watch wisdom timestd-tune-storage storage completion"
+    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch ka9q-watch psk-watch wspr-watch hfdl-watch wisdom timestd-tune-storage storage completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -6158,6 +6159,295 @@ def cmd_wspr_watch(args) -> int:
     return 0
 
 
+def _hfdl_band_num(name: str):
+    """Extract the band number from 'HFDL13' / 'HFDL13.json' → 13.
+
+    Returns None on names that don't match (e.g. a future codec rename).
+    """
+    import re as _re
+    m = _re.match(r'HFDL(\d+)', name)
+    return int(m.group(1)) if m else None
+
+
+def _hfdl_band_key(name: str):
+    """Numeric sort key so HFDL5 < HFDL6 < HFDL10 < HFDL13 < HFDL21
+    instead of lexical (which puts HFDL10 before HFDL5)."""
+    n = _hfdl_band_num(name)
+    return (n if n is not None else 999, name)
+
+
+def _format_hfdl_frame(band_label: str, frame: dict, *, kind: str) -> str:
+    """Render one decoded HFDL frame as a single line.
+
+    LPDU and SPDU frames have different shapes (aircraft uplink vs
+    ground-station broadcast); both map to a compact left-to-right
+    layout — HH:MM:SS, MHz, who, → who, frame-type — so the watch
+    output stays scan-friendly across mode kinds.
+    """
+    t = (frame.get('t') or {}).get('sec') or 0
+    tm = time.strftime('%H:%M:%S', time.gmtime(t)) if t else '--:--:--'
+    freq_hz = frame.get('freq') or 0
+    freq_mhz = f'{freq_hz / 1_000_000:.3f}' if freq_hz else '----.----'
+
+    if kind == 'spdu':
+        spdu = frame.get('spdu') or {}
+        src = (spdu.get('src') or {}).get('name', '?')
+        return f'{tm}  {freq_mhz:>9} MHz  SPDU  ← {src}'
+
+    ldp = frame.get('lpdu') or {}
+    src = ldp.get('src') or {}
+    dst = ldp.get('dst') or {}
+    type_name = (ldp.get('type') or {}).get('name', '?')
+
+    if src.get('type') == 'Aircraft':
+        icao = ((ldp.get('ac_info') or {}).get('icao') or '------')
+        fl = ((ldp.get('hfnpdu') or {}).get('flight_id') or '').strip()
+        gs_name = dst.get('name', '?')
+        ident = f'AC={icao}'
+        if fl:
+            ident += f' {fl}'
+        return (f'{tm}  {freq_mhz:>9} MHz  {ident:<22} → '
+                f'{gs_name:<22}  {type_name}')
+    if src.get('type') == 'Ground station':
+        gs_name = src.get('name', '?')
+        dst_label = (dst.get('name')
+                     or f'AC_id={dst.get("id", "?")}')
+        return (f'{tm}  {freq_mhz:>9} MHz  GS={gs_name:<19} → '
+                f'{dst_label:<22}  {type_name}')
+    return f'{tm}  {freq_mhz:>9} MHz  (unknown src)  {type_name}'
+
+
+def cmd_hfdl_watch(args) -> int:
+    """Live tail of hfdl-recorder's decoded HFDL frame activity.
+
+    dumphfdl writes one JSONL frame per line into
+    ``/var/lib/hfdl-recorder/<instance>/HFDL<band>.json``, append-only.
+    We poll each band file on a 15 s window and emit a summary —
+    bands active, total frames, unique ground stations, unique
+    aircraft.  ``N`` adds first-N frames per band; ``-v`` dumps every
+    frame.  Unlike psk-watch / wspr-watch there's no slot or upload
+    cycle to align with — HFDL frames arrive whenever aircraft
+    transmit — so the 15 s window is purely a sampling cadence.
+    """
+    instance = getattr(args, 'instance', None)
+    if instance is None:
+        try:
+            r = subprocess.run(
+                ['systemctl', 'list-units', '--no-legend', '--no-pager',
+                 '--type=service', '--state=active',
+                 'hfdl-recorder@*.service'],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            _err('systemctl not available')
+            return 1
+        lines = [l for l in r.stdout.splitlines() if l.strip()]
+        if not lines:
+            _err('no active hfdl-recorder@* service — is hfdl-recorder '
+                 'running? (smd status hfdl-recorder)')
+            return 1
+        unit = lines[0].split()[0]
+        try:
+            instance = unit.split('@', 1)[1].rsplit('.', 1)[0]
+        except IndexError:
+            _err(f'unexpected unit name: {unit}')
+            return 1
+
+    data_dir = Path(f'/var/lib/hfdl-recorder/{instance}')
+    if not data_dir.is_dir():
+        _err(f'no data directory at {data_dir} — wrong instance?')
+        return 1
+
+    band_files = sorted(data_dir.glob('HFDL*.json'),
+                        key=lambda p: _hfdl_band_key(p.name))
+    if not band_files:
+        _err(f'no HFDL*.json files in {data_dir} — '
+             f'has any band decoded yet?')
+        return 1
+
+    n_recent = int(getattr(args, 'recent', 0) or 0)
+    verbose = bool(getattr(args, 'verbose', False))
+    if verbose:
+        cap: Optional[int] = None
+    else:
+        cap = n_recent if n_recent > 0 else 0
+    show_frames = cap != 0
+
+    WIN_SEC = 15.0
+
+    _heading(f'HFDL decoded frames ({instance})')
+    bands_display = ', '.join(p.stem for p in band_files)
+    _info(f'   ▸ {len(band_files)} band file(s): {bands_display}')
+    _info(f'   ▸ every {int(WIN_SEC)} s — summary across all bands')
+    if cap is None:
+        _info('     + ALL frames in this window, one line each')
+    elif cap > 0:
+        _info(f'     + first {cap} frame{"s" if cap != 1 else ""} per band')
+    _info('   Ctrl-C to exit.')
+    print(flush=True)
+
+    sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+
+    def _file_size(p: Path) -> int:
+        try:
+            return p.stat().st_size
+        except (FileNotFoundError, PermissionError):
+            try:
+                r = subprocess.run(
+                    [*sudo_prefix, 'stat', '-c', '%s', str(p)],
+                    capture_output=True, text=True, check=False,
+                )
+                return int(r.stdout.strip()) if r.returncode == 0 else 0
+            except (FileNotFoundError, ValueError):
+                return 0
+
+    def _read_since(p: Path, start: int) -> tuple[int, str]:
+        end = _file_size(p)
+        if end <= start:
+            return start, ''
+        try:
+            r = subprocess.run(
+                [*sudo_prefix, 'tail', '-c', f'+{start + 1}', str(p)],
+                capture_output=True, text=True, check=False,
+            )
+            text = r.stdout
+        except FileNotFoundError:
+            return start, ''
+        new_end = start + len(text.encode())
+        return new_end, text
+
+    # Prime cursors at current EOF — don't replay the backlog on first
+    # fire.  (HFDL files can be tens to hundreds of MB; replaying would
+    # flood the terminal and lock up the watch for minutes.)
+    positions: dict = {p: _file_size(p) for p in band_files}
+
+    import json as _json
+
+    try:
+        while True:
+            now = time.time()
+            # Fire at the next WIN_SEC UTC boundary (e.g. :00, :15, :30,
+            # :45) so multiple operators see the same windows.
+            next_fire = math.ceil(now / WIN_SEC) * WIN_SEC
+            time.sleep(max(0.1, next_fire - time.time()))
+
+            per_band: list = []
+            total_frames = 0
+            total_gs: set = set()
+            total_ac: set = set()
+            bands_active = 0
+
+            for path in band_files:
+                new_pos, text = _read_since(path, positions[path])
+                positions[path] = new_pos
+
+                band_label = path.stem  # 'HFDL13'
+                lines = [l for l in text.splitlines() if l.strip()]
+                # If the last line doesn't end with '}', dumphfdl was
+                # mid-write — rewind the cursor and pick it up next pass
+                # so we never half-parse a frame.
+                if lines and not lines[-1].rstrip().endswith('}'):
+                    bad = lines[-1].encode() + b'\n'
+                    positions[path] = new_pos - len(bad)
+                    lines = lines[:-1]
+
+                gs_set: set = set()
+                ac_set: set = set()
+                lpdu = 0
+                spdu = 0
+                frames_list: list = []
+                for raw in lines:
+                    try:
+                        frame = _json.loads(raw).get('hfdl') or {}
+                    except _json.JSONDecodeError:
+                        continue
+                    if 'spdu' in frame:
+                        spdu += 1
+                        gs = (frame['spdu'].get('src') or {}).get('name')
+                        if gs:
+                            gs_set.add(gs)
+                        if show_frames:
+                            frames_list.append(_format_hfdl_frame(
+                                band_label, frame, kind='spdu',
+                            ))
+                    elif 'lpdu' in frame:
+                        lpdu += 1
+                        ldp = frame['lpdu']
+                        src = ldp.get('src') or {}
+                        dst = ldp.get('dst') or {}
+                        if (src.get('type') == 'Ground station'
+                                and src.get('name')):
+                            gs_set.add(src['name'])
+                        if (dst.get('type') == 'Ground station'
+                                and dst.get('name')):
+                            gs_set.add(dst['name'])
+                        icao = (ldp.get('ac_info') or {}).get('icao')
+                        if icao:
+                            ac_set.add(icao)
+                        if show_frames:
+                            frames_list.append(_format_hfdl_frame(
+                                band_label, frame, kind='lpdu',
+                            ))
+                    # other shapes (none observed in dumphfdl 1.7.0)
+                    # silently ignored — counts won't reflect them.
+
+                fc = len(lines)
+                per_band.append({
+                    'band': band_label, 'frames': fc,
+                    'lpdu': lpdu, 'spdu': spdu,
+                    'gs': gs_set, 'ac': ac_set, 'list': frames_list,
+                })
+                total_frames += fc
+                if fc > 0:
+                    bands_active += 1
+                total_gs |= gs_set
+                total_ac |= ac_set
+
+            wall = time.strftime('%H:%M:%S', time.gmtime(next_fire))
+            now_str = time.strftime('%H:%M:%S')
+
+            if show_frames:
+                print(f'─── win UTC {wall} ({int(WIN_SEC)}s) '
+                      f'──────────────────────────────────',
+                      flush=True)
+                if total_frames == 0:
+                    print('  (no frames this window)', flush=True)
+                else:
+                    for b in per_band:
+                        if b['frames'] == 0:
+                            continue
+                        print(f"  {b['band']:<6}: frames={b['frames']:<3} "
+                              f" lpdu={b['lpdu']:<3} spdu={b['spdu']:<3} "
+                              f" gs={len(b['gs']):<2} "
+                              f"ac={len(b['ac']):<3}",
+                              flush=True)
+                        to_show = (b['list'] if cap is None
+                                   else b['list'][:cap])
+                        for line in to_show:
+                            print(f'    {line}', flush=True)
+                        if cap is not None and len(b['list']) > len(to_show):
+                            print(f"    … ({len(b['list']) - len(to_show)} "
+                                  f"more)", flush=True)
+                    print(f'  → frames={total_frames}  '
+                          f'bands={bands_active}/{len(band_files)}  '
+                          f'gs={len(total_gs)}  ac={len(total_ac)}',
+                          flush=True)
+            else:
+                active_str = ','.join(
+                    str(_hfdl_band_num(b['band']))
+                    for b in per_band if b['frames'] > 0
+                ) or '—'
+                print(
+                    f'[{now_str}] win UTC {wall} ({int(WIN_SEC)}s)  '
+                    f'frames={total_frames:>4}  '
+                    f'bands={bands_active}/{len(band_files)}'
+                    f'({active_str})  '
+                    f'gs={len(total_gs):>2}  ac={len(total_ac):>3}',
+                    flush=True,
+                )
+    except KeyboardInterrupt:
+        return 130
+
 
 def cmd_psk_watch(args) -> int:
     """Live tail of psk-recorder's PSK Reporter upload activity.
@@ -6665,6 +6955,20 @@ def _add_psk_watch_args(p) -> None:
                         'modified /var/log/psk-recorder/<id>.log)')
 
 
+def _add_hfdl_watch_args(p) -> None:
+    """Argument spec shared by `smd hfdl-watch` and `smd watch hfdl`."""
+    p.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
+                   help='per-15s-window mode: print up to N frames per '
+                        'band under the summary (default 0 = counts only; '
+                        '-v = print all)')
+    p.add_argument('-v', '--verbose', action='store_true',
+                   help='per-window mode showing ALL frames — same '
+                        'cadence as N, no per-band cap')
+    p.add_argument('--instance', metavar='RADIOD_ID', default=None,
+                   help='specific radiod instance, e.g. my-rx888 '
+                        '(default: first active hfdl-recorder@*)')
+
+
 def _add_ka9q_watch_args(p) -> None:
     """Argument spec shared by `smd ka9q-watch` and `smd watch ka9q`."""
     p.add_argument('--ka9q-python', metavar='PATH',
@@ -6986,6 +7290,12 @@ def main() -> int:
                                  '(alias: smd watch wspr)')
     _add_wspr_watch_args(p_wspr)
 
+    # hfdl-watch — live tail of hfdl-recorder per-band decoded frames
+    p_hfdl = sub.add_parser('hfdl-watch',
+                            help='live tail of HFDL decoded-frame activity '
+                                 '(alias: smd watch hfdl)')
+    _add_hfdl_watch_args(p_hfdl)
+
     # ka9q-watch — alert on upstream ka9q-radio changes that could break clients
     p = sub.add_parser('ka9q-watch',
                        help='check ka9q-radio upstream for changes that could '
@@ -7002,7 +7312,7 @@ def main() -> int:
     # identical — only the invocation is different.
     p_watch = sub.add_parser('watch',
                              help='unified live-tail interface '
-                                  '(smd watch wspr | psk | ka9q)')
+                                  '(smd watch wspr | psk | hfdl | ka9q)')
     watch_sub = p_watch.add_subparsers(dest='watch_target')
 
     p_w_wspr = watch_sub.add_parser(
@@ -7018,6 +7328,13 @@ def main() -> int:
              '(per-poll ft8/ft4 counts + batch flushes)',
     )
     _add_psk_watch_args(p_w_psk)
+
+    p_w_hfdl = watch_sub.add_parser(
+        'hfdl',
+        help='live tail of HFDL decoded-frame activity '
+             '(per-band frame counts + GS/aircraft tallies)',
+    )
+    _add_hfdl_watch_args(p_w_hfdl)
 
     p_w_ka9q = watch_sub.add_parser(
         'ka9q',
@@ -7192,12 +7509,17 @@ def main() -> int:
     if args.command == 'wspr-watch':
         return cmd_wspr_watch(args)
 
+    if args.command == 'hfdl-watch':
+        return cmd_hfdl_watch(args)
+
     if args.command == 'watch':
         target = getattr(args, 'watch_target', None)
         if target == 'wspr':
             return cmd_wspr_watch(args)
         if target == 'psk':
             return cmd_psk_watch(args)
+        if target == 'hfdl':
+            return cmd_hfdl_watch(args)
         if target == 'ka9q':
             if not _HAS_SIGMOND_LIB:
                 print('smd: sigmond library not found; install '
