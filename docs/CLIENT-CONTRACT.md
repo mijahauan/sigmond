@@ -536,15 +536,18 @@ unchanged; sigmond infers `data_path.kind = "radiod-ka9q-python"`
 when the field is absent (§16.3).  Only clients adopting Path B
 need to publish `data_path` explicitly.
 
-### 7. Deterministic data multicast destination (v0.2, revised v0.3)
+### 7. Deterministic data multicast destination (v0.2, revised v0.3, implemented v3.14.0)
 
 **Rule.** Every client that subscribes to radiod RTP data streams MUST
 use `ka9q-python`'s `RadiodControl.ensure_channel()` for channel
-creation.  Clients MUST NOT pass a `destination=` argument to
-`ensure_channel()`.  `ka9q-python` derives the multicast destination
-deterministically and returns the resolved address in `ChannelInfo`.
-Clients read this value for `inventory --json` reporting but never
-select or compute it.
+creation.  The client MUST construct `RadiodControl(...)` with a
+`client_id="<stable-client-name>"` kwarg.  Clients MUST NOT pass a
+`destination=` argument to `ensure_channel()`.  `ka9q-python`
+(≥ 3.14.0) derives the multicast destination deterministically from
+`(client_id, status_address)` via `generate_multicast_ip()` and
+returns the resolved address in `ChannelInfo`.  Clients read this
+value for `inventory --json` reporting but never select or compute
+it.
 
 **Why this changed from v0.2.**  v0.2 required clients to call
 `generate_multicast_ip()` themselves and pass `destination=` on every
@@ -556,6 +559,17 @@ multicast derivation.  Moving the derivation into `ka9q-python` means:
 with zero per-client code, (b) the derivation formula can evolve in
 one place, and (c) clients without PSWS station identifiers (e.g.
 `psk-recorder`) work correctly without any special handling.
+
+**Why v3.14.0 is the floor.**  The v0.3 contract revision shipped
+2026-04-12.  ka9q-python's `ensure_channel()` accepted a `destination=`
+kwarg but did not derive one when the caller omitted it, so for the
+year between v0.3 and v3.14.0 every client on a given radiod silently
+landed on radiod's config-file default group — exactly the failure
+mode v0.2 was written to prevent.  ka9q-python 3.14.0 closes that gap
+by adding `RadiodControl(client_id=...)`; clients opt in once at
+construction time.  An `ensure_channel` call without an explicit
+`destination=` *and* a `RadiodControl` built without `client_id=`
+retains pre-3.14 behaviour for rollback safety.
 
 **Motivation (unchanged from v0.2).**  A single station routinely runs
 several peer clients (hf-timestd, wsprdaemon, psk-recorder, ka9q-web,
