@@ -1,0 +1,18 @@
+[Unit]
+Description=Decode-health snapshot collector (sigmond)
+Documentation=https://github.com/mijahauan/sigmond
+After=psk-recorder@.service wd-upload-hs@.service
+
+[Service]
+Type=oneshot
+# Runs as root so it can read system-wide journal (wd-upload-hs@*.service)
+# AND /var/log/psk-recorder/*.log (which is mode 644 owned by pskrec).
+# The collector only INSERTs into /var/lib/sigmond/decode_health.db; it
+# never writes to the source logs.
+User=root
+ExecStart=/usr/local/sbin/sigmond-decode-health-collect
+# 2 h overlap window — safe for a 1 h timer.  Dedup is by
+# (ts, source, mode) primary key, so overlap doesn't double-count.
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal

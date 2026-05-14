@@ -1,0 +1,16 @@
+[Unit]
+Description=Hourly decode-health snapshot
+Documentation=https://github.com/mijahauan/sigmond
+
+[Timer]
+# Every hour on the hour, with a small random delay so multiple
+# stations in a fleet don't all read journals simultaneously.
+OnCalendar=hourly
+RandomizedDelaySec=120
+# If the previous run was missed (host was off, timer disabled), run on
+# the next boot rather than waiting another hour.
+Persistent=true
+Unit=sigmond-decode-health-collect.service
+
+[Install]
+WantedBy=timers.target
