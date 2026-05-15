@@ -3061,26 +3061,6 @@ def cmd_diag_cpu_freq(args) -> int:
                 _info(f'  {line}')
         return 0
 
-    # --host-max-mhz: cap (or uncap with =0) the host's own pCPUs — the
-    # cores not pinned to this VM.  Persists across host reboots via a
-    # tiny systemd oneshot unit installed on the host.  Operator-driven;
-    # smd never sets this automatically.
-    host_max_mhz = getattr(args, 'host_max_mhz', None)
-    if host_max_mhz is not None:
-        if Path('/sys/devices/system/cpu/cpu0/cpufreq').exists():
-            _err('--host-max-mhz only applies inside a Proxmox VM '
-                 '(bare metal has nothing to SSH to)')
-            return 1
-        if (Path('/etc/sigmond/install-state.env').exists()
-                and not os.access('/etc/sigmond/install-state.env', os.R_OK)):
-            if _need_root('cpu --host-max-mhz'):
-                return 1
-        state = _read_install_state()
-        if not state.get('PROXMOX_HOST') or not state.get('VMID'):
-            _err('install-state.env missing PROXMOX_HOST / VMID')
-            return 1
-        return _apply_host_cpu_cap(state, host_max_mhz)
-
     # No /sys/cpufreq at all → we're in a guest VM (KVM doesn't expose host
     # frequency scaling, and /proc/cpuinfo's "cpu MHz" inside KVM is the
     # calibration TSC value, not the live running freq).  The caps must be
@@ -4614,7 +4594,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
                     ;;
                 cpu)
-                    COMPREPLY=($(compgen -W "--apply --reapply --host-max-mhz --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "--apply --reapply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
                     ;;
                 validate)
                     COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
@@ -4682,7 +4662,7 @@ _smd_complete() {
                             COMPREPLY=($(compgen -W "--components --threads --apply --json --topology" -- "$cur"))
                             ;;
                         cpu-freq)
-                            COMPREPLY=($(compgen -W "--apply --reapply --host-max-mhz --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
+                            COMPREPLY=($(compgen -W "--apply --reapply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
                             ;;
                         net)
                             COMPREPLY=($(compgen -W "--interface --listen --json --topology" -- "$cur"))
@@ -4797,14 +4777,8 @@ def _read_install_state() -> dict:
 
 
 def _ssh_proxmox_host(state: dict, *cmd: str,
-                      timeout: float = 15,
-                      stdin_data: Optional[str] = None,
-                      ) -> subprocess.CompletedProcess:
-    """Run `cmd` on the Proxmox host as root via the install-time SSH key.
-
-    ``stdin_data`` (optional) is piped to ssh's stdin — useful for
-    `tee /etc/foo` style file installs.
-    """
+                      timeout: float = 15) -> subprocess.CompletedProcess:
+    """Run `cmd` on the Proxmox host as root via the install-time SSH key."""
     target = f"{state.get('PROXMOX_USER', 'root')}@{state['PROXMOX_HOST']}"
     return subprocess.run(
         ['ssh',
@@ -4814,170 +4788,20 @@ def _ssh_proxmox_host(state: dict, *cmd: str,
          '-i', '/root/.ssh/id_ed25519',
          '-o', 'IdentitiesOnly=yes',
          target, *cmd],
-        input=stdin_data,
         capture_output=True, text=True, timeout=timeout, check=False,
     )
 
 
-# ---- host CPU cap (operator-driven, persistent via host systemd unit) ----
+# ---- host CPU cap helpers REMOVED — see commit history.
+# amd-pstate-epp in active mode (the Proxmox default) treats
+# scaling_max_freq as advisory; even with governor=powersave, EPP=power,
+# and per-CPU boost=0 the firmware kept the host pCPUs at ~2.5 GHz under
+# load.  A hard cap would require switching the host to amd-pstate=passive
+# globally, which would also clamp the radiod-pinned cores' boost
+# headroom.  Operator preferred to accept the soft cap behaviour rather
+# than ship a flag that didn't do what its name implied.
+# Original implementation: sigmond commit b61dc58.
 
-_HOST_CPU_CAP_SCRIPT = r'''#!/bin/bash
-# /usr/local/sbin/sigmond-host-cpu-cap — installed by `smd cpu --host-max-mhz`.
-# Reads /etc/sigmond/host-cpu-cap.conf and writes the cap to every listed
-# pCPU's scaling_max_freq.  Idempotent.  Logs to syslog (tag
-# sigmond-host-cpu-cap) so `journalctl -t sigmond-host-cpu-cap` shows what
-# happened.
-set -e
-CONF=/etc/sigmond/host-cpu-cap.conf
-[ -r "$CONF" ] || exit 0
-. "$CONF"
-[ -n "$HOST_CPU_CAP_KHZ" ] || exit 0
-[ -n "$HOST_CPUS" ] || exit 0
-for c in $HOST_CPUS; do
-    P="/sys/devices/system/cpu/cpu$c/cpufreq/scaling_max_freq"
-    if [ -w "$P" ]; then
-        echo "$HOST_CPU_CAP_KHZ" > "$P"
-        logger -t sigmond-host-cpu-cap "pCPU $c max=$((HOST_CPU_CAP_KHZ/1000)) MHz"
-    fi
-done
-'''
-
-_HOST_CPU_CAP_UNIT = '''[Unit]
-Description=sigmond host CPU frequency cap (operator-set)
-Documentation=https://github.com/mijahauan/sigmond
-After=cpufreq.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/sbin/sigmond-host-cpu-cap
-
-[Install]
-WantedBy=multi-user.target
-'''
-
-
-def _fetch_pinned_pcpus(state: dict) -> Optional[set[int]]:
-    """Parse the cpu-pin hookscript on host, return the set of pCPUs
-    pinned to any VM (radiod + worker)."""
-    vmid = state.get('VMID', '')
-    if not vmid:
-        return None
-    try:
-        r = _ssh_proxmox_host(
-            state, 'cat', f'/var/lib/vz/snippets/cpu-pin-{vmid}.sh',
-        )
-    except subprocess.TimeoutExpired:
-        return None
-    if r.returncode != 0:
-        return None
-    pinned: set[int] = set()
-    for line in r.stdout.splitlines():
-        m = re.match(r'^(RADIOD_CPUS|WORKER_CPUS)=\(([^)]*)\)\s*$', line.strip())
-        if m:
-            for tok in m.group(2).split():
-                try:
-                    pinned.add(int(tok))
-                except ValueError:
-                    pass
-    return pinned
-
-
-def _apply_host_cpu_cap(state: dict, max_mhz: int) -> int:
-    """Install (or remove if max_mhz==0) the host-CPU frequency cap.
-
-    Writes the conf + script + systemd unit on the Proxmox host, then
-    enables + starts the unit (so the cap applies now AND on every host
-    boot).  Returns 0 on success."""
-    host = state['PROXMOX_HOST']
-    vmid = state['VMID']
-    try:
-        host_total = int(state.get('HOST_CPU_COUNT', '0'))
-    except ValueError:
-        host_total = 0
-    if host_total <= 0:
-        _err('install-state.env missing HOST_CPU_COUNT — '
-             'cannot determine which pCPUs are host-only')
-        return 1
-
-    pinned = _fetch_pinned_pcpus(state)
-    if pinned is None:
-        _err(f'could not read /var/lib/vz/snippets/cpu-pin-{vmid}.sh on host')
-        return 1
-
-    host_cpus = sorted(set(range(host_total)) - pinned)
-    if not host_cpus:
-        _warn('every host pCPU is pinned to this VM — nothing to cap')
-        return 0
-
-    _info(f'Host: {host}   pinned pCPUs: {sorted(pinned)}   '
-          f'host-only pCPUs: {host_cpus}')
-
-    if max_mhz == 0:
-        # Remove: stop+disable service, restore caps to hw_max, rm files.
-        _info('Removing host CPU cap ...')
-        cmd = (
-            'set -e; '
-            'systemctl disable --now sigmond-host-cpu-cap.service '
-            '2>/dev/null || true; '
-            'for c in ' + ' '.join(str(c) for c in host_cpus) + '; do '
-            '    HW=$(cat /sys/devices/system/cpu/cpu$c/cpufreq/cpuinfo_max_freq); '
-            '    echo "$HW" > /sys/devices/system/cpu/cpu$c/cpufreq/scaling_max_freq; '
-            'done; '
-            'rm -f /usr/local/sbin/sigmond-host-cpu-cap '
-            '      /etc/systemd/system/sigmond-host-cpu-cap.service '
-            '      /etc/sigmond/host-cpu-cap.conf; '
-            'systemctl daemon-reload; '
-            'echo "removed"'
-        )
-        r = _ssh_proxmox_host(state, 'bash', '-c', cmd, timeout=30)
-        if r.returncode != 0:
-            _err(f'remove failed: rc={r.returncode}\n{r.stderr}')
-            return 1
-        _ok('host CPU cap removed; pCPUs restored to hw_max')
-        return 0
-
-    # Install / update.
-    cap_khz = max_mhz * 1000
-    conf_body = (
-        '# /etc/sigmond/host-cpu-cap.conf — managed by `smd cpu --host-max-mhz`.\n'
-        '# Edit via smd, not by hand.  Re-applied at every host boot by\n'
-        '# sigmond-host-cpu-cap.service.\n'
-        f'HOST_CPU_CAP_KHZ={cap_khz}\n'
-        f'HOST_CPUS="{" ".join(str(c) for c in host_cpus)}"\n'
-    )
-    # Embed conf/script/unit via heredocs in a single bash -c so the whole
-    # install is one round-trip and atomic from the operator's perspective.
-    install_cmd = (
-        "set -e; "
-        "mkdir -p /etc/sigmond; "
-        "cat > /etc/sigmond/host-cpu-cap.conf <<'__CONF__'\n"
-        + conf_body
-        + "__CONF__\n"
-        "cat > /usr/local/sbin/sigmond-host-cpu-cap <<'__SCRIPT__'\n"
-        + _HOST_CPU_CAP_SCRIPT
-        + "__SCRIPT__\n"
-        "chmod 755 /usr/local/sbin/sigmond-host-cpu-cap; "
-        "cat > /etc/systemd/system/sigmond-host-cpu-cap.service <<'__UNIT__'\n"
-        + _HOST_CPU_CAP_UNIT
-        + "__UNIT__\n"
-        "systemctl daemon-reload; "
-        "systemctl enable --now sigmond-host-cpu-cap.service; "
-        "echo installed"
-    )
-    r = _ssh_proxmox_host(state, 'bash', '-c', install_cmd, timeout=30)
-    if r.returncode != 0:
-        _err(f'install failed: rc={r.returncode}\n{r.stderr}')
-        return 1
-    _ok(f'host CPU cap installed: {max_mhz} MHz on pCPUs {host_cpus}')
-    # Echo what the helper script just logged.
-    log = _ssh_proxmox_host(state, 'journalctl', '-t', 'sigmond-host-cpu-cap',
-                            '--since', '30 seconds ago', '--no-pager', '-q',
-                            timeout=10)
-    if log.returncode == 0 and log.stdout.strip():
-        for line in log.stdout.splitlines():
-            _info(f'  {line}')
-    return 0
 
 
 def _discover_pcpu_for_vcpu0(state: dict) -> int | None:
@@ -7968,12 +7792,6 @@ def main() -> int:
                    help='PROXMOX VM ONLY: SSH to the host and re-run the '
                         'cpu-pin hookscript (reapplies freq caps + vCPU '
                         'pinning without a VM restart)')
-    p.add_argument('--host-max-mhz', dest='host_max_mhz', type=int, metavar='MHZ',
-                   help='PROXMOX VM ONLY: cap the host\'s own pCPUs '
-                        '(cores not pinned to any VM) at MHZ.  Installs '
-                        '/etc/systemd/system/sigmond-host-cpu-cap.service '
-                        'on the host so the cap survives reboots.  Pass 0 '
-                        'to remove the cap and uninstall the service.')
     p.add_argument('--radiod-max-mhz', type=int, metavar='MHZ',
                    help='override radiod CPU max frequency (default: from topology.toml or 3200)')
     p.add_argument('--other-max-mhz', type=int, metavar='MHZ',
@@ -8021,18 +7839,6 @@ def main() -> int:
               're-pins KVM vCPU threads — the same operation the hookscript '
               'performs at VM start.  Use this when host-side tuned or a '
               'host reboot has reset the caps; avoids bouncing the VM.'))
-    p_cpu.add_argument(
-        '--host-max-mhz', dest='host_max_mhz', type=int, metavar='MHZ',
-        help=('PROXMOX VM ONLY: cap the host\'s own pCPUs (cores NOT '
-              'pinned to any VM) at MHZ to save host idle power.  Writes '
-              'three files to the host via SSH: a one-line conf at '
-              '/etc/sigmond/host-cpu-cap.conf, a helper script at '
-              '/usr/local/sbin/sigmond-host-cpu-cap, and a oneshot unit '
-              'at /etc/systemd/system/sigmond-host-cpu-cap.service.  The '
-              'unit is enabled + started so the cap applies now AND at '
-              'every host boot.  Pass 0 to remove the cap (stops the '
-              'service and restores scaling_max_freq to hw_max).  This '
-              'is operator-driven; smd never sets it automatically.'))
     p_cpu.add_argument(
         '--radiod-max-mhz', type=int, metavar='MHZ',
         help='override radiod CPU max frequency for this invocation '
