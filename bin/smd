@@ -6159,11 +6159,30 @@ def cmd_wspr_watch(args) -> int:
             return line.decode('utf-8', errors='replace')
         return None
 
+    # Pending-cycle state: each cycle is buffered until either the
+    # matching wd-upload-hs `shipped` event arrives (so we can render
+    # decode + ship as one line) or the deadline passes (signal-wake
+    # was lost and the consumer's 60 s polling tick will fire eventually,
+    # but we don't want to block the UI on it).
+    pending: dict = {}    # keys: 'line', 'extras', 'ts', 'deadline'
+
+    def _flush_pending(ship_suffix: str = '') -> None:
+        if not pending:
+            return
+        print(pending['line'] + ship_suffix, flush=True)
+        for extra in pending['extras']:
+            print(extra, flush=True)
+        pending.clear()
+
     try:
         while True:
             line = _next_line()
             if line is None:
                 rlist, _w, _x = _select.select([fd], [], [], 1.0)
+                # Idle tick — if a pending cycle has waited too long
+                # for its shipped event, flush it as-is.
+                if pending and time.monotonic() > pending['deadline']:
+                    _flush_pending()
                 if not rlist:
                     continue
                 try:
@@ -6199,12 +6218,24 @@ def cmd_wspr_watch(args) -> int:
                     tot_field = f'{tot_added}/{tot_posted}'
                 else:
                     tot_field = f'{tot_posted}'
-                print(
-                    f'[{hms}] shipped              '
-                    f'{pump_field:>7} wsprnet  '
-                    f'(total {tot_field}, batch {work_n})',
-                    flush=True,
-                )
+                if pending:
+                    # Merge with the pending cycle: append ship summary
+                    # to the cycle line, then print everything.
+                    ship_delta_s = int(time.monotonic() - pending['ts'])
+                    _flush_pending(
+                        f'  → ship {pump_field} in {ship_delta_s}s '
+                        f'(total {tot_field}, batch {work_n})'
+                    )
+                else:
+                    # Standalone — no cycle is waiting (e.g. backlog
+                    # drain across multiple cycles, or signal-wake
+                    # arrived before the cycle log line did).
+                    print(
+                        f'[{hms}] shipped              '
+                        f'{pump_field:>7} wsprnet  '
+                        f'(total {tot_field}, batch {work_n})',
+                        flush=True,
+                    )
                 continue
 
             cm = cycle_re.search(line)
@@ -6232,15 +6263,19 @@ def cmd_wspr_watch(args) -> int:
                 counts_part = '  [shipped]'
 
             noise_part = f' / {noise_n} noise' if noise_n else ''
-            print(
+            cycle_text = (
                 f'[{hms}] cycle UTC {hh}:{mm}  '
                 f'{spots_n:>3} spots{noise_part} / {bands_n} bands  '
-                f'(write {write_ms} ms){counts_part}',
-                flush=True,
+                f'(write {write_ms} ms){counts_part}'
             )
+            # If a previous cycle is still pending (no shipped event
+            # ever arrived) flush it before starting the new one.
+            _flush_pending()
 
-            # Per-spot detail under the summary line.  Only available
-            # when rows are still in pending_uploads (live cycles).
+            # Per-spot detail prints under the summary line after the
+            # cycle+ship are merged.  Build it now into `extras` so it
+            # follows the merged line in order.
+            extras: List[str] = []
             if show_spots and rows:
                 # Group rows by band so the per-band cap (N) applies
                 # to each band independently — otherwise a 40m flood
@@ -6256,17 +6291,30 @@ def cmd_wspr_watch(args) -> int:
                     to_show = (group_list if cap is None
                                else group_list[:cap])
                     for r in to_show:
-                        print(_format_spot(r), flush=True)
+                        extras.append(_format_spot(r))
                     if cap is not None and len(group_list) > len(to_show):
-                        print(
+                        extras.append(
                             f'           … ({len(group_list) - len(to_show)} '
-                            f'more on {band}m)',
-                            flush=True,
+                            f'more on {band}m)'
                         )
+
+            # Buffer this cycle's render; the shipped event (or a 30 s
+            # deadline) will trigger _flush_pending().  For backlog
+            # replay (--backlog), wsprnet's old ship event is also in
+            # the replayed journal so backlog cycles still get merged.
+            pending.update({
+                'line': cycle_text,
+                'extras': extras,
+                'ts': time.monotonic(),
+                'deadline': time.monotonic() + 30.0,
+            })
 
     except KeyboardInterrupt:
         return 130
     finally:
+        # If we have a buffered cycle without a matching ship, print it
+        # before exiting — otherwise that cycle silently disappears.
+        _flush_pending()
         try:
             proc.terminate()
             proc.wait(timeout=2)
