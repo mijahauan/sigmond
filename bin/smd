@@ -4542,7 +4542,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage completion"
+    local top_cmds="add install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage public-ip completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -4610,6 +4610,9 @@ _smd_complete() {
                     ;;
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
+                    ;;
+                public-ip)
+                    COMPREPLY=($(compgen -W "--no-v6 -q --quiet" -- "$cur"))
                     ;;
                 tui)
                     COMPREPLY=()
@@ -5205,6 +5208,123 @@ def cmd_wisdom_status(args) -> int:
                else f'{int(age_s / 60)}m ago')
     _ok(f'{WISDOM_FILE}  ({st.st_size:,} bytes, last updated {age_str})')
     return 0
+
+
+# ---------------------------------------------------------------------------
+# public-ip — quick lookup of this host's outbound IP
+# ---------------------------------------------------------------------------
+
+# Public IP resolvers, tried in order.  These are well-known plain-text
+# echo services that return only the client's outbound IP, no JSON, no
+# HTML — so a 200 OK whose body is a single IP address is the success
+# signal.  Multiple resolvers give a fallback path when one is down or
+# rate-limited, and let us cross-check that two independent sources
+# agree (a defence against captive-portal / proxy mis-reporting).
+_PUBLIC_IP_RESOLVERS_V4 = (
+    'https://api.ipify.org',
+    'https://ifconfig.me/ip',
+    'https://icanhazip.com',
+    'https://ipinfo.io/ip',
+)
+_PUBLIC_IP_RESOLVERS_V6 = (
+    'https://api64.ipify.org',
+    'https://ifconfig.co/ip',
+)
+
+
+def _fetch_public_ip(url: str, timeout: float = 5.0) -> Optional[str]:
+    """Fetch a plain-text public-IP echo URL.  Returns the trimmed body
+    on 2xx with what looks like an IP, None otherwise."""
+    import urllib.request
+    import urllib.error
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            if 200 <= resp.status < 300:
+                body = resp.read(64).decode('ascii', errors='replace').strip()
+                # Sanity: must contain a digit and a '.' or ':' (rough
+                # IPv4/IPv6 check; not strict because the body will be
+                # well-formed if the service responded at all).
+                if body and any(c.isdigit() for c in body) and (
+                    '.' in body or ':' in body
+                ):
+                    return body
+    except (urllib.error.URLError, TimeoutError, OSError):
+        pass
+    return None
+
+
+def cmd_public_ip(args) -> int:
+    """Show the host's outbound public IP (IPv4 and, if reachable, IPv6).
+
+    Useful when you need to declare the station's WAN address to an
+    upstream service (wsprdaemon.org RAC, the wsprnet "station map",
+    a firewall rule on the router upstream of this host) and you
+    don't want to fiddle with curl + a third-party site by hand.
+
+    Probes a small list of well-known plain-text echo services in
+    order.  If two resolvers agree the IP is trusted; if they
+    disagree the result is shown with a warning so the operator can
+    investigate (CGNAT, dual-WAN, captive portal).
+    """
+    show_v6 = bool(getattr(args, 'v6', True))
+    quiet = bool(getattr(args, 'quiet', False))
+
+    if not quiet:
+        _heading('public IP')
+
+    def _consensus(urls, label):
+        results: list[tuple[str, str]] = []
+        for u in urls:
+            ip = _fetch_public_ip(u)
+            if ip is not None:
+                results.append((u, ip))
+                # Two agreements is enough; stop probing to keep this fast.
+                ips_seen = {r[1] for r in results}
+                if len(ips_seen) == 1 and len(results) >= 2:
+                    break
+        if not results:
+            return None, []
+        # Pick the most-agreed-upon IP.
+        counts: dict[str, int] = {}
+        for _, ip in results:
+            counts[ip] = counts.get(ip, 0) + 1
+        winner = max(counts, key=counts.get)
+        disagreers = [(u, ip) for u, ip in results if ip != winner]
+        return winner, disagreers
+
+    rc = 0
+    v4, v4_disagree = _consensus(_PUBLIC_IP_RESOLVERS_V4, 'IPv4')
+    if quiet:
+        if v4:
+            print(v4)
+        else:
+            rc = 1
+    else:
+        if v4:
+            _ok(f'IPv4: {v4}')
+            for u, ip in v4_disagree:
+                _warn(f'  disagreement: {u} returned {ip}')
+        else:
+            _err('IPv4: no resolver responded')
+            rc = 1
+
+    if show_v6:
+        v6, v6_disagree = _consensus(_PUBLIC_IP_RESOLVERS_V6, 'IPv6')
+        if quiet:
+            if v6:
+                print(v6)
+        else:
+            if v6 and ':' in v6:
+                _ok(f'IPv6: {v6}')
+                for u, ip in v6_disagree:
+                    _warn(f'  disagreement: {u} returned {ip}')
+            elif v6:
+                # The "v6" resolvers fall back to v4 if no v6 reachable;
+                # don't report it as v6 in that case.
+                if not quiet:
+                    _info('IPv6: (not reachable; v6 resolvers returned v4)')
+
+    return rc
 
 
 def cmd_timestd_tune_storage(args) -> int:
@@ -7857,6 +7977,24 @@ def main() -> int:
     p.add_argument('--json', action='store_true',
                    help='emit full report as JSON')
 
+    # public-ip — quick outbound-IP lookup
+    p_pip = sub.add_parser(
+        'public-ip',
+        help='show this host\'s outbound public IP (IPv4 + IPv6)',
+        description=(
+            'Query one or more public-IP echo services and print the '
+            'host\'s outbound public address.  Two resolvers must agree '
+            'before an answer is shown without a warning.  Useful for '
+            'declaring the station to upstream services (RAC tunnels, '
+            'wsprnet station map, firewall ACLs).'
+        ),
+    )
+    p_pip.add_argument('--no-v6', dest='v6', action='store_false', default=True,
+                       help='skip IPv6 probe (default: try both)')
+    p_pip.add_argument('-q', '--quiet', action='store_true',
+                       help='print only the IP(s) on stdout, no decorations '
+                            '(scriptable: `MY_IP=$(smd public-ip -q --no-v6)`)')
+
     # completion
     p_completion = sub.add_parser('completion', help='emit shell tab-completion script')
     completion_sub = p_completion.add_subparsers(dest='completion_command')
@@ -8126,6 +8264,7 @@ def main() -> int:
         'log':     cmd_log,
         'status':  cmd_status,
         'tui':     cmd_tui,
+        'public-ip': cmd_public_ip,
     }
 
     if args.command == 'completion':
