@@ -3017,6 +3017,50 @@ def cmd_diag_cpu_freq(args) -> int:
     _info('  (Configure limits in /etc/sigmond/topology.toml  [cpu_freq])')
     print()
 
+    # --reapply: re-execute the Proxmox host hookscript via SSH so freq
+    # caps + vCPU pinning are restored without bouncing the VM.  Useful
+    # when the host's governor / tuned reset scaling_max_freq, or when
+    # the hookscript hasn't fired since the last host reboot.
+    if getattr(args, 'reapply', False):
+        if Path('/sys/devices/system/cpu/cpu0/cpufreq').exists():
+            _err('--reapply only applies inside a Proxmox VM; bare metal '
+                 'should use --apply')
+            return 1
+        if (Path('/etc/sigmond/install-state.env').exists()
+                and not os.access('/etc/sigmond/install-state.env', os.R_OK)):
+            if _need_root('cpu --reapply'):
+                return 1
+        state = _read_install_state()
+        host = state.get('PROXMOX_HOST') if state else None
+        vmid = state.get('VMID', '') if state else ''
+        if not host or not vmid:
+            _err('install-state.env missing PROXMOX_HOST / VMID — '
+                 'cannot reach the host')
+            return 1
+        hookscript = f'/var/lib/vz/snippets/cpu-pin-{vmid}.sh'
+        _info(f'Re-running {hookscript} on {host} as {state.get("PROXMOX_USER", "root")} ...')
+        try:
+            r = _ssh_proxmox_host(state, 'bash', hookscript, vmid, 'post-start',
+                                  timeout=30)
+        except subprocess.TimeoutExpired:
+            _err('ssh timed out')
+            return 1
+        if r.returncode != 0:
+            _err(f'hookscript returned {r.returncode}:')
+            if r.stderr:
+                print(r.stderr)
+            return 1
+        _ok('hookscript completed')
+        # Show what the hookscript just logged via syslog, so the operator
+        # sees the per-pCPU writes confirmed.
+        log = _ssh_proxmox_host(state, 'journalctl', '-t', f'cpu-pin-{vmid}',
+                                '--since', '30 seconds ago', '--no-pager', '-q',
+                                timeout=10)
+        if log.returncode == 0 and log.stdout.strip():
+            for line in log.stdout.splitlines():
+                _info(f'  {line}')
+        return 0
+
     # No /sys/cpufreq at all → we're in a guest VM (KVM doesn't expose host
     # frequency scaling, and /proc/cpuinfo's "cpu MHz" inside KVM is the
     # calibration TSC value, not the live running freq).  The caps must be
@@ -4671,6 +4715,16 @@ complete -F _smd_complete smd
 # Add to your shell with: source <(smd completion bash)
 smdt()   { smd tui "$@"; }
 smdtui() { smd tui "$@"; }
+
+# Re-source the completion script in-place — use this after smd is updated
+# (`smd list --update`, a fresh `git pull` on the dev tree, etc.) so the
+# current shell picks up newly-added subcommands / flags without having to
+# log out + back in.  Has to be a shell function rather than an alias
+# because `source <(...)` only takes effect when run in the caller's own
+# scope, which aliases don't provide.
+smdrefresh() {
+    source <(smd completion bash) && echo "smd: tab-completion refreshed"
+}
 
 # smdt / smdtui take no subcommands; just complete --topology via file completion.
 _smdt_complete() {
@@ -7711,6 +7765,10 @@ def main() -> int:
                              help='show (and optionally apply) per-CPU frequency limits')
     p.add_argument('--apply', action='store_true',
                    help='write scaling_max_freq to sysfs (requires root)')
+    p.add_argument('--reapply', action='store_true',
+                   help='re-run the Proxmox host hookscript via SSH, '
+                        'reapplying freq caps + vCPU pinning without a '
+                        'VM restart (VM guest only)')
     p.add_argument('--radiod-max-mhz', type=int, metavar='MHZ',
                    help='override radiod CPU max frequency (default: from topology.toml or 3200)')
     p.add_argument('--other-max-mhz', type=int, metavar='MHZ',
@@ -7724,6 +7782,10 @@ def main() -> int:
                            help='live per-CPU frequency (uses SSH on Proxmox VMs)')
     p_cpu.add_argument('--apply', action='store_true',
                        help='write caps to sysfs (bare metal only; requires root)')
+    p_cpu.add_argument('--reapply', action='store_true',
+                       help='re-run the Proxmox host hookscript via SSH, '
+                            'reapplying freq caps + vCPU pinning without a '
+                            'VM restart (VM guest only)')
     p_cpu.add_argument('--radiod-max-mhz', type=int, metavar='MHZ',
                        help='override radiod CPU max frequency')
     p_cpu.add_argument('--other-max-mhz', type=int, metavar='MHZ',
