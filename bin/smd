@@ -5990,6 +5990,15 @@ def cmd_wspr_watch(args) -> int:
         r'(?:,\s+(\d+)\s+noise\s+rows\s+in\s+wspr\.noise)?\s+'
         r'\((\d+)\s+bands?,\s+write\s+(\d+)\s*ms\)'
     )
+    # wd-upload-hs's per-pump line.  Two shapes — the simple one when
+    # posted==added, and the "posted:N/added:M" shape when wsprnet
+    # under-accepted.
+    upload_re = _re.compile(
+        r'wspr-uploader-hs:\s+shipped\s+wsprdaemon=\d+\s+'
+        r'wsprnet=(?:posted:(\d+)/added:(\d+)|(\d+))\s+'
+        r'\(total\s+wsprdaemon=\d+\s+'
+        r'wsprnet=(?:posted:(\d+)/added:(\d+)|(\d+)),\s+work=(\d+)\)'
+    )
     # Python logger's ISO-ish datetime prefix on the same line.  Local
     # wallclock (the logger format is %Y-%m-%d %H:%M:%S,%f).  We use
     # it only for the displayed [HH:MM:SS] tag; the cycle's UTC time
@@ -6016,8 +6025,14 @@ def cmd_wspr_watch(args) -> int:
         # See cmd_psk_watch / cmd_hfdl_watch for the binary-pipe +
         # raw os.read rationale: select.select + TextIOWrapper interact
         # badly — buffered bytes hide from select after the first read.
+        # Follow BOTH the recorder unit (cycle events) AND the uploader
+        # unit (shipped events).  systemd's journal multiplexes them in
+        # wall-clock order, so the merged stream reads naturally as
+        # "cycle … shipped" pairs per WSPR period.
         proc = subprocess.Popen(
-            [*sudo_prefix, 'journalctl', '-f', '-u', unit_pattern,
+            [*sudo_prefix, 'journalctl', '-f',
+             '-u', unit_pattern,
+             '-u', 'wd-upload-hs@*',
              '-o', 'cat', *since_arg],
             stdout=subprocess.PIPE,
         )
@@ -6158,6 +6173,38 @@ def cmd_wspr_watch(args) -> int:
                 if not chunk:
                     break
                 buf += chunk
+                continue
+
+            um = upload_re.search(line)
+            if um:
+                # Group ordering matches the regex:
+                #   1,2: pump-shipped posted/added (verbose form)
+                #   3  : pump-shipped count (compact form)
+                #   4,5: total posted/added (verbose form)
+                #   6  : total count (compact form)
+                #   7  : work counter
+                p_posted, p_added, p_compact, \
+                    t_posted, t_added, t_compact, work_n = um.groups()
+                pump_posted = int(p_posted or p_compact or 0)
+                pump_added  = int(p_added  or p_compact or 0)
+                tot_posted  = int(t_posted or t_compact or 0)
+                tot_added   = int(t_added  or t_compact or 0)
+                tm = ts_re.match(line)
+                hms = tm.group(2) if tm else _datetime.datetime.now().strftime('%H:%M:%S')
+                if pump_posted != pump_added:
+                    pump_field = f'+{pump_added}/{pump_posted}'
+                else:
+                    pump_field = f'+{pump_posted}'
+                if tot_posted != tot_added:
+                    tot_field = f'{tot_added}/{tot_posted}'
+                else:
+                    tot_field = f'{tot_posted}'
+                print(
+                    f'[{hms}] shipped              '
+                    f'{pump_field:>7} wsprnet  '
+                    f'(total {tot_field}, batch {work_n})',
+                    flush=True,
+                )
                 continue
 
             cm = cycle_re.search(line)
