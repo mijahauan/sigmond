@@ -6290,6 +6290,36 @@ def cmd_wspr_watch(args) -> int:
     sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
     since_arg = ['--since', f'{backlog_min} min ago'] if backlog_min > 0 \
         else ['--since', 'now']
+
+    # `journalctl -f -u GLOB` bails out immediately ("Failed to add
+    # filter for units: No data available") when none of its -u globs
+    # match a unit that has ever logged — exactly the state before
+    # wspr-recorder has run even once.  Probe first and, if there is
+    # nothing to follow yet, wait politely instead of dying on that
+    # cryptic error, so `smd wspr-watch` can be started ahead of
+    # wspr-recorder and springs to life when it comes up.
+    import time as _time
+    watch_units = [unit_pattern, 'wd-upload-hs@*']
+
+    def _journal_has_data() -> bool:
+        probe = subprocess.run(
+            [*sudo_prefix, 'journalctl', '-n', '1', '-q', '--no-pager',
+             *[a for u in watch_units for a in ('-u', u)]],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return probe.returncode == 0
+
+    if not _journal_has_data():
+        _info(f'   ⏳ no journal data for {unit_pattern} yet — waiting '
+              'for wspr-recorder to start (Ctrl-C to exit)')
+        try:
+            while not _journal_has_data():
+                _time.sleep(3.0)
+        except KeyboardInterrupt:
+            print(flush=True)
+            return 0
+        _info('   ▸ wspr-recorder journal detected — following')
+
     try:
         # See cmd_psk_watch / cmd_hfdl_watch for the binary-pipe +
         # raw os.read rationale: select.select + TextIOWrapper interact
@@ -6300,8 +6330,7 @@ def cmd_wspr_watch(args) -> int:
         # "cycle … shipped" pairs per WSPR period.
         proc = subprocess.Popen(
             [*sudo_prefix, 'journalctl', '-f',
-             '-u', unit_pattern,
-             '-u', 'wd-upload-hs@*',
+             *[a for u in watch_units for a in ('-u', u)],
              '-o', 'cat', *since_arg],
             stdout=subprocess.PIPE,
         )
