@@ -202,7 +202,7 @@ warnings.  The canonical names match `etc/catalog.toml`.
   remote SSH, CI, and scripted installs). TUI is additive.
 - **FHS-compliant paths:**
   - Config: `/etc/sigmond/`
-  - Binaries: `/usr/local/sbin/smd`
+  - Binaries: `/usr/local/bin/smd` (symlink to the repo's `bin/smd`)
   - Logs: `/var/log/sigmond/`
   - State: `/var/lib/sigmond/`
 

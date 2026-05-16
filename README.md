@@ -55,7 +55,7 @@ cd /opt/git/sigmond/sigmond
 `install.sh` creates a `sigmond` system user that owns
 `/opt/git/sigmond/*`, adds you to the `sigmond` group so you can edit
 sources as yourself, sets up `/opt/sigmond/venv`, and symlinks `smd` to
-`/usr/local/sbin/smd`. Open a new shell after install (or
+`/usr/local/bin/smd`. Open a new shell after install (or
 `newgrp sigmond`) to pick up the group membership.
 
 > **Running under Proxmox?** `install.sh` detects KVM guests and offers
@@ -353,7 +353,7 @@ which defines a standard interface: `inventory --json`, `validate --json`,
 ## Development
 
 Sigmond's core `smd` command is deliberately stdlib-only so it can run from
-`/usr/local/sbin/smd` without any venv. The TUI (`smd tui`) and the test
+`/usr/local/bin/smd` without any venv. The TUI (`smd tui`) and the test
 suite do require external packages; those live in a venv driven by
 [pyproject.toml](pyproject.toml).
 

@@ -1795,15 +1795,17 @@ today:
    other format to a path in `/var/lib/<client>/`,
    `/var/log/<client>/`, or `/var/spool/<client>/`.  This is the
    default and the only shape every conformant client supports.
-2. **ClickHouse sinks.**  A client writes structured rows to a local
-   ClickHouse staging tier (a sigmond-managed server component).
-   Rows are later read by the `hs-uploader` library and shipped to
-   upstream destinations (wsprdaemon.org, psws.eng.ua.edu, etc.).
+2. **Structured-row sinks.**  A client writes structured rows to a
+   local staging tier via `sigmond.hamsci_ch.Writer.from_env()`.
+   The default backend is SQLite (`/var/lib/sigmond/sink.db`);
+   ClickHouse remains an explicit opt-in (`SIGMOND_CLICKHOUSE_URL`)
+   for hosts that need the upstream-grade columnar tier.  Rows are
+   later read by the separate `hs-uploader` library — SQLite-only —
+   and shipped to upstream destinations (wsprdaemon.org,
+   psws.eng.ua.edu, etc.).
 
 This section makes the surface declarative so sigmond can budget
-disk, surface backpressure in `smd diag`, and let an importer of
-`hs-uploader` enumerate which local CH tables exist that it could
-ship from.
+disk and surface backpressure in `smd diag`.
 
 #### 17.2 Why this exists
 
@@ -1928,8 +1930,8 @@ directory.  Clients that write `wspr.spots` reference the
 upstream-pinned schema by version (e.g.
 `schema_ref = "wsprdaemon:1"`); they do not own the migrations.
 This keeps the local WSPR rows byte-identical to the rows
-wsprdaemon-server expects, so a future `hs-uploader` can ship them
-to wsprdaemon.org without transformation.
+wsprdaemon-server expects, so `hs-uploader` can ship them to
+wsprdaemon.org without transformation.
 
 #### 17.6 Sigmond's view
 

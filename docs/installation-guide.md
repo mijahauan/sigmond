@@ -62,7 +62,7 @@ Bare-metal users see no new prompts and can skip to §1 below.
 
 ### 1.1 Ensure sudo access
 
-Sigmond's installer writes to `/etc`, `/opt`, and `/usr/local/sbin`, so you
+Sigmond's installer writes to `/etc`, `/opt`, and `/usr/local/bin`, so you
 need sudo. On a fresh Debian install the default user may not be in the sudo
 group.
 
@@ -159,12 +159,13 @@ The script will:
 6. Install `uv` (fast Python package manager) to `/usr/local/bin/`
 7. Build `/opt/sigmond/venv` with `sigmond[tui]` (Textual + Rich)
 8. Install ka9q-python into the venv (editable)
-9. Symlink `bin/smd` → `/usr/local/sbin/smd`
+9. Symlink `bin/smd` → `/usr/local/bin/smd` (and remove any legacy
+   `/usr/local/sbin/smd`)
 
 Expected output ends with:
 
 ```
-[  ok  ] smd installed at /usr/local/sbin/smd
+[  ok  ] smd installed at /usr/local/bin/smd
 ```
 
 > **Bug note (fixed in install.sh):** On a re-run after a failed install,
@@ -174,19 +175,13 @@ Expected output ends with:
 
 ---
 
-## 4. Fix PATH
+## 4. Verify smd is on PATH
 
-`/usr/local/sbin` is not in the default PATH on Debian. Add it:
-
-```bash
-echo 'export PATH="$PATH:/usr/local/sbin"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-Verify:
+`smd` is symlinked into `/usr/local/bin`, which is on every user's
+default PATH. Verify:
 
 ```bash
-which smd       # should print /usr/local/sbin/smd
+which smd       # should print /usr/local/bin/smd
 smd --help
 ```
 
@@ -372,7 +367,7 @@ client should still show as installed (the symlinks at
 | 1 | `sigmond` user not in sudoers on fresh Debian 13 | `usermod -aG sudo sigmond` as root |
 | 2 | `ka9q-python` sibling repo not cloned before running `install.sh` | Clone `ka9q-python` alongside `sigmond` before running installer |
 | 3 | `install.sh` fails on re-run: `uv venv` won't overwrite existing venv | Added `--clear` flag to `uv venv` and `python -m venv` calls in `_venv_create()` |
-| 4 | `/usr/local/sbin` not in default PATH on Debian 13 | Add `export PATH="$PATH:/usr/local/sbin"` to `~/.bashrc` |
+| 4 | `/usr/local/sbin` not in default PATH on Debian 13 | Fixed: `smd` now symlinks into `/usr/local/bin` (on every user's PATH); legacy `/usr/local/sbin/smd` is removed on install |
 | 5 | TUI topology table: mouse click doesn't toggle rows | Fixed: use `cursor_type="row"` + `RowSelected` event; `RowHighlighted` fires on arrow-key navigation too |
 | 6 | TUI `CellDoesNotExist` crash on second click | Fixed: capture `ColumnKey` from `add_columns()` return value and pass key (not label string) to `update_cell()` |
 | 7 | `ka9q-web` and `radiod` enabled=True by default in topology | Fixed `_DEFAULT_COMPONENTS` to start all components as `enabled=False` |
@@ -402,7 +397,7 @@ client should still show as installed (the symlinks at
 /opt/sigmond/
 └── venv/               — Python venv with sigmond[tui] + ka9q-python
 
-/usr/local/sbin/smd     — symlink to ~/sigmond/bin/smd
+/usr/local/bin/smd      — symlink to the repo's bin/smd
 /usr/local/bin/uv       — fast Python package manager (installed by install.sh)
 
 ~/sigmond/              — source repo (smd runs from here)
