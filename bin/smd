@@ -6474,11 +6474,13 @@ def cmd_wspr_watch(args) -> int:
                 else:
                     tot_field = f'{tot_posted}'
                 if pending:
-                    # Merge with the pending cycle: append ship summary
-                    # to the cycle line, then print everything.
+                    # Merge with the pending cycle: append delivery
+                    # summary to the cycle line, then print everything.
+                    # "delivered" — wsprnet's pump completed with the
+                    # server's added-count (not just upload finished).
                     ship_delta_s = int(time.monotonic() - pending['ts'])
                     _flush_pending(
-                        f'  → ship {pump_field} in {ship_delta_s}s '
+                        f'  → delivered {pump_field} in {ship_delta_s}s '
                         f'(total {tot_field}, batch {work_n})'
                     )
                 else:
@@ -6486,7 +6488,7 @@ def cmd_wspr_watch(args) -> int:
                     # drain across multiple cycles, or signal-wake
                     # arrived before the cycle log line did).
                     print(
-                        f'[{hms}] shipped              '
+                        f'[{hms}] delivered            '
                         f'{pump_field:>7} wsprnet  '
                         f'(total {tot_field}, batch {work_n})',
                         flush=True,
@@ -6561,7 +6563,11 @@ def cmd_wspr_watch(args) -> int:
                 'line': cycle_text,
                 'extras': extras,
                 'ts': time.monotonic(),
-                'deadline': time.monotonic() + 30.0,
+                # 90 s: wsprnet pump cadence is ~60 s; observed ship
+                # latency runs 25-40 s post-decode.  30 s was too tight
+                # and split ~1-in-3 cycles into separate cycle+shipped
+                # lines.
+                'deadline': time.monotonic() + 90.0,
             })
 
     except KeyboardInterrupt:
