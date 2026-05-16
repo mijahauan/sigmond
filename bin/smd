@@ -2113,12 +2113,21 @@ def cmd_apply(args) -> int:
     # leaves them alone instead of cycling them every time.
     something_changed = False
 
+    # Reconcile Proxmox VM `onboot` flag — silent no-op on bare-metal
+    # hosts.  Catches the "host rebooted, VM didn't come back" failure
+    # mode (B4-100 power outage, 2026-05-16: operator caught onboot=0
+    # before booting the VM; without this check there's no way for smd
+    # to know it had been reset).
+    something_changed |= _ensure_proxmox_onboot(dry_run=dry_run)
+
     # Ensure deploy.toml link-kind install steps are present for all installed
     # catalog components.  This catches unit files that install.sh omitted or
     # that were accidentally removed.
     if _HAS_SIGMOND_LIB:
         try:
-            from sigmond.installer import apply_deploy_toml_links
+            from sigmond.installer import (
+                apply_deploy_toml_links, apply_systemd_enables,
+            )
             from sigmond.catalog import load_catalog
             catalog = load_catalog()
             reloaded = False
@@ -2134,6 +2143,18 @@ def cmd_apply(args) -> int:
                         _ok(f'deploy links: {msg.strip()}')
                         if '/etc/systemd' in msg:
                             reloaded = True
+                # Ensure every non-template unit declared in [systemd] is
+                # actually wanted by multi-user.target — guards against
+                # the "boots came up but nothing started" failure mode
+                # where a unit file exists but `systemctl enable` was
+                # never run (B4-100 post-outage, 2026-05-16).
+                enable_msgs = apply_systemd_enables(repo_dir, dry_run=dry_run)
+                for msg in enable_msgs:
+                    if msg.startswith('  warning'):
+                        _warn(msg.strip())
+                    elif not msg.startswith('  (dry'):
+                        _ok(f'systemd enable: {msg.strip()}')
+                        something_changed = True
             if reloaded and not dry_run:
                 _run(['systemctl', 'daemon-reload'], sudo=True)
                 something_changed = True
@@ -4793,6 +4814,51 @@ def _ssh_proxmox_host(state: dict, *cmd: str,
          target, *cmd],
         capture_output=True, text=True, timeout=timeout, check=False,
     )
+
+
+def _ensure_proxmox_onboot(dry_run: bool = False) -> bool:
+    """Reconcile Proxmox VM `onboot` to 1 if we can reach the host.
+
+    Bare-metal hosts (no PROXMOX_HOST in install-state.env) → silent
+    no-op.  Hosts that can't reach the Proxmox API or whose SSH key
+    isn't authorized → one-line warning, no fix.  Already onboot=1
+    → one-line ok and return False (nothing changed).
+
+    Returns True iff a change was made.
+    """
+    state = _read_install_state()
+    host = state.get('PROXMOX_HOST')
+    vmid = state.get('VMID')
+    if not host or not vmid:
+        return False
+    try:
+        r = _ssh_proxmox_host(state, 'qm', 'config', vmid)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        _warn(f'proxmox onboot: cannot reach {host}: {exc}')
+        return False
+    if r.returncode != 0:
+        _warn(f'proxmox onboot: qm config {vmid} failed on {host}: '
+              f'{(r.stderr or r.stdout).strip()}')
+        return False
+    onboot = None
+    for line in r.stdout.splitlines():
+        if line.startswith('onboot:'):
+            onboot = line.split(':', 1)[1].strip()
+            break
+    if onboot == '1':
+        _ok(f'proxmox: VM {vmid} on {host} onboot=1')
+        return False
+    if dry_run:
+        _info(f'proxmox: would set VM {vmid} on {host} onboot=1 '
+              f'(currently: {onboot!r})')
+        return False
+    r2 = _ssh_proxmox_host(state, 'qm', 'set', vmid, '--onboot', '1')
+    if r2.returncode == 0:
+        _ok(f'proxmox: set VM {vmid} on {host} onboot=1 (was: {onboot!r})')
+        return True
+    _warn(f'proxmox onboot: qm set --onboot 1 failed: '
+          f'{(r2.stderr or r2.stdout).strip()}')
+    return False
 
 
 # ---- host CPU cap helpers REMOVED — see commit history.

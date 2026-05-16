@@ -273,6 +273,96 @@ def run_install_script(
     return r.returncode == 0
 
 
+def apply_systemd_enables(repo_dir: Path, dry_run: bool = False) -> list[str]:
+    """Ensure every non-template unit in `[systemd] units` is enabled.
+
+    A unit can be installed (link/copy step in deploy.toml writes the file
+    into /etc/systemd/system/) yet still not be wanted by multi-user.target
+    at boot — because nothing ever ran `systemctl enable`.  That is exactly
+    the failure mode that left B4-100's wsprdaemon.target sitting linked
+    but inactive after the 2026-05-16 power outage.
+
+    Reads `[systemd] units = [...]` from the client's deploy.toml and, for
+    each *non-template* entry (templates can't be enabled directly; their
+    instances are wanted by a parent target instead), runs
+    `systemctl is-enabled <unit>` and, if the state is `linked`,
+    `disabled`, or `indirect`, runs `systemctl enable <unit>` to create
+    the missing `*.wants/<unit>` symlink.
+
+    Idempotent — already-enabled units are skipped.  Static / masked /
+    alias / generated / transient units are left alone (no [Install]
+    section to act on, or operator-locked).
+    """
+    deploy_toml = repo_dir / 'deploy.toml'
+    if not deploy_toml.exists():
+        return []
+    try:
+        with open(deploy_toml, 'rb') as f:
+            config = tomllib.load(f)
+    except Exception as exc:
+        return [f"warning: could not read {deploy_toml}: {exc}"]
+
+    units = config.get('systemd', {}).get('units', [])
+    msgs: list[str] = []
+    for unit in units:
+        # Template units (`foo@.service`) can't be enabled directly;
+        # their instances are wanted by a parent target.
+        if '@.' in unit:
+            continue
+        r = subprocess.run(
+            ['systemctl', 'is-enabled', unit],
+            capture_output=True, text=True, check=False,
+        )
+        state = (r.stdout or r.stderr).strip().splitlines()[-1] if (r.stdout or r.stderr) else ''
+        if state in ('enabled', 'enabled-runtime', 'static',
+                     'masked', 'alias', 'generated', 'transient'):
+            continue
+        if state not in ('linked', 'disabled', 'indirect'):
+            # Unknown state — surface it, don't try to fix.
+            msgs.append(f"  warning: {unit}: is-enabled returned {state!r} (skipped)")
+            continue
+        # Skip units that have no [Install] section — systemctl reports
+        # them as `linked` (because the file under /etc/systemd/system is
+        # itself a symlink into the repo), but `systemctl enable` is a
+        # no-op and just emits a stderr explanation.  Such units are
+        # typically helpers pulled in by another unit's wants/, not boot-
+        # time entry points.  Detect by parsing the unit text rather than
+        # trusting systemctl's exit code post-enable.
+        cat = subprocess.run(
+            ['systemctl', 'cat', unit],
+            capture_output=True, text=True, check=False,
+        )
+        if cat.returncode == 0:
+            install_section = False
+            in_install = False
+            for line in cat.stdout.splitlines():
+                stripped = line.strip()
+                if stripped.startswith('[') and stripped.endswith(']'):
+                    in_install = (stripped == '[Install]')
+                    continue
+                if in_install and stripped.startswith((
+                    'WantedBy=', 'RequiredBy=', 'UpheldBy=', 'Also=',
+                    'Alias=', 'DefaultInstance=',
+                )):
+                    install_section = True
+                    break
+            if not install_section:
+                continue  # no [Install] keys → can't be enabled, skip silently
+        if dry_run:
+            msgs.append(f"  (dry-run) would enable {unit} (was: {state})")
+            continue
+        r2 = subprocess.run(
+            ['systemctl', 'enable', unit],
+            capture_output=True, text=True, check=False,
+        )
+        if r2.returncode == 0:
+            msgs.append(f"  enabled {unit} (was: {state})")
+        else:
+            err = (r2.stderr or r2.stdout).strip().splitlines()[-1] if (r2.stderr or r2.stdout) else 'unknown error'
+            msgs.append(f"  warning: could not enable {unit}: {err}")
+    return msgs
+
+
 def apply_deploy_toml_links(repo_dir: Path, dry_run: bool = False) -> list[str]:
     """Execute 'link' kind install steps from deploy.toml that are missing or wrong.
 
