@@ -5997,23 +5997,32 @@ def _psk_watch_cycle_loop(
 def cmd_verifier_watch(args) -> int:
     """Live tail of upload-verifier passes.
 
-    Verifiers run as background threads inside wspr-recorder (and, in
-    the future, alongside other uploaders).  Each pass fetches the
-    upload server's recent spot set and confirms our locally-produced
-    spots round-trip cleanly.
+    Verifiers run as background threads inside wspr-recorder.  Each
+    pass fetches the upload server's recent spot set and confirms our
+    locally-produced spots round-trip cleanly.
 
-    Today only ``wsprnet-verifier`` exists, logged by
-    ``wspr_recorder.wsprnet_verifier`` every ~5 min as:
+    Two verifiers exist today:
 
-        wsprnet-verifier: pass complete verified=N dropped_old=M
-                          wsprnet_set_size=K (totals verified=A
-                          dropped_old=B)
+      * ``wsprnet-verifier`` (HTML scrape of wsprnet.org's olddb +
+        local pending_uploads cleanup)
+      * ``wsprdaemon-verifier`` (parallel ClickHouse queries against
+        wd10/wd20/wd30; observe-only)
 
-    The matcher is written against any ``<src>-verifier:`` prefix so a
-    future ``wsprdaemon-verifier`` will appear here without code
-    changes — the same wspr-recorder@* journal carries both.  Startup
-    and error lines from the verifier thread are also surfaced (so a
-    broken pass doesn't silently disappear).
+    Both emit lines of the same shape::
+
+        <src>-verifier[<rx_sign>]: pass complete verified=N
+            dropped_old=M wsprnet_set_size=K …
+
+    The ``[<rx_sign>]`` tag is critical on multi-receiver hosts where
+    two wspr-recorder@<id> instances run side by side: this watch
+    displays the reporter as its own column so AC0G/B4 and AC0G/B5
+    don't smear into a single confusing stream.  Pre-tag log lines
+    (older builds without the ``[<rx_sign>]`` prefix) still display,
+    with ``-`` in the reporter column.
+
+    Startup and error lines from the verifier threads are also
+    surfaced via a catch-all so a broken pass doesn't silently
+    disappear.
     """
     instance = getattr(args, 'instance', None)
     if instance is None:
@@ -6027,16 +6036,30 @@ def cmd_verifier_watch(args) -> int:
     import datetime as _datetime
 
     # Per-pass summary line (the routine one — fires every ~5 min).
+    # The reporter tag (``[<rx_sign>]``) is optional so pre-tag log
+    # lines from older wspr-recorder builds still parse.
+    #
+    # The wsprdaemon-verifier also emits ``wsprdaemon_set_size`` and
+    # ``wsprnet_set_size`` in the same line; we capture either via the
+    # generic ``\w+_set_size`` form and pick the larger as the
+    # displayed ``set=`` value (it's the firehose count when present,
+    # the deduped wsprnet count otherwise).
     pass_re = _re.compile(
-        r'(?P<src>[a-z][a-z0-9-]*)-verifier:\s+pass\s+complete\s+'
+        r'(?P<src>[a-z][a-z0-9-]*)-verifier'
+        r'(?:\[(?P<rx>[^\]]+)\])?:\s+pass\s+complete\s+'
         r'verified=(?P<v>\d+)\s+dropped_old=(?P<d>\d+)'
-        r'(?:\s+\w+_set_size=(?P<set>\d+))?'
-        r'(?:\s+\(totals\s+verified=(?P<tv>\d+)\s+dropped_old=(?P<td>\d+)\))?'
+        r'(?:\s+(?:wsprdaemon|wsprnet|\w+)_set_size=(?P<set>\d+))?'
+        r'(?:\s+wsprnet_set_size=(?P<set2>\d+))?'
+        r'(?:.*?\(totals\s+verified=(?P<tv>\d+)\s+dropped_old=(?P<td>\d+)\))?'
     )
     # Catch-all for non-pass-complete verifier lines (startup, fetch
-    # warnings, exceptions).  We still surface them so the operator
-    # sees that the verifier exists and what it's doing.
-    other_re = _re.compile(r'(?P<src>[a-z][a-z0-9-]*)-verifier(?:[: ].*)$')
+    # warnings, per-server status, exceptions).  Capture the reporter
+    # tag too so per-server detail aligns with the canonical line in
+    # the displayed output.
+    other_re = _re.compile(
+        r'(?P<src>[a-z][a-z0-9-]*)-verifier'
+        r'(?:\[(?P<rx>[^\]]+)\])?(?:[: ](?P<rest>.*))?$'
+    )
 
     _heading(f'Upload-verifier activity ({unit_pattern})')
     _info('   ▸ one line per ~5 min verifier pass — confirms our spots')
@@ -6091,17 +6114,28 @@ def cmd_verifier_watch(args) -> int:
             pm = pass_re.search(line)
             if pm:
                 src = pm.group('src')
+                rx = pm.group('rx') or '-'
                 verified = int(pm.group('v'))
                 dropped = int(pm.group('d'))
+                # The wsprdaemon-verifier reports two set sizes
+                # (wsprdaemon then wsprnet); show whichever pair the
+                # line carries.  ``set`` captures the first, ``set2``
+                # captures an explicit second one.
                 set_size = pm.group('set')
+                set_size_2 = pm.group('set2')
+                if set_size and set_size_2:
+                    set_part = f' set=wd:{set_size},wn:{set_size_2}'
+                elif set_size:
+                    set_part = f' set={set_size}'
+                else:
+                    set_part = ''
                 tv = pm.group('tv')
                 td = pm.group('td')
-                set_part = f' set={set_size}' if set_size else ''
                 tot_part = ''
                 if tv is not None and td is not None:
                     tot_part = f'   (since start: v={tv} d={td})'
                 print(
-                    f'[{wall}] {src:<10}  verified={verified:>3}  '
+                    f'[{wall}] {src:<10}  {rx:<10}  verified={verified:>3}  '
                     f'dropped_old={dropped:>3}{set_part}{tot_part}',
                     flush=True,
                 )
@@ -6110,12 +6144,19 @@ def cmd_verifier_watch(args) -> int:
             om = other_re.search(line)
             if om:
                 src = om.group('src')
+                rx = om.group('rx') or '-'
                 # Trim everything up to and including the verifier name
-                # so the visible payload is what the verifier said.
+                # + optional [rx_sign] so the visible payload is what
+                # the verifier actually said about this pass.
                 tail = line[om.start():]
-                # Drop the leading "<src>-verifier:" / "<src>-verifier "
-                tail = _re.sub(r'^[a-z0-9-]+-verifier[: ]\s*', '', tail)
-                print(f'[{wall}] {src:<10}  {tail}', flush=True)
+                tail = _re.sub(
+                    r'^[a-z0-9-]+-verifier(?:\[[^\]]+\])?[: ]\s*',
+                    '', tail,
+                )
+                print(
+                    f'[{wall}] {src:<10}  {rx:<10}  {tail}',
+                    flush=True,
+                )
                 continue
 
     except KeyboardInterrupt:
