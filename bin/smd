@@ -6050,7 +6050,10 @@ def cmd_verifier_watch(args) -> int:
         r'verified=(?P<v>\d+)\s+dropped_old=(?P<d>\d+)'
         r'(?:\s+(?:wsprdaemon|wsprnet|\w+)_set_size=(?P<set>\d+))?'
         r'(?:\s+wsprnet_set_size=(?P<set2>\d+))?'
-        r'(?:\s+missing_total=(?P<missing>\d+))?'
+        # Accept both names: ``missing_total`` (legacy, wsprdaemon-only)
+        # and ``missing_wd_total`` (current; paired with ``missing_wn_total``).
+        r'(?:\s+missing(?:_wd)?_total=(?P<miss_wd>\d+))?'
+        r'(?:\s+missing_wn_total=(?P<miss_wn>\d+))?'
         r'(?:.*?\(totals\s+verified=(?P<tv>\d+)\s+dropped_old=(?P<td>\d+)\))?'
     )
     # Catch-all for non-pass-complete verifier lines (startup, fetch
@@ -6130,11 +6133,27 @@ def cmd_verifier_watch(args) -> int:
                     set_part = f' set={set_size}'
                 else:
                     set_part = ''
-                # missing_total surfaces cross-server divergence on
-                # wsprdaemon.spots — operator-actionable when non-zero,
-                # so we always show it when the line carries it.
-                missing = pm.group('missing')
-                missing_part = f' missing={missing}' if missing else ''
+                # Cross-server divergence per table.  ``missing_wd``
+                # is the wsprdaemon.spots delta (data-loss signal);
+                # ``missing_wn`` is the wspr.rx mirror delta
+                # (replication-lag signal).  Show whichever non-None
+                # field the line carries; suppress zeros to keep the
+                # all-agree pass concise.
+                missing_wd = pm.group('miss_wd')
+                missing_wn = pm.group('miss_wn')
+                miss_bits = []
+                if missing_wd and missing_wd != '0':
+                    miss_bits.append(f'wd:{missing_wd}')
+                if missing_wn and missing_wn != '0':
+                    miss_bits.append(f'wn:{missing_wn}')
+                if miss_bits:
+                    missing_part = ' missing=' + ','.join(miss_bits)
+                elif missing_wd is not None or missing_wn is not None:
+                    # Field was reported but zero — say so explicitly
+                    # so the operator sees "checked, all agree".
+                    missing_part = ' missing=0'
+                else:
+                    missing_part = ''
                 tv = pm.group('tv')
                 td = pm.group('td')
                 tot_part = ''
