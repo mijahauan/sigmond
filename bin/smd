@@ -8366,6 +8366,47 @@ def main() -> int:
 
     # storage — local sink backend management (SQLite is now the default;
     # this verb removes leftover ClickHouse installs on migrated hosts).
+    # smd verifier report — windowed audit of "uploaded but never
+    # appeared in wspr.rx" cohort.  Source data lives in
+    # ``/var/lib/sigmond/sink.db``'s ``wsprnet_audit`` +
+    # ``wsprnet_audit_batch`` tables, populated by wspr-recorder when
+    # ``WSPRNET_AUDIT=1`` is set in its env file.
+    p_verifier = sub.add_parser(
+        'verifier',
+        help='report on wsprnet upload audit (uploaded → verified '
+             'in wspr.rx → lost / dropped)',
+    )
+    verifier_sub = p_verifier.add_subparsers(dest='verifier_command')
+    p_v_report = verifier_sub.add_parser(
+        'report',
+        help='show delivered/lost/in-flight counts over a time window '
+             'from the wsprnet_audit table',
+    )
+    p_v_report.add_argument(
+        '--window', metavar='DURATION', default='1h',
+        help='time window to summarise (default 1h; suffix s/m/h/d, '
+             "e.g. '30m', '24h', '7d')",
+    )
+    p_v_report.add_argument(
+        '--rx-call', metavar='CALLSIGN', default=None,
+        help='restrict to one reporter (e.g. AC0G/B4); defaults to '
+             'auto-detect on single-receiver hosts, all on multi-receiver',
+    )
+    p_v_report.add_argument(
+        '--lost', action='store_true',
+        help='list each lost spot under the summary (time, tx_sign, '
+             'frequency); these are the spots that wsprnet either '
+             'rejected at upload or accepted-then-silently-dropped',
+    )
+    p_v_report.add_argument(
+        '--json', action='store_true',
+        help='emit a JSON document instead of human-readable text',
+    )
+    p_v_report.add_argument(
+        '--db', metavar='PATH', default='/var/lib/sigmond/sink.db',
+        help='sink.db path (default /var/lib/sigmond/sink.db)',
+    )
+
     p_storage = sub.add_parser('storage',
                                help='manage the local sink backend '
                                     '(SQLite default; remove leftover '
@@ -8707,6 +8748,21 @@ def main() -> int:
         if storage_cmd == 'trim':
             return cmd_storage_trim(args)
         p_storage.print_help()
+        return 0
+
+    if args.command == 'verifier':
+        verifier_cmd = getattr(args, 'verifier_command', None)
+        if verifier_cmd == 'report':
+            if not _HAS_SIGMOND_LIB:
+                print(
+                    'smd: sigmond library not found; install '
+                    'lib/sigmond alongside bin/smd',
+                    file=sys.stderr,
+                )
+                return 1
+            from sigmond.commands.verifier_report import cmd_verifier_report
+            return cmd_verifier_report(args)
+        p_verifier.print_help()
         return 0
 
     if args.command == 'timestd-tune-storage':
