@@ -24,7 +24,7 @@ Observe (what is, read-only):
     smd log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd environment list | probe | describe                      discover network peers
-    smd watch       <wspr|psk|hfdl|codar|ka9q|uploads> [args...] unified service watcher
+    smd watch       <wspr|psk|hfdl|codar|ka9q|uploads|verifier> [args...] unified service watcher
     smd ka9q-watch                                               upstream-drift watcher (alias)
     smd psk-watch   [N | -v]                                     PSK Reporter upload events (alias)
     smd wspr-watch  [N | -v]                                     WSPRnet upload events (alias)
@@ -5994,6 +5994,141 @@ def _psk_watch_cycle_loop(
         return 130
 
 
+def cmd_verifier_watch(args) -> int:
+    """Live tail of upload-verifier passes.
+
+    Verifiers run as background threads inside wspr-recorder (and, in
+    the future, alongside other uploaders).  Each pass fetches the
+    upload server's recent spot set and confirms our locally-produced
+    spots round-trip cleanly.
+
+    Today only ``wsprnet-verifier`` exists, logged by
+    ``wspr_recorder.wsprnet_verifier`` every ~5 min as:
+
+        wsprnet-verifier: pass complete verified=N dropped_old=M
+                          wsprnet_set_size=K (totals verified=A
+                          dropped_old=B)
+
+    The matcher is written against any ``<src>-verifier:`` prefix so a
+    future ``wsprdaemon-verifier`` will appear here without code
+    changes — the same wspr-recorder@* journal carries both.  Startup
+    and error lines from the verifier thread are also surfaced (so a
+    broken pass doesn't silently disappear).
+    """
+    instance = getattr(args, 'instance', None)
+    if instance is None:
+        unit_pattern = 'wspr-recorder@*'
+    else:
+        unit_pattern = f'wspr-recorder@{instance}.service'
+
+    backlog_min = max(0, int(getattr(args, 'backlog', 60) or 0))
+
+    import re as _re
+    import datetime as _datetime
+
+    # Per-pass summary line (the routine one — fires every ~5 min).
+    pass_re = _re.compile(
+        r'(?P<src>[a-z][a-z0-9-]*)-verifier:\s+pass\s+complete\s+'
+        r'verified=(?P<v>\d+)\s+dropped_old=(?P<d>\d+)'
+        r'(?:\s+\w+_set_size=(?P<set>\d+))?'
+        r'(?:\s+\(totals\s+verified=(?P<tv>\d+)\s+dropped_old=(?P<td>\d+)\))?'
+    )
+    # Catch-all for non-pass-complete verifier lines (startup, fetch
+    # warnings, exceptions).  We still surface them so the operator
+    # sees that the verifier exists and what it's doing.
+    other_re = _re.compile(r'(?P<src>[a-z][a-z0-9-]*)-verifier(?:[: ].*)$')
+
+    _heading(f'Upload-verifier activity ({unit_pattern})')
+    _info('   ▸ one line per ~5 min verifier pass — confirms our spots')
+    _info('     round-tripped through the upload server\'s recent set')
+    _info(f'   ▸ replaying last {backlog_min} min of history')
+    _info('   Ctrl-C to exit.')
+    print(flush=True)
+
+    sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+    since_arg = ['--since', f'{backlog_min} min ago'] if backlog_min > 0 \
+        else ['--since', 'now']
+    try:
+        proc = subprocess.Popen(
+            [*sudo_prefix, 'journalctl', '-f',
+             '-u', unit_pattern,
+             '-o', 'cat', *since_arg],
+            stdout=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        _err(f'journalctl not available: {exc}')
+        return 1
+
+    assert proc.stdout is not None
+    import select as _select
+    fd = proc.stdout.fileno()
+    buf = b''
+
+    def _next_line():
+        nonlocal buf
+        if b'\n' in buf:
+            line, _, buf = buf.partition(b'\n')
+            return line.decode('utf-8', errors='replace')
+        return None
+
+    try:
+        while True:
+            line = _next_line()
+            if line is None:
+                rlist, _w, _x = _select.select([fd], [], [], 1.0)
+                if not rlist:
+                    continue
+                try:
+                    chunk = os.read(fd, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+                continue
+
+            wall = _datetime.datetime.now().strftime('%H:%M:%S')
+            pm = pass_re.search(line)
+            if pm:
+                src = pm.group('src')
+                verified = int(pm.group('v'))
+                dropped = int(pm.group('d'))
+                set_size = pm.group('set')
+                tv = pm.group('tv')
+                td = pm.group('td')
+                set_part = f' set={set_size}' if set_size else ''
+                tot_part = ''
+                if tv is not None and td is not None:
+                    tot_part = f'   (since start: v={tv} d={td})'
+                print(
+                    f'[{wall}] {src:<10}  verified={verified:>3}  '
+                    f'dropped_old={dropped:>3}{set_part}{tot_part}',
+                    flush=True,
+                )
+                continue
+
+            om = other_re.search(line)
+            if om:
+                src = om.group('src')
+                # Trim everything up to and including the verifier name
+                # so the visible payload is what the verifier said.
+                tail = line[om.start():]
+                # Drop the leading "<src>-verifier:" / "<src>-verifier "
+                tail = _re.sub(r'^[a-z0-9-]+-verifier[: ]\s*', '', tail)
+                print(f'[{wall}] {src:<10}  {tail}', flush=True)
+                continue
+
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+    return 0
+
+
 def cmd_uploads_watch(args) -> int:
     """Live tail of all spot-uploader services on this host.
 
@@ -7738,6 +7873,17 @@ def _add_uploads_watch_args(p) -> None:
                         'file log lacks embedded timestamps.')
 
 
+def _add_verifier_watch_args(p) -> None:
+    """Argument spec for `smd watch verifier`."""
+    p.add_argument('--instance', metavar='RADIOD_ID', default=None,
+                   help='specific wspr-recorder@<id> instance '
+                        '(default: all wspr-recorder@* journal events)')
+    p.add_argument('--backlog', metavar='MIN', type=int, default=60,
+                   help='start by replaying this many minutes of journal '
+                        'history (default 60; verifier passes fire every '
+                        '~5 min so 60 catches the recent ~12 passes)')
+
+
 def _add_wspr_watch_args(p) -> None:
     """Argument spec shared by `smd wspr-watch` and `smd watch wspr`."""
     p.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
@@ -8238,7 +8384,7 @@ def main() -> int:
     # identical — only the invocation is different.
     p_watch = sub.add_parser('watch',
                              help='unified live-tail interface '
-                                  '(smd watch wspr | psk | hfdl | codar | ka9q | uploads)')
+                                  '(smd watch wspr | psk | hfdl | codar | ka9q | uploads | verifier)')
     watch_sub = p_watch.add_subparsers(dest='watch_target')
 
     p_w_wspr = watch_sub.add_parser(
@@ -8282,6 +8428,14 @@ def main() -> int:
              'upload activity (per-batch shipped counts + totals)',
     )
     _add_uploads_watch_args(p_w_uploads)
+
+    p_w_verifier = watch_sub.add_parser(
+        'verifier',
+        help='live tail of upload-verifier passes — confirm our spots '
+             'round-tripped through wsprnet.org (wsprdaemon.org coming '
+             'next).  One line per ~5 min pass.',
+    )
+    _add_verifier_watch_args(p_w_verifier)
 
     # config (Phase 1)
     p_config = sub.add_parser('config',
@@ -8474,6 +8628,8 @@ def main() -> int:
             return cmd_ka9q_watch(args)
         if target == 'uploads':
             return cmd_uploads_watch(args)
+        if target == 'verifier':
+            return cmd_verifier_watch(args)
         p_watch.print_help()
         return 0
 
