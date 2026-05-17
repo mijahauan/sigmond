@@ -6050,6 +6050,7 @@ def cmd_verifier_watch(args) -> int:
         r'verified=(?P<v>\d+)\s+dropped_old=(?P<d>\d+)'
         r'(?:\s+(?:wsprdaemon|wsprnet|\w+)_set_size=(?P<set>\d+))?'
         r'(?:\s+wsprnet_set_size=(?P<set2>\d+))?'
+        r'(?:\s+missing_total=(?P<missing>\d+))?'
         r'(?:.*?\(totals\s+verified=(?P<tv>\d+)\s+dropped_old=(?P<td>\d+)\))?'
     )
     # Catch-all for non-pass-complete verifier lines (startup, fetch
@@ -6129,6 +6130,11 @@ def cmd_verifier_watch(args) -> int:
                     set_part = f' set={set_size}'
                 else:
                     set_part = ''
+                # missing_total surfaces cross-server divergence on
+                # wsprdaemon.spots — operator-actionable when non-zero,
+                # so we always show it when the line carries it.
+                missing = pm.group('missing')
+                missing_part = f' missing={missing}' if missing else ''
                 tv = pm.group('tv')
                 td = pm.group('td')
                 tot_part = ''
@@ -6136,7 +6142,8 @@ def cmd_verifier_watch(args) -> int:
                     tot_part = f'   (since start: v={tv} d={td})'
                 print(
                     f'[{wall}] {src:<10}  {rx:<10}  verified={verified:>3}  '
-                    f'dropped_old={dropped:>3}{set_part}{tot_part}',
+                    f'dropped_old={dropped:>3}{set_part}{missing_part}'
+                    f'{tot_part}',
                     flush=True,
                 )
                 continue
