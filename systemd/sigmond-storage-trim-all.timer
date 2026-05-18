@@ -1,0 +1,18 @@
+# /etc/systemd/system/sigmond-storage-trim-all.timer
+#
+# Fire every 15 min so psk.spots (default 60-min retention) sees ~4
+# trim passes per retention window. AccuracySec=5m keeps the trim from
+# fighting with other timers for I/O — exact firing time is unimportant.
+#
+[Unit]
+Description=Sigmond storage trim timer — all retention policies
+Documentation=https://github.com/mijahauan/sigmond
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=15min
+AccuracySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

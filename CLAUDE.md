@@ -61,6 +61,13 @@ smd environment list|probe|describe   Situational awareness of network peers
 smd storage migrate-to-sqlite   Remove leftover local ClickHouse install once
                          SQLite (the default sink) is in use. Dry-run by
                          default; --yes to execute. Requires root.
+smd storage trim         TTL-based janitor for the local sink.
+                         `--all` applies per-target policies from env
+                         (PSK_RETENTION_MIN=60 min,
+                         WSPR_RETENTION_MIN=1440 min); 30-min floor
+                         enforced. One-shot mode: `--target-db psk
+                         --max-age 2h`. Systemd timer
+                         `sigmond-storage-trim-all.timer` (15 min).
 ```
 
 ## Sink backend selection
