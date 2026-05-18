@@ -4751,7 +4751,7 @@ _smd_complete() {
                 verifier)
                     case "${words[2]}" in
                         report)
-                            COMPREPLY=($(compgen -W "--window --rx-call --lost --in-flight --delivered --json --db" -- "$cur"))
+                            COMPREPLY=($(compgen -W "--window --rx-call --lost --in-flight --delivered --cadence --json --db" -- "$cur"))
                             ;;
                         *)
                             COMPREPLY=($(compgen -W "report" -- "$cur"))
@@ -8416,6 +8416,13 @@ def main() -> int:
         help='list each in-flight spot under the summary — those '
              'uploaded but not yet matched in wspr.rx by the '
              'verifier (still inside the 2 h wait window)',
+    )
+    p_v_report.add_argument(
+        '--cadence', action='store_true',
+        help='audit cycle-by-cycle health: list any 2-min WSPR '
+             'cycle in the window that produced zero spots '
+             '(suggesting a wspr-recorder restart/OOM kill) or '
+             'an anomalously-low count vs the median',
     )
     p_v_report.add_argument(
         '--delivered', action='store_true',

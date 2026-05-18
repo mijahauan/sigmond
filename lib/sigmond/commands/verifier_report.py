@@ -284,6 +284,133 @@ def _in_flight_query(
     ))
 
 
+def _per_cycle_counts(
+    conn: sqlite3.Connection,
+    rx_call: Optional[str],
+    since_iso: str,
+) -> dict:
+    """Return ``{cycle_time_iso: spot_count}`` for every WSPR cycle
+    that has at least one spot in the audit table.
+
+    The audit's spot_key prefix ``YYYY-MM-DDTHH:MM:00Z`` already
+    encodes the cycle minute (the verifier truncates each spot's
+    epoch to its WSPR cycle), so we GROUP BY that prefix.
+    """
+    where_clauses = ["uploaded_at >= ?"]
+    params: list = [since_iso]
+    if rx_call:
+        where_clauses.append("rx_call = ?")
+        params.append(rx_call)
+    where = " AND ".join(where_clauses)
+    out: dict = {}
+    for cycle_time, n in conn.execute(
+        f"""
+        SELECT SUBSTR(spot_key, 1, 20) AS cycle_time, COUNT() AS n
+          FROM wsprnet_audit
+         WHERE {where}
+      GROUP BY cycle_time
+      ORDER BY cycle_time
+        """,
+        params,
+    ):
+        out[cycle_time] = n
+    return out
+
+
+def _expected_cycles(since: datetime, until: datetime) -> List[str]:
+    """List of every even-UTC-minute timestamp in [since, until],
+    formatted to match the audit's spot_key time prefix
+    (``YYYY-MM-DDTHH:MM:00Z``).  WSPR cycles always start on even
+    minutes regardless of the local clock.
+    """
+    # Round ``since`` UP to the next even minute, ``until`` DOWN to
+    # the prior even minute, then step by 2 min.
+    s = since.replace(second=0, microsecond=0)
+    if s.minute % 2 != 0:
+        s = s + timedelta(minutes=1)
+    elif s < since:
+        s = s + timedelta(minutes=2)
+    u = until.replace(second=0, microsecond=0)
+    if u.minute % 2 != 0:
+        u = u - timedelta(minutes=1)
+    out: List[str] = []
+    t = s
+    while t <= u:
+        out.append(t.strftime("%Y-%m-%dT%H:%M:00Z"))
+        t = t + timedelta(minutes=2)
+    return out
+
+
+def _cadence_analysis(
+    expected: List[str],
+    cycle_counts: dict,
+    low_threshold_frac: float = 0.33,
+) -> dict:
+    """Compute cycle-cadence health.
+
+    ``low_threshold_frac`` is the fraction of the median below which
+    a cycle is flagged as "low".  0.33 means "less than a third of
+    the median is suspicious"; on a 40-spot/cycle site, anything
+    under ~13 spots qualifies.  Picked so transient propagation
+    dips don't trigger but a partial-decode (OOM mid-cycle, decoder
+    crash) does.
+    """
+    present = set(cycle_counts.keys())
+    missing = [c for c in expected if c not in present]
+    counts = sorted(cycle_counts.values())
+    median = counts[len(counts) // 2] if counts else 0
+    low_cutoff = max(1, int(median * low_threshold_frac))
+    low: List[tuple] = [
+        (c, cycle_counts[c]) for c in expected
+        if c in present and cycle_counts[c] < low_cutoff
+    ]
+    return {
+        "expected": len(expected),
+        "present": len(present),
+        "missing": missing,
+        "median": median,
+        "low_cutoff": low_cutoff,
+        "low": low,
+        "min": counts[0] if counts else 0,
+        "max": counts[-1] if counts else 0,
+    }
+
+
+def _format_cadence(c: dict) -> List[str]:
+    """Render cadence summary + per-bucket lists."""
+    out = []
+    pct = (100.0 * c["present"] / c["expected"]) if c["expected"] else 0
+    out.append(
+        f"cadence: cycles_expected={c['expected']} "
+        f"cycles_with_spots={c['present']} ({pct:.1f}%)  "
+        f"median_spots/cycle={c['median']} "
+        f"range=[{c['min']},{c['max']}]"
+    )
+    if c["missing"]:
+        out.append(f"  missing cycles ({len(c['missing'])}):")
+        for cyc in c["missing"]:
+            # cyc = "YYYY-MM-DDTHH:MM:00Z" → show HH:MM
+            try:
+                hhmm = cyc[11:16]
+            except IndexError:
+                hhmm = cyc
+            out.append(f"    {hhmm} UTC  (no spots — daemon restart? OOM?)")
+    if c["low"]:
+        out.append(
+            f"  low-count cycles ({len(c['low'])}; "
+            f"<{c['low_cutoff']} spots vs median {c['median']}):"
+        )
+        for cyc, n in c["low"]:
+            try:
+                hhmm = cyc[11:16]
+            except IndexError:
+                hhmm = cyc
+            out.append(f"    {hhmm} UTC  {n:>3} spots")
+    if not c["missing"] and not c["low"]:
+        out.append("  no missing cycles, no low-count anomalies — healthy")
+    return out
+
+
 def _delivered_query(
     conn: sqlite3.Connection,
     rx_call: Optional[str],
@@ -385,15 +512,23 @@ def cmd_verifier_report(args) -> int:
         want_lost = args.lost or args.json
         want_in_flight = getattr(args, 'in_flight', False) or args.json
         want_delivered = getattr(args, 'delivered', False) or args.json
+        want_cadence = getattr(args, 'cadence', False) or args.json
         lost_rows = _lost_query(conn, rx_call, since_iso) \
             if want_lost else []
         in_flight_rows = _in_flight_query(conn, rx_call, since_iso) \
             if want_in_flight else []
         delivered_rows = _delivered_query(conn, rx_call, since_iso) \
             if want_delivered else []
+        cadence = None
+        if want_cadence:
+            cycle_counts = _per_cycle_counts(conn, rx_call, since_iso)
+            cadence = _cadence_analysis(
+                _expected_cycles(since, datetime.now(timezone.utc)),
+                cycle_counts,
+            )
 
         if args.json:
-            print(json.dumps({
+            payload = {
                 "window": args.window,
                 "rx_call": rx_call,
                 "summary": summary,
@@ -417,7 +552,10 @@ def cmd_verifier_report(args) -> int:
                         "verified_at": row[2],
                     } for row in delivered_rows
                 ],
-            }, indent=2))
+            }
+            if cadence is not None:
+                payload["cadence"] = cadence
+            print(json.dumps(payload, indent=2))
             return 0
 
         print(_format_summary(
@@ -429,6 +567,10 @@ def cmd_verifier_report(args) -> int:
             lost=summary["lost"],
             in_flight=summary["in_flight"],
         ))
+        if cadence is not None:
+            print()
+            for line in _format_cadence(cadence):
+                print(line)
         if args.lost:
             print()
             if lost_rows:
