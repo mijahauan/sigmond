@@ -267,6 +267,17 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(len(c_default.in_flight), 1)
         self.assertEqual(len(c_tight.lost), 1)
 
+    def test_classify_rejects_none_in_flight_sec(self):
+        """A None in_flight_window_sec must blow up immediately, not
+        silently — caller dispatch should resolve None → module default.
+        Regression for the argparse-None-as-default bug observed during
+        B4-100 rollout 2026-05-18.
+        """
+        now = datetime(2026, 5, 18, 14, 35, tzinfo=UTC)
+        rows = [self._row(key_epoch=1, tx="K", queued_at=now)]
+        with self.assertRaises(TypeError):
+            classify(rows, frozenset(), now=now, in_flight_window_sec=None)
+
 
 # ── cadence_stats ───────────────────────────────────────────────────────────
 

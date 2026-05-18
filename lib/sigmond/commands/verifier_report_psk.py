@@ -572,11 +572,13 @@ def cmd_verifier_report_psk(args) -> int:
         for r in upstream:
             upstream_union |= r.keys
 
+        # argparse default is None (so we can detect "not passed"); turn
+        # that into the module default here rather than at parser
+        # construction time so the env-var path can also override.
+        in_flight_sec = (getattr(args, "psk_in_flight_sec", None)
+                         or DEFAULT_IN_FLIGHT_WINDOW_SEC)
         cohorts = classify(local_rows, frozenset(upstream_union),
-                           now=now,
-                           in_flight_window_sec=getattr(
-                               args, "psk_in_flight_sec",
-                               DEFAULT_IN_FLIGHT_WINDOW_SEC))
+                           now=now, in_flight_window_sec=in_flight_sec)
 
         cadence = cadence_stats(local_rows, since=since, until=now)
 
