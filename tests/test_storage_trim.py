@@ -12,6 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 from sigmond.storage_trim import (
     NotConfirmed, TrimPlan, TrimReport,
     execute_trim, parse_duration, plan_trim,
+    RetentionTooShort, DEFAULT_MIN_RETENTION_SECONDS,
+    min_retention_seconds, policy_from_env,
+    plan_trim_all, execute_trim_all,
 )
 
 
@@ -339,6 +342,179 @@ class TestParseDuration(unittest.TestCase):
 
     def test_whitespace_tolerated(self):
         self.assertEqual(parse_duration("  24h  "), 86400.0)
+
+
+# ---- min retention floor (PR 4) ------------------------------------------
+
+
+class TestMinRetentionFloor(unittest.TestCase):
+    """The 30-min floor guards against operators accidentally shrinking
+    retention below what the slowest downstream consumer needs to drain.
+    """
+
+    def test_default_floor_is_30_min(self):
+        self.assertEqual(min_retention_seconds(env={}), 30 * 60)
+
+    def test_env_override_changes_floor(self):
+        self.assertEqual(
+            min_retention_seconds(env={"TRIM_MIN_FLOOR_SECONDS": "3600"}),
+            3600.0,
+        )
+
+    def test_env_override_garbage_falls_back_to_default(self):
+        # Typo / non-numeric must NOT silently zero the floor.
+        self.assertEqual(
+            min_retention_seconds(env={"TRIM_MIN_FLOOR_SECONDS": "soon"}),
+            30 * 60,
+        )
+
+    def test_plan_trim_below_floor_raises(self):
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        tmp.close()
+        try:
+            conn = _seed_db(tmp.name)
+            conn.close()
+            with self.assertRaises(RetentionTooShort):
+                plan_trim(tmp.name, max_age_seconds=60)  # 1 min < 30 min
+        finally:
+            Path(tmp.name).unlink(missing_ok=True)
+
+    def test_plan_trim_enforce_floor_false_bypasses(self):
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        tmp.close()
+        try:
+            conn = _seed_db(tmp.name)
+            conn.close()
+            # Below-floor age is allowed when caller opts out (used by
+            # plan_trim_all after policy_from_env already clamped).
+            plan = plan_trim(
+                tmp.name, max_age_seconds=60, enforce_floor=False,
+            )
+            self.assertEqual(plan.total_rows, 0)
+        finally:
+            Path(tmp.name).unlink(missing_ok=True)
+
+
+# ---- policy_from_env (PR 4) ----------------------------------------------
+
+
+class TestPolicyFromEnv(unittest.TestCase):
+
+    def test_defaults_when_no_env(self):
+        policies = policy_from_env(env={})
+        by_target = {(p.target_db, p.target_table): p for p in policies}
+        self.assertEqual(by_target[("psk",  "spots")].max_age_seconds,
+                         60 * 60)             # default 60 min
+        self.assertEqual(by_target[("wspr", "spots")].max_age_seconds,
+                         24 * 60 * 60)        # default 24 h
+        self.assertEqual(by_target[("wspr", "noise")].max_age_seconds,
+                         24 * 60 * 60)
+        for p in policies:
+            self.assertEqual(p.source, "default")
+
+    def test_psk_env_override_applies(self):
+        policies = policy_from_env(env={"PSK_RETENTION_MIN": "120"})
+        psk = [p for p in policies if (p.target_db, p.target_table)
+               == ("psk", "spots")][0]
+        self.assertEqual(psk.max_age_seconds, 120 * 60)
+        self.assertEqual(psk.source, "env:PSK_RETENTION_MIN")
+
+    def test_wspr_env_overrides_apply_to_both_spots_and_noise(self):
+        policies = policy_from_env(env={"WSPR_RETENTION_MIN": "180"})
+        wspr = [p for p in policies if p.target_db == "wspr"]
+        for p in wspr:
+            self.assertEqual(p.max_age_seconds, 180 * 60)
+            self.assertEqual(p.source, "env:WSPR_RETENTION_MIN")
+
+    def test_below_floor_clamps_up(self):
+        # PSK retention of 10 min must be clamped to the 30-min floor.
+        policies = policy_from_env(env={"PSK_RETENTION_MIN": "10"})
+        psk = [p for p in policies if (p.target_db, p.target_table)
+               == ("psk", "spots")][0]
+        self.assertEqual(psk.max_age_seconds, 30 * 60)
+        self.assertIn("clamped to floor", psk.source)
+
+    def test_zero_or_negative_env_falls_back_to_default(self):
+        policies = policy_from_env(env={"PSK_RETENTION_MIN": "0"})
+        psk = [p for p in policies if (p.target_db, p.target_table)
+               == ("psk", "spots")][0]
+        # 0 means "use default" (60 min), which is above the floor.
+        self.assertEqual(psk.max_age_seconds, 60 * 60)
+
+    def test_garbage_env_falls_back_to_default(self):
+        policies = policy_from_env(env={"PSK_RETENTION_MIN": "tomorrow"})
+        psk = [p for p in policies if (p.target_db, p.target_table)
+               == ("psk", "spots")][0]
+        self.assertEqual(psk.max_age_seconds, 60 * 60)
+
+
+# ---- plan_trim_all + execute_trim_all (PR 4) -----------------------------
+
+
+class TestPlanTrimAll(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        self.tmp.close()
+        self.db_path = self.tmp.name
+        self.now = datetime(2026, 5, 18, 12, 0, 0, tzinfo=timezone.utc)
+        self.now_fn = lambda: self.now
+        conn = _seed_db(self.db_path)
+        # Three psk rows: two old (3h ago, beyond 60min default), one fresh.
+        _insert(conn, target_db="psk",  target_table="spots",
+                queued_at=self.now - timedelta(hours=3))
+        _insert(conn, target_db="psk",  target_table="spots",
+                queued_at=self.now - timedelta(hours=2))
+        _insert(conn, target_db="psk",  target_table="spots",
+                queued_at=self.now - timedelta(minutes=10))
+        # Two wspr rows: one old (48h, beyond 24h default), one fresh (1h).
+        _insert(conn, target_db="wspr", target_table="spots",
+                queued_at=self.now - timedelta(hours=48))
+        _insert(conn, target_db="wspr", target_table="spots",
+                queued_at=self.now - timedelta(hours=1))
+        conn.close()
+
+    def tearDown(self):
+        Path(self.db_path).unlink(missing_ok=True)
+
+    def test_default_policies_plan_correct_per_target(self):
+        # With defaults: psk=60m, wspr=24h. Two psk rows are >60m old,
+        # one wspr row is >24h old.
+        plans = plan_trim_all(
+            self.db_path,
+            policies=policy_from_env(env={}),
+            now_fn=self.now_fn,
+        )
+        by_target = {(pp.policy.target_db, pp.policy.target_table): pp
+                     for pp in plans}
+        self.assertEqual(by_target[("psk", "spots")].plan.total_rows, 2)
+        self.assertEqual(by_target[("wspr", "spots")].plan.total_rows, 1)
+        # wspr.noise has no rows in this fixture → empty plan.
+        self.assertEqual(by_target[("wspr", "noise")].plan.total_rows, 0)
+
+    def test_execute_all_deletes_per_policy(self):
+        plans = plan_trim_all(
+            self.db_path,
+            policies=policy_from_env(env={}),
+            now_fn=self.now_fn,
+        )
+        for pp in plans:
+            pp.plan.confirmed = True
+        reports = execute_trim_all(plans)
+        deleted = {(pol.target_db, pol.target_table): rep.rows_deleted
+                   for pol, rep in reports}
+        self.assertEqual(deleted[("psk", "spots")], 2)
+        self.assertEqual(deleted[("wspr", "spots")], 1)
+        self.assertEqual(deleted[("wspr", "noise")], 0)
+
+    def test_execute_all_unconfirmed_raises(self):
+        plans = plan_trim_all(
+            self.db_path,
+            policies=policy_from_env(env={}),
+            now_fn=self.now_fn,
+        )
+        with self.assertRaises(NotConfirmed):
+            execute_trim_all(plans)
 
 
 if __name__ == "__main__":

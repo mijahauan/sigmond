@@ -1,0 +1,29 @@
+# /etc/systemd/system/sigmond-storage-trim-all.service
+#
+# Periodic janitor that applies every retention policy
+# (PSK_RETENTION_MIN, WSPR_RETENTION_MIN, ...) in one pass. Replaces
+# the per-target sigmond-storage-trim-{wspr,timestd,hfdl} units in
+# steady state — they remain shipped for backwards compatibility but
+# can be masked once this unit is enabled.
+#
+# Defaults (override per-host via /etc/default/sigmond-storage-trim or
+# systemd Environment= lines):
+#   PSK_RETENTION_MIN  = 60   (1 h)
+#   WSPR_RETENTION_MIN = 1440 (24 h)
+#   TRIM_MIN_FLOOR_SECONDS unset → 1800 s (30 min) floor enforced
+#
+[Unit]
+Description=Sigmond storage trim — all retention policies
+Documentation=https://github.com/mijahauan/sigmond
+ConditionPathExists=/var/lib/sigmond/sink.db
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=-/etc/default/sigmond-storage-trim
+ExecStart=/usr/local/bin/smd storage trim --all --yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sigmond-storage-trim-all

@@ -5711,14 +5711,81 @@ def cmd_storage_migrate_to_sqlite(args) -> int:
     return 0
 
 
+def _cmd_storage_trim_all(db_path, apply, *, plan_trim_all, execute_trim_all):
+    """Apply per-target retention policies; one trim per (db,table).
+
+    The policy set comes from sigmond.storage_trim.policy_from_env(),
+    which folds env overrides (PSK_RETENTION_MIN, WSPR_RETENTION_MIN, …)
+    over the per-target defaults and clamps anything below the min
+    floor.  Each policy's clamp/source is reported so an operator can
+    tell whether their PSK_RETENTION_MIN=10 silently became 30.
+    """
+    policy_plans = plan_trim_all(db_path)
+    print(f"Trim-all from {db_path}")
+    print("  Per-target retention policies:")
+    any_rows = False
+    for pp in policy_plans:
+        pol, plan = pp.policy, pp.plan
+        age_min = pol.max_age_seconds / 60.0
+        print(f"    {pol.target_db}.{pol.target_table}: "
+              f"retain {age_min:.0f} min  [{pol.source}]")
+        if plan.is_empty:
+            print(f"      → no rows older than threshold")
+        else:
+            any_rows = True
+            for tdb, ttbl, n in plan.rows_per_target:
+                print(f"      → {tdb}.{ttbl}: {n} rows")
+    if not any_rows:
+        print()
+        print("Nothing to trim.")
+        return 0
+    if not apply:
+        print()
+        print("Dry run.  Re-run with --yes to apply the DELETEs above.")
+        return 0
+    print()
+    print("Executing trim...")
+    for pp in policy_plans:
+        pp.plan.confirmed = True
+    try:
+        if _HAS_SIGMOND_LIB:
+            with lifecycle_lock(reason="storage trim --all"):
+                reports = execute_trim_all(policy_plans)
+        else:
+            reports = execute_trim_all(policy_plans)
+    except Exception as exc:
+        _err(f"trim execution failed: {exc}")
+        return 2
+    total_deleted = 0
+    any_errors = False
+    for pol, rep in reports:
+        if rep.errors:
+            any_errors = True
+            for err in rep.errors:
+                print(f"  ERROR {pol.target_db}.{pol.target_table}: {err}")
+        if rep.rows_deleted:
+            print(f"  {pol.target_db}.{pol.target_table}: "
+                  f"deleted {rep.rows_deleted} rows")
+            total_deleted += rep.rows_deleted
+    print(f"  Total: {total_deleted} rows deleted")
+    return 2 if any_errors else 0
+
+
 def cmd_storage_trim(args) -> int:
-    """Delete pending_uploads rows older than `--max-age`.
+    """Delete pending_uploads rows older than `--max-age` (or --all).
 
     The SQLite sink is a FIFO queue: producers append, the
     `hs-uploader` source `commit()`s acked rows.  Producers without a
     consumer wired (currently hfdl.spots and timestd.events — no
     external upload destination is configured for them) leave rows
     queued indefinitely; this verb provides a TTL-based cleanup.
+
+    Two modes:
+      * Default (--max-age): trim one (db,table) bracket at the given
+        age.  Enforces the min retention floor (30 min default; override
+        with TRIM_MIN_FLOOR_SECONDS).
+      * --all: apply per-target retention policies from env
+        (PSK_RETENTION_MIN, WSPR_RETENTION_MIN, ...).  Same floor.
 
     Default is dry-run: report what WOULD be deleted, do not touch
     the sink.  `--yes` actually runs the DELETE (requires root + the
@@ -5727,11 +5794,25 @@ def cmd_storage_trim(args) -> int:
     try:
         from sigmond.storage_trim import (
             plan_trim, execute_trim, parse_duration, NotConfirmed,
-            DEFAULT_DB_PATH,
+            RetentionTooShort, DEFAULT_DB_PATH,
+            plan_trim_all, execute_trim_all,
         )
     except ImportError as e:
         _err(f"storage trim module not available: {e}")
         return 1
+
+    db_path = getattr(args, "db", None) or DEFAULT_DB_PATH
+    apply = getattr(args, "yes", False)
+    trim_all = getattr(args, "trim_all", False)
+    if apply and _need_root("storage trim --yes"):
+        return 1
+
+    if trim_all:
+        return _cmd_storage_trim_all(
+            db_path, apply,
+            plan_trim_all=plan_trim_all,
+            execute_trim_all=execute_trim_all,
+        )
 
     try:
         max_age_seconds = parse_duration(args.max_age)
@@ -5739,17 +5820,17 @@ def cmd_storage_trim(args) -> int:
         _err(f"--max-age {args.max_age!r}: {exc}")
         return 2
 
-    db_path = getattr(args, "db", None) or DEFAULT_DB_PATH
-    apply = getattr(args, "yes", False)
     target_db = getattr(args, "target_db", None)
     target_table = getattr(args, "target_table", None)
-    if apply and _need_root("storage trim --yes"):
-        return 1
 
-    plan = plan_trim(
-        db_path, max_age_seconds,
-        target_db=target_db, target_table=target_table,
-    )
+    try:
+        plan = plan_trim(
+            db_path, max_age_seconds,
+            target_db=target_db, target_table=target_table,
+        )
+    except RetentionTooShort as exc:
+        _err(str(exc))
+        return 2
     print(f"Trim from {plan.db_path}")
     print(f"  cutoff:  rows queued_at < {plan.cutoff_iso}")
     print(f"  max-age: {args.max_age}  ({max_age_seconds:.0f} s)")
@@ -8452,6 +8533,28 @@ def main() -> int:
         '--db', metavar='PATH', default='/var/lib/sigmond/sink.db',
         help='sink.db path (default /var/lib/sigmond/sink.db)',
     )
+    # PR 7: target switch — same verb covers wspr (default) and psk side.
+    p_v_report.add_argument(
+        '--target', choices=('wspr', 'psk'), default='wspr',
+        help='which delivery path to verify. "wspr" (default) audits '
+             'the wsprnet upload via the local wsprnet_audit table. '
+             '"psk" audits the via-server FT8/FT4 forwarding path '
+             'by diffing local psk.spots queue against wd*.psk.spots '
+             'over ClickHouse.',
+    )
+    p_v_report.add_argument(
+        '--psk-urls', metavar='URLS', default=None, dest='psk_urls',
+        help='--target=psk only: comma-separated ClickHouse HTTP '
+             'URLs (default: $WSPRDAEMON_VERIFY_URLS, then '
+             'wd10/wd20/wd30.wsprdaemon.org).',
+    )
+    p_v_report.add_argument(
+        '--psk-in-flight-sec', metavar='SECONDS', type=int,
+        default=None, dest='psk_in_flight_sec',
+        help='--target=psk only: grace window after which an absent '
+             'upstream row counts as lost rather than in_flight '
+             '(default 300s = 5 min).',
+    )
 
     p_storage = sub.add_parser('storage',
                                help='manage the local sink backend '
@@ -8497,6 +8600,13 @@ def main() -> int:
     p_trim.add_argument(
         '--yes', action='store_true',
         help='actually run the DELETE (destructive; requires root)',
+    )
+    p_trim.add_argument(
+        '--all', action='store_true', dest='trim_all',
+        help='apply per-target retention policies (PSK_RETENTION_MIN, '
+             'WSPR_RETENTION_MIN, ...) in one pass. Mutually exclusive '
+             'with --max-age/--target-db/--target-table; ignores those '
+             'when set. Min 30 min floor enforced.',
     )
 
     p_psk = sub.add_parser('psk-watch',
@@ -8798,6 +8908,15 @@ def main() -> int:
 
     if args.command == 'verifier':
         verifier_cmd = getattr(args, 'verifier_command', None)
+        if verifier_cmd == 'report' and getattr(args, 'target', 'wspr') == 'psk':
+            try:
+                from sigmond.commands.verifier_report_psk import (
+                    cmd_verifier_report_psk,
+                )
+            except ImportError as exc:
+                _err(f"verifier report --target psk unavailable: {exc}")
+                return 1
+            return cmd_verifier_report_psk(args)
         if verifier_cmd == 'report':
             if not _HAS_SIGMOND_LIB:
                 print(

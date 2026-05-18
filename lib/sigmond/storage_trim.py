@@ -29,13 +29,131 @@ stays library-only so the same logic is unit-testable + reusable.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 
 DEFAULT_DB_PATH = "/var/lib/sigmond/sink.db"
+
+# Floor for any retention window applied via this module.  Below this,
+# the local SQLite sink stops serving its second-consumer role (a
+# near-real-time spot store that other tools — e.g. Andrew Roland's
+# scrapers, sigmond watchers — can query).  The number is conservative
+# on purpose: a misconfigured 1-minute retention would silently strand
+# rows the uploader hadn't shipped yet.  Operators who genuinely want
+# tighter cleanup must set TRIM_MIN_FLOOR_SECONDS in the environment.
+DEFAULT_MIN_RETENTION_SECONDS = 30 * 60
+
+
+def min_retention_seconds(env: Optional[dict] = None) -> float:
+    """Resolve the per-host minimum retention floor.
+
+    Default is 30 min (DEFAULT_MIN_RETENTION_SECONDS).  Override via
+    ``TRIM_MIN_FLOOR_SECONDS`` (env var, integer seconds).  Returns the
+    default on any parse failure — the floor is a safety property, so
+    a typo must never silently shrink it to zero.
+    """
+    e = env if env is not None else os.environ
+    raw = (e.get("TRIM_MIN_FLOOR_SECONDS") or "").strip()
+    if not raw:
+        return float(DEFAULT_MIN_RETENTION_SECONDS)
+    try:
+        v = float(raw)
+        return v if v > 0 else float(DEFAULT_MIN_RETENTION_SECONDS)
+    except ValueError:
+        return float(DEFAULT_MIN_RETENTION_SECONDS)
+
+
+class RetentionTooShort(ValueError):
+    """Raised when a caller asks for a retention below the min floor."""
+
+
+# Per-target retention defaults (in minutes), used by `policy_from_env`
+# when no env override is present.  Operators with different needs can
+# bump any of these by setting the matching env var; the floor still
+# applies post-resolution.
+#
+#   psk.spots   — FT8/FT4 spots from psk-recorder.  60 min keeps a full
+#                 cycle of decoders' worth of data around for the wsprdaemon
+#                 tar transport's next pickup + a buffer for the
+#                 forthcoming smd verifier report to inspect lost spots.
+#   wspr.spots  — WSPR spots from wspr-recorder.  Longer (24h) because
+#                 the verifier's cross-server diff currently needs that
+#                 window to catch wd20-style backlog catch-ups.
+#   timestd.events / hfdl.spots — no external consumer wired today; the
+#                 sink is the archive.  Operators choose how long to
+#                 keep before truncating.
+_DEFAULT_RETENTION_MINUTES: Dict[Tuple[str, str], int] = {
+    ("psk",  "spots"):  60,
+    ("wspr", "spots"):  24 * 60,
+    ("wspr", "noise"):  24 * 60,
+}
+
+_ENV_OVERRIDES: Dict[Tuple[str, str], str] = {
+    ("psk",  "spots"):  "PSK_RETENTION_MIN",
+    ("wspr", "spots"):  "WSPR_RETENTION_MIN",
+    ("wspr", "noise"):  "WSPR_RETENTION_MIN",
+}
+
+
+@dataclass
+class RetentionPolicy:
+    """Resolved per-target retention plan, ready for plan_trim()."""
+    target_db: str
+    target_table: str
+    max_age_seconds: float
+    source: str  # "env:VARNAME" or "default" — for human-readable reporting
+
+
+def policy_from_env(env: Optional[dict] = None,
+                    *,
+                    floor_seconds: Optional[float] = None,
+                    ) -> List[RetentionPolicy]:
+    """Build the retention-policy list from env vars + module defaults.
+
+    Each entry pins one (target_db, target_table) to a max-age in
+    seconds.  Env overrides take an integer minute count:
+
+        PSK_RETENTION_MIN=120    # 2 h, applies to psk.spots
+        WSPR_RETENTION_MIN=2880  # 48 h, applies to wspr.spots + wspr.noise
+
+    Values below the floor are clamped UP to the floor; the
+    ``source`` field on the returned policy records both the env var
+    and the clamp ("env:PSK_RETENTION_MIN (clamped to floor)") so
+    `smd storage trim --all` can surface the clamp to the operator.
+    """
+    e = env if env is not None else os.environ
+    floor = floor_seconds if floor_seconds is not None else min_retention_seconds(e)
+    out: List[RetentionPolicy] = []
+    for (db, tbl), default_min in _DEFAULT_RETENTION_MINUTES.items():
+        env_var = _ENV_OVERRIDES.get((db, tbl))
+        raw = (e.get(env_var) or "").strip() if env_var else ""
+        source = "default"
+        if raw:
+            try:
+                minutes = float(raw)
+                if minutes > 0:
+                    source = f"env:{env_var}"
+                    seconds = minutes * 60.0
+                else:
+                    seconds = default_min * 60.0
+            except ValueError:
+                seconds = default_min * 60.0
+        else:
+            seconds = default_min * 60.0
+        if seconds < floor:
+            source = f"{source} (clamped to floor {int(floor)}s)"
+            seconds = floor
+        out.append(RetentionPolicy(
+            target_db=db,
+            target_table=tbl,
+            max_age_seconds=seconds,
+            source=source,
+        ))
+    return out
 
 
 class NotConfirmed(Exception):
@@ -91,6 +209,8 @@ def plan_trim(
     target_table: Optional[str] = None,
     now_fn: Optional[Callable[[], datetime]] = None,
     opener: Optional[Opener] = None,
+    enforce_floor: bool = True,
+    floor_seconds: Optional[float] = None,
 ) -> TrimPlan:
     """Inspect `db_path` and report rows with `queued_at < now - max_age`.
 
@@ -111,6 +231,15 @@ def plan_trim(
     """
     now_fn = now_fn or (lambda: datetime.now(timezone.utc))
     opener = opener or _default_opener
+    if enforce_floor:
+        floor = floor_seconds if floor_seconds is not None else min_retention_seconds()
+        if max_age_seconds < floor:
+            raise RetentionTooShort(
+                f"max_age_seconds={max_age_seconds:.0f}s is below the "
+                f"min retention floor ({int(floor)}s = {int(floor/60)}min). "
+                f"Override with TRIM_MIN_FLOOR_SECONDS, or pass "
+                f"enforce_floor=False if you know what you're doing."
+            )
     cutoff_dt = now_fn() - timedelta(seconds=max_age_seconds)
     cutoff_iso = cutoff_dt.isoformat()
     plan = TrimPlan(
@@ -208,6 +337,62 @@ def execute_trim(
             except Exception:
                 pass
     return report
+
+
+@dataclass
+class PolicyPlan:
+    """One resolved policy paired with its planned trim."""
+    policy: RetentionPolicy
+    plan: TrimPlan
+
+
+def plan_trim_all(
+    db_path: str,
+    *,
+    policies: Optional[List[RetentionPolicy]] = None,
+    now_fn: Optional[Callable[[], datetime]] = None,
+    opener: Optional[Opener] = None,
+) -> List[PolicyPlan]:
+    """Walk every retention policy and plan a per-(db,table) trim.
+
+    Returns one PolicyPlan per policy, in the order policies were
+    given (or the env-derived default order).  Empty plans are kept —
+    they're still operationally interesting ("no rows to trim for
+    psk.spots — uploader is keeping up").
+    """
+    policies = policies if policies is not None else policy_from_env()
+    out: List[PolicyPlan] = []
+    for pol in policies:
+        plan = plan_trim(
+            db_path,
+            pol.max_age_seconds,
+            target_db=pol.target_db,
+            target_table=pol.target_table,
+            now_fn=now_fn,
+            opener=opener,
+            # policy_from_env already clamped; don't double-enforce.
+            enforce_floor=False,
+        )
+        out.append(PolicyPlan(policy=pol, plan=plan))
+    return out
+
+
+def execute_trim_all(
+    policy_plans: List[PolicyPlan],
+    *,
+    opener: Optional[Opener] = None,
+) -> List[Tuple[RetentionPolicy, TrimReport]]:
+    """Execute every plan in `policy_plans` and return per-policy reports.
+
+    Each ``plan.confirmed`` must already be True (the CLI sets it after
+    ``--yes``).  Any single un-confirmed plan raises ``NotConfirmed``
+    immediately — no partial execution.
+    """
+    out: List[Tuple[RetentionPolicy, TrimReport]] = []
+    for pp in policy_plans:
+        report = execute_trim(pp.plan, opener=opener)
+        out.append((pp.policy, report))
+    return out
 
 
 def parse_duration(spec: str) -> float:
