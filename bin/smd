@@ -8533,6 +8533,28 @@ def main() -> int:
         '--db', metavar='PATH', default='/var/lib/sigmond/sink.db',
         help='sink.db path (default /var/lib/sigmond/sink.db)',
     )
+    # PR 7: target switch — same verb covers wspr (default) and psk side.
+    p_v_report.add_argument(
+        '--target', choices=('wspr', 'psk'), default='wspr',
+        help='which delivery path to verify. "wspr" (default) audits '
+             'the wsprnet upload via the local wsprnet_audit table. '
+             '"psk" audits the via-server FT8/FT4 forwarding path '
+             'by diffing local psk.spots queue against wd*.psk.spots '
+             'over ClickHouse.',
+    )
+    p_v_report.add_argument(
+        '--psk-urls', metavar='URLS', default=None, dest='psk_urls',
+        help='--target=psk only: comma-separated ClickHouse HTTP '
+             'URLs (default: $WSPRDAEMON_VERIFY_URLS, then '
+             'wd10/wd20/wd30.wsprdaemon.org).',
+    )
+    p_v_report.add_argument(
+        '--psk-in-flight-sec', metavar='SECONDS', type=int,
+        default=None, dest='psk_in_flight_sec',
+        help='--target=psk only: grace window after which an absent '
+             'upstream row counts as lost rather than in_flight '
+             '(default 300s = 5 min).',
+    )
 
     p_storage = sub.add_parser('storage',
                                help='manage the local sink backend '
@@ -8886,6 +8908,15 @@ def main() -> int:
 
     if args.command == 'verifier':
         verifier_cmd = getattr(args, 'verifier_command', None)
+        if verifier_cmd == 'report' and getattr(args, 'target', 'wspr') == 'psk':
+            try:
+                from sigmond.commands.verifier_report_psk import (
+                    cmd_verifier_report_psk,
+                )
+            except ImportError as exc:
+                _err(f"verifier report --target psk unavailable: {exc}")
+                return 1
+            return cmd_verifier_report_psk(args)
         if verifier_cmd == 'report':
             if not _HAS_SIGMOND_LIB:
                 print(

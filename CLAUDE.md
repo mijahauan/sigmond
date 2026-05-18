@@ -68,6 +68,14 @@ smd storage trim         TTL-based janitor for the local sink.
                          enforced. One-shot mode: `--target-db psk
                          --max-age 2h`. Systemd timer
                          `sigmond-storage-trim-all.timer` (15 min).
+smd verifier report      Windowed audit of upload delivery. Default
+                         `--target wspr` reads wsprnet_audit (per-spot
+                         delivered/lost/in_flight/rejected/silent_drop
+                         cohorts + cadence). `--target psk` audits the
+                         FT8/FT4 via-server forwarding path by diffing
+                         the local psk.spots queue against
+                         wd*.psk.spots over ClickHouse, with cadence
+                         on the 15s / 7.5s FT cycles.
 ```
 
 ## Sink backend selection
