@@ -4754,18 +4754,42 @@ _smd_complete() {
                             COMPREPLY=($(compgen -W "--clients-only --inventory --keys" -- "$cur"))
                             ;;
                         add|remove)
-                            # Position 3 = client; position 4 = source key.
+                            # Position 3 = client; position 4+ = source key.
                             # Static list of well-known clients (matches sources.KNOWN_CLIENTS).
                             if [[ $cword -eq 3 ]]; then
                                 COMPREPLY=($(compgen -W "wspr-recorder psk-recorder hfdl-recorder codar-sounder" -- "$cur"))
-                            elif [[ $cword -eq 4 ]]; then
+                            elif [[ $cword -ge 4 ]]; then
+                                # Bash's COMP_WORDBREAKS includes ':' by default,
+                                # so `radiod:bee1` arrives as three words
+                                # ("radiod" ":" "bee1") with cword=6.  Re-glue
+                                # everything past the client position into the
+                                # partial key, then strip the pre-colon prefix
+                                # from each reply so bash inserts only the
+                                # post-colon portion.
+                                local _partial="" _i
+                                for ((_i = 4; _i <= cword; _i++)); do
+                                    _partial="${_partial}${words[_i]}"
+                                done
                                 # Costs one mDNS round-trip (~1 s).  Acceptable
                                 # since the operator already typed a verb +
                                 # client and is committed to the action; cache
                                 # would help if it gets annoying.
                                 local _keys
                                 _keys=$(smd sources list --keys 2>/dev/null)
-                                COMPREPLY=($(compgen -W "$_keys" -- "$cur"))
+                                COMPREPLY=($(compgen -W "$_keys" -- "$_partial"))
+                                if type -t __ltrim_colon_completions &>/dev/null; then
+                                    __ltrim_colon_completions "$_partial"
+                                elif [[ "$_partial" == *:* ]]; then
+                                    # Manual strip: drop everything up to and
+                                    # including the last colon from each reply,
+                                    # because bash will substitute starting at
+                                    # the colon (the wordbreak).
+                                    local _strip="${_partial%:*}:"
+                                    local _j
+                                    for _j in "${!COMPREPLY[@]}"; do
+                                        COMPREPLY[_j]="${COMPREPLY[_j]#$_strip}"
+                                    done
+                                fi
                             fi
                             ;;
                         *)
