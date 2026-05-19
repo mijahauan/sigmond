@@ -38,7 +38,6 @@ class ComponentTree(Tree):
         configure.add_leaf("\u2630 Topology",          data={"screen": "topology"})
         configure.add_leaf("\u2691 Software versions", data={"screen": "components"})
         configure.add_leaf("\u229e SDR inventory",     data={"screen": "sdr_inventory"})
-        configure.add_leaf("\u223f wsprdaemon-client", data={"screen": "wd_client"})
         configure.add_leaf("\u2699 Client config",     data={"screen": "client_config"})
         configure.add_leaf("\u2261 Config view",       data={"screen": "config_show"})
         configure.add_leaf("\u2699 CPU affinity",      data={"screen": "cpu_affinity"})
@@ -88,8 +87,6 @@ class ComponentTree(Tree):
             self.app.action_show_kiwisdr()
         elif screen == "sdr_inventory":
             self.app.action_show_sdr_inventory()
-        elif screen == "wd_client":
-            self.app.action_show_wd_client()
         elif screen == "logs":
             self.app.action_show_logs()
         elif screen == "validate":

@@ -16,9 +16,9 @@ A sigmond host runs a stack with very different resource personalities:
   forward FFT per channel as multicast IQ.
 * hf-timestd consuming several timestation channels and feeding chrony
   via SHM at sub-microsecond accuracy.
-* Decoder clients (psk-recorder/jt9, wsprdaemon/wsprd, hfdl-recorder,
+* Decoder clients (psk-recorder/jt9, wspr-recorder, hfdl-recorder,
   codar-sounder) consuming channels and emitting spots.
-* Background services: ClickHouse, ChTailers, web APIs, watchdogs,
+* Background services: web APIs, watchdogs,
   cleanup timers, sigmond infra (igmp-querier, wd-rac).
 
 These workloads compete for three distinct resources:
@@ -55,7 +55,7 @@ lower tiers absolutely; lower tiers fill the leftover capacity.**
    timestation channels at 24 kHz IQ each), so their working set
    is small relative to radiod's.
 
-3. **Decoder clients.** jt9 (psk-recorder), wsprd (wsprdaemon-client),
+3. **Decoder clients.** jt9 (psk-recorder), wspr-recorder,
    dumphfdl (hfdl-recorder), codar-sounder. CPU-heavy and
    buffer-heavy. Slot-driven: tens of independent invocations per
    minute.
@@ -63,9 +63,8 @@ lower tiers absolutely; lower tiers fill the leftover capacity.**
 4. **Background.** Post-hoc analysis (`hf-timestd physics`,
    `iono-reanalysis`), observation surfaces (`web-api`,
    `radiod-monitor`), housekeeping (`pipeline-watchdog`, `prune`,
-   `wd-spool-clean`), data plumbing (ChTailers, ClickHouse server),
-   and sigmond infrastructure (igmp-querier, wd-rac). Bursty or
-   low-rate; tolerant of arbitrary scheduling.
+   `wd-spool-clean`), and sigmond infrastructure (igmp-querier,
+   wd-rac). Bursty or low-rate; tolerant of arbitrary scheduling.
 
 The current `AFFINITY_UNITS` mapping has only two buckets
 (`'radiod'` and `'other'`). Tiers 2, 3, and 4 all collapse into
@@ -205,7 +204,7 @@ context, not a recommended pattern:
 * Radiod owns CCX0 (cores 0-7) via the `[cpu_affinity]
   radiod_cpus` override.
 * Everything else (decoders, all of hf-timestd including `physics`,
-  ClickHouse, ChTailers, sigmond infra) is pinned to CCX1 (cores
+  sigmond infra) is pinned to CCX1 (cores
   8-15) via `AFFINITY_UNITS` role `'other'`.
 * hf-timestd's timing-critical services (`core-recorder`, `fusion`,
   `l2-calibration`, `metrology@`) bumped to `Nice=-10` so they

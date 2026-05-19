@@ -55,10 +55,10 @@ from pathlib import Path
 # already there.
 #
 # Why: install.sh builds /opt/sigmond/venv with sigmond installed
-# editable plus its declared extras (`tui`, `clickhouse`, …).  Our
-# shebang resolves to the system interpreter, which doesn't see those
-# packages — so any feature behind an extra (smd apply's ch_apply,
-# smd tui's textual, …) fails with `ModuleNotFoundError`.  Re-exec into
+# editable plus its declared extras (`tui`, …).  Our shebang resolves
+# to the system interpreter, which doesn't see those packages — so any
+# feature behind an extra (smd tui's textual, …) fails with
+# `ModuleNotFoundError`.  Re-exec into
 # the venv interpreter so smd always runs with sigmond's full dependency
 # closure available.
 #
@@ -2161,32 +2161,6 @@ def cmd_apply(args) -> int:
                 something_changed = True
         except Exception:
             pass  # non-fatal
-
-    # Apply ClickHouse schema migrations declared by every installed
-    # client's deploy.toml `[clickhouse]` block, BEFORE radiod fragments
-    # and the ensure-running block — so any client whose readiness
-    # check probes its CH sink finds the table already created.  The
-    # runner is a no-op when [storage.clickhouse] isn't in
-    # coordination.toml (operators who don't enable CH stay file-only).
-    if _HAS_SIGMOND_LIB:
-        try:
-            from sigmond.commands.ch_apply import apply_ch_schemas, summarise
-            from sigmond.coordination import load_coordination
-            from sigmond.paths import COORDINATION_PATH
-            coord = load_coordination(COORDINATION_PATH)
-            results = apply_ch_schemas(coord, dry_run=dry_run)
-            for line in summarise(results):
-                if "error" in line:
-                    _err(f'ch: {line}')
-                else:
-                    _ok(f'ch: {line}')
-            if any(not r.error and r.applied for r in results) and not dry_run:
-                something_changed = True
-        except ImportError as exc:
-            _info(f'ch_apply: clickhouse-connect not installed ({exc}); '
-                  'skipping schema migrations')
-        except Exception as exc:
-            _warn(f'ch_apply failed: {exc}')
 
     # Apply radiod channel fragments declared by enabled clients before the
     # ensure-running block — so fragments are in place when each radiod
@@ -5143,7 +5117,7 @@ def cmd_wisdom_plan(args) -> int:
     r = subprocess.run(
         ['systemctl', 'list-units', '--type=service', '--state=active',
          '--no-legend', '--no-pager',
-         'radiod@*', 'wd-*', 'timestd-*', 'psk-recorder@*', 'sigmond-clickhouse'],
+         'radiod@*', 'timestd-*', 'psk-recorder@*'],
         capture_output=True, text=True,
     )
     busy = [line.split()[0] for line in r.stdout.splitlines() if line.strip()]
@@ -5553,7 +5527,7 @@ def cmd_timestd_tune_storage(args) -> int:
 def cmd_storage_migrate_to_sqlite(args) -> int:
     """Remove a local ClickHouse install once SQLite is the chosen sink.
 
-    SQLite is now the sigmond default sink (see hamsci_ch.Writer.from_env).
+    SQLite is the sigmond sink (see hamsci_sink.Writer.from_env).
     On hosts that were set up when ClickHouse was the only option, the
     `clickhouse-server` package + /var/lib/clickhouse + sigmond-clickhouse
     service unit keep consuming RAM and merge-CPU even after producer
@@ -8538,22 +8512,15 @@ def main() -> int:
         '--target', choices=('wspr', 'psk'), default='wspr',
         help='which delivery path to verify. "wspr" (default) audits '
              'the wsprnet upload via the local wsprnet_audit table. '
-             '"psk" audits the via-server FT8/FT4 forwarding path '
-             'by diffing local psk.spots queue against wd*.psk.spots '
-             'over ClickHouse.',
-    )
-    p_v_report.add_argument(
-        '--psk-urls', metavar='URLS', default=None, dest='psk_urls',
-        help='--target=psk only: comma-separated ClickHouse HTTP '
-             'URLs (default: $WSPRDAEMON_VERIFY_URLS, then '
-             'wd10/wd20/wd30.wsprdaemon.org).',
+             '"psk" audits the FT8/FT4 forwarding queue in the local '
+             'SQLite sink (rows still pending vs stale).',
     )
     p_v_report.add_argument(
         '--psk-in-flight-sec', metavar='SECONDS', type=int,
         default=None, dest='psk_in_flight_sec',
-        help='--target=psk only: grace window after which an absent '
-             'upstream row counts as lost rather than in_flight '
-             '(default 300s = 5 min).',
+        help='--target=psk only: queue-age window after which a row '
+             'still in the local queue counts as stale rather than '
+             'in_flight (default 300s = 5 min).',
     )
 
     p_storage = sub.add_parser('storage',

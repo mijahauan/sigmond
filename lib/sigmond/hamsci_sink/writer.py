@@ -1,18 +1,19 @@
-"""SQLite-backed alternative to the ClickHouse Writer (CONTRACT §17.5 alt).
+"""Local sink writer for HamSCI clients (CONTRACT §17).
 
 Why this exists:
-    On a sigmond client the local sink is just a store-and-forward buffer
-    for `hs-uploader` to ship rows upstream.  A local ClickHouse-as-buffer
-    burns 1-2 GB of RAM and several cores of background-merge CPU on a
-    host whose real job is running an SDR pipeline.  SQLite gives the
-    same durability promise (rows survive a crash; the uploader reads at
-    its own pace) at tens of MB of RAM and no daemon.
+    On a sigmond client the local sink is just a store-and-forward
+    buffer for `hs-uploader` to ship rows upstream.  SQLite gives a
+    durable promise (rows survive a crash; the uploader reads at its
+    own pace) at tens of MB of RAM and no daemon — the right shape for
+    a host whose real job is running an SDR pipeline.
 
-Selection:
-    Set `SIGMOND_SQLITE_PATH=/var/lib/sigmond/sink.db` in coordination.env.
-    When that env var is present, `hamsci_ch.Writer.from_env()` returns a
-    `SqliteWriter` instead of the ClickHouse `Writer`.  Neither env var
-    set → no-op (standalone-safe).
+Selection (`Writer.from_env`):
+    `SIGMOND_SQLITE_PATH` set → writer at that path (explicit override;
+        useful for tests or unusual layouts).
+    unset → the sigmond default `/var/lib/sigmond/sink.db`, IF that
+        directory is writable.  Otherwise no-op — a true standalone
+        client (no sigmond install) stays safe instead of erroring on
+        every flush.
 
 Storage shape:
     One queue table `pending_uploads` shared across modes:
@@ -24,16 +25,10 @@ Storage shape:
         payload_json    TEXT     -- the row, JSON-serialized
         queued_at       TEXT     -- ISO8601 UTC (writer wall-clock)
 
-    The future `hs-uploader` reads rows in FIFO order, ships them to the
-    upstream ClickHouse, and deletes on success.  JSON-on-disk means the
-    uploader owns schema translation, not the producer — so producers
-    stay decoupled from the upstream's column shape.
-
-Interface parity with the ClickHouse Writer:
-    `insert(rows)`, `flush()`, `close()`, `health`, `is_noop`, `buffered`
-    are all duck-type compatible with `hamsci_ch.Writer`.  Callers that
-    do `from sigmond.hamsci_ch import Writer; Writer.from_env(...)` work
-    unchanged.
+    `hs-uploader` reads rows in FIFO order, ships them upstream, and
+    deletes on success.  JSON-on-disk means the uploader owns schema
+    translation, not the producer — so producers stay decoupled from
+    the upstream's column shape.
 
 Not threadsafe: instantiate one per producer thread, or serialize calls.
 """
@@ -49,14 +44,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-# Default batch trigger for the SQLite backend.  Much smaller than the
-# ClickHouse Writer's 50_000 default because this is a write-buffer,
-# not an OLAP bulk-insert: we want rows on disk in seconds, not when a
-# 50k-row batch happens to fill.  Sized so even a low-rate stream
-# (~30 spots/min from hf-timestd) flushes within a couple of minutes
-# while a high-rate one (~250 spots/min from psk-recorder) flushes
-# every ~4 cycles.  Operators can override via the `batch_rows`
-# constructor arg.
+# Default batch trigger.  Sized as a write-buffer, not an OLAP
+# bulk-insert: we want rows on disk in seconds, not when a large batch
+# happens to fill.  Sized so even a low-rate stream (~30 spots/min from
+# hf-timestd) flushes within a couple of minutes while a high-rate one
+# (~250 spots/min from psk-recorder) flushes every ~4 cycles.  Operators
+# can override via the `batch_rows` constructor arg.
 DEFAULT_SQLITE_BATCH_ROWS = 1000
 
 # Time bound on durability: if the buffer is non-empty and this many
@@ -66,19 +59,45 @@ DEFAULT_SQLITE_BATCH_ROWS = 1000
 # in memory until the next active period.
 DEFAULT_SQLITE_AUTO_FLUSH_SECONDS = 30.0
 
-logger = logging.getLogger("sigmond.hamsci_ch.sqlite")
+logger = logging.getLogger("sigmond.hamsci_sink")
 
 
+# Health values per CONTRACT §17.3 (plus `noop` for the standalone case).
 HEALTH_OK = "ok"
 HEALTH_UNREACHABLE = "unreachable"
 HEALTH_DEGRADED = "degraded"
 HEALTH_NOOP = "noop"
 
 
-# BufferFull is owned by writer.py so callers can catch one type across
-# both backends; we import it lazily inside methods to avoid an import
-# cycle with __init__.py's re-exports.
-from .writer import BufferFull  # noqa: E402
+# Default sink path used when no path is explicitly configured.  Lives
+# under sigmond's state dir so operators can find it for backup,
+# disk-budget accounting, and hs-uploader's reader.
+_DEFAULT_SQLITE_PATH = "/var/lib/sigmond/sink.db"
+
+
+def _default_sqlite_writable(path: str) -> bool:
+    """True iff the default sink path is usable without explicit config.
+
+    A directory is "usable" when (a) it already exists and is writable
+    by the current process, OR (b) its parent exists and is writable
+    (so the directory itself can be created on first connect).  This
+    keeps standalone clients — no sigmond install, no /var/lib/sigmond
+    — falling back to no-op instead of erroring on every flush.
+    """
+    parent = Path(path).parent
+    if parent.exists():
+        return os.access(parent, os.W_OK)
+    grandparent = parent.parent
+    return grandparent.exists() and os.access(grandparent, os.W_OK)
+
+
+class BufferFull(Exception):
+    """Buffer reached `2 * batch_rows` while the sink was unwritable.
+
+    Raised by `Writer.insert()` so the caller cannot silently lose rows.
+    Callers handle this however they like (sidecar file, drop-with-metric,
+    refuse-new-work) — the contract just forbids silent loss.
+    """
 
 
 def _json_default(obj: Any) -> Any:
@@ -94,7 +113,7 @@ def _json_default(obj: Any) -> Any:
 
 @dataclass
 class SqliteConfig:
-    """SQLite sink config resolved from env."""
+    """Sink config resolved from env."""
 
     path: str
 
@@ -124,10 +143,10 @@ CREATE INDEX IF NOT EXISTS idx_pending_uploads_target
 """
 
 
-class SqliteWriter:
+class Writer:
     """Writer that buffers rows into a local SQLite queue.
 
-    Use `SqliteWriter.from_env(...)` to construct from coordination.env.
+    Use `Writer.from_env(...)` to construct from coordination.env.
     Pass `connect_factory` in tests to inject a fake connection.
     """
 
@@ -171,15 +190,31 @@ class SqliteWriter:
         auto_flush_seconds: float = DEFAULT_SQLITE_AUTO_FLUSH_SECONDS,
         env: Optional[dict] = None,
         connect_factory: Optional[Any] = None,
-    ) -> "SqliteWriter":
-        """Build a SqliteWriter from coordination.env.
+    ) -> "Writer":
+        """Build a Writer from coordination.env.
+
+        `SIGMOND_SQLITE_PATH` selects the sink path.  When unset, the
+        sigmond default `/var/lib/sigmond/sink.db` is used if its
+        directory is writable; otherwise the writer is a silent no-op
+        (preserves standalone-safety for clients running outside a
+        sigmond install).
 
         `mode` is the per-mode key (`wspr`, `psk`, `hfdl`, `codar`,
         `timestd`).  `database` defaults to the mode name — operators
-        can override per host via `SIGMOND_SQLITE_DB_<MODE>` for parity
-        with `SIGMOND_CLICKHOUSE_DB_<MODE>`.
+        can override per host via `SIGMOND_SQLITE_DB_<MODE>`.  Pass
+        `database=` to bypass the alias.
         """
-        cfg = SqliteConfig.from_env(env)
+        e = env if env is not None else os.environ
+        sqlite_path = (e.get("SIGMOND_SQLITE_PATH") or "").strip()
+        # Fall back to the sigmond state path when no path is configured,
+        # but only when its directory is writable — a true standalone
+        # client should not silently start writing to /var/lib/sigmond.
+        if not sqlite_path and _default_sqlite_writable(_DEFAULT_SQLITE_PATH):
+            sqlite_path = _DEFAULT_SQLITE_PATH
+        effective_env = dict(e)
+        if sqlite_path:
+            effective_env["SIGMOND_SQLITE_PATH"] = sqlite_path
+        cfg = SqliteConfig.from_env(effective_env)
         actual_db = database or _resolve_db_alias(mode, env)
         return cls(
             database=actual_db,
@@ -223,7 +258,7 @@ class SqliteWriter:
             buffered = len(self._buffer)
             self._buffer = self._buffer[: self._buffer_max]
             raise BufferFull(
-                f"hamsci_ch.sqlite buffer overflow: {buffered} rows pending, "
+                f"hamsci_sink buffer overflow: {buffered} rows pending, "
                 f"max {self._buffer_max} (SQLite unwritable at "
                 f"{self._config.path if self._config else '?'})"
             )
@@ -275,7 +310,7 @@ class SqliteWriter:
             if self._health != HEALTH_DEGRADED:
                 self._health = HEALTH_UNREACHABLE
             logger.warning(
-                "hamsci_ch.sqlite: flush failed for %s.%s "
+                "hamsci_sink: flush failed for %s.%s "
                 "(%d rows buffered): %s",
                 self.database, self.table, len(self._buffer), e,
             )
@@ -291,7 +326,7 @@ class SqliteWriter:
                     pass
             self._conn = None
 
-    def __enter__(self) -> "SqliteWriter":
+    def __enter__(self) -> "Writer":
         return self
 
     def __exit__(self, *args) -> None:
@@ -367,6 +402,6 @@ def _default_connect_factory(config: SqliteConfig) -> sqlite3.Connection:
 
 
 def _resolve_db_alias(mode: str, env: Optional[dict] = None) -> str:
-    """Per-mode SQLite db-name alias, parallel to the ClickHouse one."""
+    """Per-mode sink db-name alias, overridable via `SIGMOND_SQLITE_DB_<MODE>`."""
     e = env if env is not None else os.environ
     return e.get(f"SIGMOND_SQLITE_DB_{mode.upper()}", mode)

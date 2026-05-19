@@ -7,7 +7,7 @@ Three source types:
 
 Each row has an operator-assignable label stored in
 /var/lib/sigmond/sdr-labels.toml.  Labels are used by configuration
-screens (wsprdaemon-client, psk-recorder, etc.) to refer to devices by
+screens (psk-recorder, hf-timestd, etc.) to refer to devices by
 name rather than IP/bus address.
 """
 

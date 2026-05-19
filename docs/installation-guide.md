@@ -8,8 +8,7 @@ Tested on: **Debian 13 (trixie)**, kernel 6.12.74, April 2026.
 
 Sigmond ("Dr. SigMonD") is the installer and lifecycle manager for the HamSCI
 SDR observation suite. The `smd` command coordinates radiod (ka9q-radio),
-wspr-recorder, psk-recorder, hf-timestd, and wsprdaemon-client on a shared
-SDR receiver.
+wspr-recorder, psk-recorder, and hf-timestd on a shared SDR receiver.
 
 ---
 
@@ -204,12 +203,10 @@ Expected `smd diag` output on a fresh install (no components enabled yet):
 
 ```
 ✓  network: wsprnet.org reachable
-⚠  network: graphs.wsprdaemon.org unreachable    ← expected until wsprdaemon-client is running
-⚠  network: logs.wsprdaemon.org unreachable      ← expected until wsprdaemon-client is running
    deps.conf not found at /home/wsprdaemon/...   ← expected until components installed
 ```
 
-The two network warnings and the `deps.conf` notice are normal at this stage.
+The `deps.conf` notice is normal at this stage.
 
 ---
 
@@ -233,7 +230,6 @@ sudo smd install radiod
 sudo smd install wspr-recorder
 sudo smd install psk-recorder
 sudo smd install hf-timestd
-sudo smd install wsprdaemon-client
 ```
 
 ### Option C — Install everything in the catalog
@@ -267,9 +263,6 @@ enabled = true
 
 [component.wspr-recorder]
 enabled = false        # set true if you want WSPR audio capture
-
-[component.wsprdaemon-client]
-enabled = true
 ```
 
 ---
@@ -323,7 +316,7 @@ sudo chmod o+x /home/mjh                 # if hosting symlinked checkouts
 
 This is needed today on hosts whose `/opt/git/sigmond/<name>/` is a
 symlink into a homedir.  On this dev host that's
-`gpsdo-monitor`, `hfdl-recorder`, `wsprdaemon-client`, and (when
+`gpsdo-monitor`, `hfdl-recorder`, and (when
 staged similarly) `codar-sounder`.  Real-directory checkouts owned
 by `root` under `/opt/git/sigmond/` don't need this — only the
 symlink-into-homedir layout does.
@@ -333,7 +326,7 @@ Hosts installed before the namespace move will have sigmond clients at
 
 ```bash
 sudo mkdir -p /opt/git/sigmond
-for d in psk-recorder wspr-recorder hf-timestd wsprdaemon-client \
+for d in psk-recorder wspr-recorder hf-timestd \
          hfdl-recorder gpsdo-monitor igmp-querier; do
   if [ -e /opt/git/$d ] && [ ! -e /opt/git/sigmond/$d ]; then
     sudo mv /opt/git/$d /opt/git/sigmond/$d
@@ -375,15 +368,13 @@ client should still show as installed (the symlinks at
 | 9 | `ka9q-python` not visible in topology/catalog | Added as `kind = "library"` catalog entry with `requires = []` |
 | 10 | Cascade-disable broken: shared deps (e.g. `radiod`) not removed when last client disabled | Fixed: iterate `reversed(transitive_requires(...))` to process deepest dependents first, removing them from `enabled_now` before checking shared deps |
 | 11 | `ka9q-update` not found, or radiod cloned to wrong directory | `smd install` now passes `/opt/git` as target dir to `install-ka9q.sh` |
-| 12 | `radio` group missing on fresh Debian 13; `chown: invalid group: 'wsprdaemon:radio'` | `sudo groupadd radio && sudo usermod -aG radio wsprdaemon` before installing wsprdaemon-client. Bug in `wsprdaemon-client/install.sh` (should create group before using it) |
-| 13 | `wireshark-common` debconf interactive prompt hangs `ka9q-update` apt install | Pre-answer: `echo "wireshark-common wireshark-common/install-setuid boolean false" \| sudo debconf-set-selections`, then set `DEBIAN_FRONTEND=noninteractive` |
-| 14 | `ka9q-radio` cloned to sigmond source dir instead of `/opt/git/ka9q-radio` | Fixed in `bin/smd`: pass `/opt/git` as arg to `install-ka9q.sh` |
-| 15 | `ka9q-python` treated as "unknown" component during `smd install` | Fixed: `library`/`infra` entries without `install_script` are silently skipped (handled by sigmond venv) |
-| 16 | `deps.conf not found at /home/wsprdaemon/...` error on fresh install | Fixed: `_load_deps_conf()` falls back to `/opt/git/sigmond/wsprdaemon-client/deps.conf`; also updated `_DEFAULT_CLIENT_DIR` |
-| 17 | `ka9q-python` reinstalled from deps.conf even though already catalog-managed | Fixed: skip pypi deps.conf entries whose name matches a catalog entry |
-| 18 | `ka9q-update/install-ka9q.sh` fails on re-run: `git pull` on detached HEAD | Fixed in `install-ka9q.sh`: check out main/master branch before pulling |
-| 19 | `install-ka9q.sh` exits with code 1 when stdin is not a TTY (`read -p` returns EOF with `set -e`) | Fixed: add `\|\| true` to both `read -p` calls in `install-ka9q.sh` |
-| 20 | `fftwf-wisdom` takes 10–30 minutes during first `smd install` | Expected behavior; runs once. Second `smd install` is fast because wisdom is cached |
+| 12 | `wireshark-common` debconf interactive prompt hangs `ka9q-update` apt install | Pre-answer: `echo "wireshark-common wireshark-common/install-setuid boolean false" \| sudo debconf-set-selections`, then set `DEBIAN_FRONTEND=noninteractive` |
+| 13 | `ka9q-radio` cloned to sigmond source dir instead of `/opt/git/ka9q-radio` | Fixed in `bin/smd`: pass `/opt/git` as arg to `install-ka9q.sh` |
+| 14 | `ka9q-python` treated as "unknown" component during `smd install` | Fixed: `library`/`infra` entries without `install_script` are silently skipped (handled by sigmond venv) |
+| 15 | `ka9q-python` reinstalled from deps.conf even though already catalog-managed | Fixed: skip pypi deps.conf entries whose name matches a catalog entry |
+| 16 | `ka9q-update/install-ka9q.sh` fails on re-run: `git pull` on detached HEAD | Fixed in `install-ka9q.sh`: check out main/master branch before pulling |
+| 17 | `install-ka9q.sh` exits with code 1 when stdin is not a TTY (`read -p` returns EOF with `set -e`) | Fixed: add `\|\| true` to both `read -p` calls in `install-ka9q.sh` |
+| 18 | `fftwf-wisdom` takes 10–30 minutes during first `smd install` | Expected behavior; runs once. Second `smd install` is fast because wisdom is cached |
 
 ---
 

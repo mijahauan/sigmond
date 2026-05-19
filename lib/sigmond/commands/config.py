@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..coordination import Host, load_coordination, render_env
-from ..paths import COORDINATION_ENV, COORDINATION_PATH, WSPRDAEMON_CONF
+from ..paths import COORDINATION_ENV, COORDINATION_PATH
 from ..sysview import build_system_view
 from ..ui import err, heading, info, ok, warn
 
@@ -90,11 +90,15 @@ def cmd_config_show(args) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_config_migrate(args) -> int:
-    source_path = Path(getattr(args, 'from_', None) or WSPRDAEMON_CONF)
+    heading('config migrate')
+    source = getattr(args, 'from_', None)
+    if not source:
+        info('config migrate requires --from <path> to a legacy source config')
+        return 2
+    source_path = Path(source)
     dest_path   = Path(getattr(args, 'to',    None) or COORDINATION_PATH)
     write       = bool(getattr(args, 'write', False))
 
-    heading('config migrate')
     info(f'source: {source_path}')
     info(f'target: {dest_path}')
 
@@ -286,8 +290,8 @@ def cmd_config_identity(args) -> int:
     These values live in the [host] block of coordination.toml and are
     rendered to coordination.env as STATION_CALL / STATION_GRID /
     STATION_LAT / STATION_LON (CLIENT-CONTRACT v0.5 §14.2).  Sigmond
-    publishes them so client config wizards (wsprdaemon-client,
-    hf-timestd, psk-recorder, …) can use them as defaults instead of
+    publishes them so client config wizards (hf-timestd,
+    psk-recorder, …) can use them as defaults instead of
     re-prompting for the same fields per-client.
     """
     coord = load_coordination(COORDINATION_PATH)

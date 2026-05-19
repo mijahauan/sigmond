@@ -69,11 +69,10 @@ _DEFAULT_COMPONENTS = {
     'hf-timestd':         Component('hf-timestd',         enabled=False, managed=True,  description='HF time-standard analyzer (WWV/WWVH/CHU/BPM)'),
     'psk-recorder':       Component('psk-recorder',       enabled=False, managed=True,  description='FT4/FT8 spot recorder for PSKReporter'),
     'wspr-recorder':      Component('wspr-recorder',      enabled=False, managed=True,  description='WSPR/FST4W audio recorder (period-aligned WAVs)'),
-    'wsprdaemon-client':  Component('wsprdaemon-client',  enabled=False, managed=True,  description='WSPR decoder + poster + uploader'),
     'ka9q-web':           Component('ka9q-web',           enabled=False, managed=True,  description='ka9q-web radiod status UI'),
 }
 
-_DEFAULT_CLIENT_DIR = Path('/opt/git/sigmond/wsprdaemon-client')
+_DEFAULT_CLIENT_DIR = Path('/opt/git/sigmond')
 _DEFAULT_SMD_BIN    = Path('/usr/local/sbin/smd')
 
 
@@ -97,8 +96,6 @@ def load_topology(path: Path = TOPOLOGY_PATH,
         raw = tomllib.load(f)
 
     sig = raw.get('sigmond', {})
-    if 'wsprdaemon_client' in sig:
-        client_dir = Path(sig['wsprdaemon_client'])
     if client_dir_override:
         client_dir = Path(client_dir_override)
     if 'smd_bin' in sig:

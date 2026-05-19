@@ -9,7 +9,7 @@ TUI planned.
 
 The v4 rewrite decomposes wsprdaemon into independent, service-oriented
 components: radiod (via ka9q-radio), wspr-recorder, hf-timestd, psk-recorder,
-wsprdaemon-client, and future HamSCI clients.  Each component owns its own
+and future HamSCI clients.  Each component owns its own
 configuration file and can run standalone.  But when several components share
 a single receiver chain, their configurations must agree on frequencies,
 radiod addresses, CPU affinity, timing sources, and disk budgets.
@@ -196,7 +196,7 @@ Configurable via `[cpu_freq]` in `topology.toml` or CLI flags.
 #### 6. Per-Client Config Screens
 
 Per-component settings editors for wspr-recorder, hf-timestd,
-psk-recorder, wsprdaemon-client.  Each reads/writes the client's native
+psk-recorder.  Each reads/writes the client's native
 config format (TOML) with contextual help and live state.
 
 Stretch goal — depends on each client exposing enough structure via
@@ -254,7 +254,7 @@ wd-ctl's drop-ins).
   core 0, second → core 1, etc.
 
 - **Everything else shares remaining cores.** All other managed services
-  (hf-timestd, psk-recorder, wspr-recorder, wsprdaemon-client, ka9q-web)
+  (hf-timestd, psk-recorder, wspr-recorder, ka9q-web)
   get the pool of non-radiod cores.
 
 - **Enforcement is cgroup-based.** Drop-ins set both `CPUAffinity=`
