@@ -1,8 +1,16 @@
 """mDNS / Avahi browse — passive discovery of local peers.
 
-Shell out to `avahi-browse -rpt <service>…` and parse the `=;…` lines
+Shell out to `avahi-browse -rpt <service>` and parse the `=;…` lines
 Avahi emits.  No new runtime deps; if `avahi-browse` is missing we return
 an empty list with a single failed Observation recording the reason.
+
+One ``avahi-browse`` invocation per service type — passing multiple
+positional service args to a single ``avahi-browse`` call errors with
+"Too many arguments" (the binary accepts at most one).  Before the
+2026-05-19 fix this module silently returned zero observations on
+every host that had more than one configured service; ka9q-radio
+shows up as ``_ka9q-ctl._udp`` and was missing from every probe
+report despite the LAN being full of radiods.
 """
 
 from __future__ import annotations
@@ -15,8 +23,9 @@ from typing import Callable
 from ..environment import Environment, Observation
 
 
-# Services relevant to a HamSCI site.  `_ka9q-ctl._udp` is aspirational —
-# ka9q-radio does not publish mDNS today, but KiwiSDR and NTP/chrony do.
+# Services relevant to a HamSCI site.  ka9q-radio (since 2025) and KiwiSDR
+# both publish mDNS; chrony advertises NTP.  Add new service types here
+# rather than spreading them across the codebase.
 SERVICES = (
     "_kiwisdr._tcp",
     "_ntp._udp",
@@ -26,15 +35,25 @@ SERVICES = (
 
 
 def _default_runner(services: tuple, timeout: float) -> str:
+    """Run ``avahi-browse -rpt <svc>`` once per service and concatenate
+    the resolved-line output.
+
+    ``timeout`` is the *per-service* budget, not the aggregate.  In
+    practice each call returns in well under a second once the cache
+    is warm; the timeout exists to bound startup latency if Avahi is
+    misbehaving on the host.
+    """
     if shutil.which("avahi-browse") is None:
         raise FileNotFoundError("avahi-browse not found on PATH")
-    args = ["avahi-browse", "-rpt"]
-    args.extend(services)
-    # -rpt: resolve, parseable, terminate (single-shot).
-    proc = subprocess.run(
-        args, capture_output=True, text=True, timeout=timeout, check=False,
-    )
-    return proc.stdout
+    chunks: list[str] = []
+    for svc in services:
+        # -rpt: resolve, parseable, terminate (single-shot).
+        proc = subprocess.run(
+            ["avahi-browse", "-rpt", svc],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        chunks.append(proc.stdout)
+    return "".join(chunks)
 
 
 def probe(env: Environment, *,
@@ -78,9 +97,34 @@ _KIND_FOR_SERVICE = {
 }
 
 
+def _decode_avahi_escapes(s: str) -> str:
+    """Decode Avahi's ``\\NNN`` octal escapes back to the original char.
+
+    radiod publishes service names like ``AC0G\\032\\064EM38ww\\032B1``
+    in the parseable output (space=040 oct = 032 decimal? — Avahi uses
+    DECIMAL three-digit escapes, not octal).  Translate those back to
+    the human-readable form before exposing in ``fields``.
+    """
+    import re as _re
+
+    def _sub(m):
+        try:
+            return chr(int(m.group(1)))
+        except (ValueError, OverflowError):
+            return m.group(0)
+    return _re.sub(r"\\(\d{3})", _sub, s)
+
+
 def _parse(stdout: str, now: float) -> list[Observation]:
-    """Parse avahi-browse -pt output.  Resolved lines start with '='."""
+    """Parse avahi-browse -pt output.  Resolved lines start with '='.
+
+    The same logical service is announced separately on every (iface,
+    proto) pair the host listens on — ens18/IPv4, ens18/IPv6, lo/IPv4.
+    Keep only one Observation per (kind, mdns_name, address) so a
+    single radiod doesn't appear three times in inventory.
+    """
     out: list[Observation] = []
+    seen: set[tuple[str, str, str]] = set()
     for line in stdout.splitlines():
         if not line.startswith("="):
             continue
@@ -89,12 +133,18 @@ def _parse(stdout: str, now: float) -> list[Observation]:
         # =;IF;PROTO;NAME;TYPE;DOMAIN;HOSTNAME;ADDRESS;PORT;TXT
         if len(parts) < 9:
             continue
-        iface, proto, name, svc_type = parts[1], parts[2], parts[3], parts[4]
+        iface, proto = parts[1], parts[2]
+        name = _decode_avahi_escapes(parts[3])
+        svc_type = parts[4]
         hostname, address, port = parts[6], parts[7], parts[8]
         txt = parts[9] if len(parts) > 9 else ""
         kind = _KIND_FOR_SERVICE.get(svc_type, "")
         if not kind:
             continue
+        key = (kind, name, address)
+        if key in seen:
+            continue
+        seen.add(key)
         fields = {
             "mdns_name":    name,
             "mdns_service": svc_type,

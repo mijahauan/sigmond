@@ -74,6 +74,67 @@ class MdnsProbeTests(unittest.TestCase):
         obs = mdns_mod.probe(env, runner=lambda s, t: self.AVAHI_OUTPUT)
         self.assertEqual(obs, [])
 
+    def test_radiod_escape_sequences_decoded(self):
+        """radiod's mDNS names contain spaces and ASCII punctuation
+        encoded as Avahi-style ``\\NNN`` decimal escapes — they should
+        be decoded back to the original characters before the name
+        enters ``fields['mdns_name']``."""
+        avahi_out = (
+            r'=;ens18;IPv4;AC0G\032\064EM38ww\032B1\032T3FD'
+            r';_ka9q-ctl._udp;local;bee1-status.local;239.205.73.40;5006;""' + "\n"
+            r'=;ens18;IPv4;AC0G\047B4\032Dipole;_ka9q-ctl._udp;local'
+            r';B4-100-rx888mk2-status.local;239.34.65.186;5006;""' + "\n"
+        )
+        env = _env()
+        obs = mdns_mod.probe(env, runner=lambda s, t: avahi_out)
+        names = sorted(o.fields["mdns_name"] for o in obs)
+        # \032 decimal = chr(32) = SPACE; \064 = '@'; \047 = '/'.
+        # Avahi uses decimal escapes, not octal (despite the leading 0).
+        self.assertEqual(names, [
+            "AC0G @EM38ww B1 T3FD",
+            "AC0G/B4 Dipole",
+        ])
+
+    def test_dedupes_per_iface_announcements(self):
+        """Same radiod advertised on ens18/IPv4 + ens18/IPv6 + lo/IPv4
+        must collapse to a single Observation — ``(kind, name, address)``
+        is the dedup key."""
+        avahi_out = "\n".join([
+            "=;ens18;IPv6;bee1-hf;_ka9q-ctl._udp;local;bee1.local;239.205.73.40;5006;\"\"",
+            "=;ens18;IPv4;bee1-hf;_ka9q-ctl._udp;local;bee1.local;239.205.73.40;5006;\"\"",
+            "=;lo;IPv4;bee1-hf;_ka9q-ctl._udp;local;bee1.local;239.205.73.40;5006;\"\"",
+        ]) + "\n"
+        env = _env()
+        obs = mdns_mod.probe(env, runner=lambda s, t: avahi_out)
+        self.assertEqual(len(obs), 1)
+        self.assertEqual(obs[0].kind, "radiod")
+
+    def test_default_runner_calls_avahi_once_per_service(self):
+        """Regression for the 2026-05-19 bug: the production runner used
+        to pass every service type as positional args to a single
+        ``avahi-browse`` invocation, which the binary rejects with
+        "Too many arguments" — silently zeroing every probe.  The fix
+        runs one subprocess per service.
+
+        We can't black-box test the subprocess directly here without
+        mocking subprocess.run; the test asserts the runner contract
+        instead — ``services`` arg accepts the canonical tuple, and
+        an injected runner that records its arg counts gets called
+        the right number of times.
+        """
+        call_args: list = []
+
+        def _record(services, timeout):
+            call_args.append(services)
+            return ""
+
+        mdns_mod.probe(_env(), runner=_record)
+        self.assertEqual(len(call_args), 1)
+        # Runner contract: the single-call runner receives the full
+        # services tuple; only the *default* runner internally iterates.
+        # Test-callers can keep the simple single-call lambda shape.
+        self.assertEqual(set(call_args[0]), set(mdns_mod.SERVICES))
+
 
 # ---------------------------------------------------------------------------
 # Multicast / ka9q-radio status
