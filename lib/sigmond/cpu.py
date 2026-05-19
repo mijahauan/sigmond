@@ -43,15 +43,6 @@ HFTIMESTD_AFFINITY_UNITS = [
 
 # Service template -> cpu group.  radiod instances handled separately.
 AFFINITY_UNITS = {
-    # wsprdaemon group
-    'wd-decode@.service':                'other',
-    'wd-ka9q-record@.service':           'other',
-    'wd-kiwi-record@.service':           'other',
-    'wd-post@.service':                  'other',
-    'wd-upload-wsprnet@.service':        'other',
-    'wd-upload-wsprdaemon@.service':     'other',
-    'wd-ka9q-web@.service':              'other',
-    'wd-spool-clean.service':            'other',
     # decoder clients — previously marked "manages itself" but in
     # practice they were left unconfined and ran on radiod's CPUs,
     # polluting radiod's L3 cache and causing USB packet drops on

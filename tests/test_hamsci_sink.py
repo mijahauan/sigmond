@@ -1,4 +1,4 @@
-"""Tests for sigmond.hamsci_ch.SqliteWriter (CONTRACT §17.5 alt backend)."""
+"""Tests for sigmond.hamsci_sink.Writer (CONTRACT §17)."""
 
 import json
 import sqlite3
@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
-from sigmond.hamsci_ch import BufferFull, SqliteConfig, SqliteWriter, Writer
-from sigmond.hamsci_ch.sqlite_writer import (
+from sigmond.hamsci_sink import BufferFull, SqliteConfig, Writer
+from sigmond.hamsci_sink.writer import (
     HEALTH_DEGRADED, HEALTH_NOOP, HEALTH_OK, HEALTH_UNREACHABLE,
     _resolve_db_alias,
 )
@@ -27,19 +27,35 @@ def _temp_db_path() -> str:
 
 
 class TestNoOpMode(unittest.TestCase):
-    """No env vars → noop. Standalone-safe.  Mirrors the CH writer's contract."""
+    """No path configured and no writable default → noop. Standalone-safe."""
 
     def test_from_env_no_path_yields_noop(self):
-        w = SqliteWriter.from_env(table="spots", mode="psk", env={})
-        self.assertTrue(w.is_noop)
-        self.assertEqual(w.health, HEALTH_NOOP)
+        w = Writer.from_env(table="spots", mode="psk", env={})
+        # env={} has no SIGMOND_SQLITE_PATH; from_env may still pick the
+        # /var/lib/sigmond default if that dir is writable on the test
+        # host.  Force the standalone case by disabling the probe.
+        from sigmond.hamsci_sink import writer as writer_mod
+        original = writer_mod._default_sqlite_writable
+        writer_mod._default_sqlite_writable = lambda _p: False
+        try:
+            w = Writer.from_env(table="spots", mode="psk", env={})
+            self.assertTrue(w.is_noop)
+            self.assertEqual(w.health, HEALTH_NOOP)
+        finally:
+            writer_mod._default_sqlite_writable = original
 
     def test_noop_insert_does_nothing(self):
-        w = SqliteWriter.from_env(table="spots", mode="psk", env={})
-        w.insert([{"a": 1}, {"a": 2}])
-        self.assertEqual(w.buffered, 0)
-        w.flush()
-        w.close()
+        from sigmond.hamsci_sink import writer as writer_mod
+        original = writer_mod._default_sqlite_writable
+        writer_mod._default_sqlite_writable = lambda _p: False
+        try:
+            w = Writer.from_env(table="spots", mode="psk", env={})
+            w.insert([{"a": 1}, {"a": 2}])
+            self.assertEqual(w.buffered, 0)
+            w.flush()
+            w.close()
+        finally:
+            writer_mod._default_sqlite_writable = original
 
 
 class TestConfigAndAlias(unittest.TestCase):
@@ -75,8 +91,8 @@ class TestEnabledWriter(unittest.TestCase):
             if sidecar.exists():
                 sidecar.unlink()
 
-    def _writer(self, **kwargs) -> SqliteWriter:
-        return SqliteWriter.from_env(
+    def _writer(self, **kwargs) -> Writer:
+        return Writer.from_env(
             table="spots", mode="psk", env=self.env, batch_rows=3, **kwargs,
         )
 
@@ -145,7 +161,7 @@ class TestEnabledWriter(unittest.TestCase):
 
     def test_alias_overrides_database_from_env(self):
         env = {**self.env, "SIGMOND_SQLITE_DB_PSK": "psk_alt"}
-        w = SqliteWriter.from_env(
+        w = Writer.from_env(
             table="spots", mode="psk", env=env, batch_rows=1,
         )
         w.insert([{"x": 1}])
@@ -159,14 +175,14 @@ class TestEnabledWriter(unittest.TestCase):
         self.assertEqual(len(self._queue_rows()), 1)
 
     def test_context_manager_flushes(self):
-        with SqliteWriter.from_env(
+        with Writer.from_env(
             table="spots", mode="psk", env=self.env, batch_rows=10,
         ) as w:
             w.insert([{"x": 1}])
         self.assertEqual(len(self._queue_rows()), 1)
 
     def test_schema_version_persisted(self):
-        w = SqliteWriter.from_env(
+        w = Writer.from_env(
             table="spots", mode="psk", env=self.env, batch_rows=1,
             schema_version=7,
         )
@@ -174,10 +190,10 @@ class TestEnabledWriter(unittest.TestCase):
         self.assertEqual(self._queue_rows()[0][2], 7)
 
     def test_multiple_tables_coexist_in_one_db(self):
-        spots = SqliteWriter.from_env(
+        spots = Writer.from_env(
             table="spots", mode="psk", env=self.env, batch_rows=1,
         )
-        noise = SqliteWriter.from_env(
+        noise = Writer.from_env(
             table="noise", mode="wspr", env=self.env, batch_rows=1,
         )
         spots.insert([{"freq": 14074000}])
@@ -200,7 +216,7 @@ class TestUnreachableHandling(unittest.TestCase):
                 raise sqlite3.OperationalError("simulated disk error")
             return sqlite3.connect(":memory:")
 
-        w = SqliteWriter.from_env(
+        w = Writer.from_env(
             table="spots", mode="psk",
             env={"SIGMOND_SQLITE_PATH": "/nonexistent/dir/sink.db"},
             batch_rows=2, connect_factory=factory,
@@ -217,7 +233,7 @@ class TestUnreachableHandling(unittest.TestCase):
         def always_fail(cfg):
             raise sqlite3.OperationalError("simulated disk full")
 
-        w = SqliteWriter.from_env(
+        w = Writer.from_env(
             table="spots", mode="psk",
             env={"SIGMOND_SQLITE_PATH": "/nonexistent/dir/sink.db"},
             batch_rows=3, connect_factory=always_fail,
@@ -229,8 +245,8 @@ class TestUnreachableHandling(unittest.TestCase):
 
 
 class TestWriterFromEnvDispatch(unittest.TestCase):
-    """`Writer.from_env` must hand back a SqliteWriter when SQLITE_PATH set,
-    a ClickHouse Writer when only CLICKHOUSE_URL set, and a noop otherwise."""
+    """`Writer.from_env` selects a writable sink path: an explicit
+    `SIGMOND_SQLITE_PATH`, else the sigmond default, else no-op."""
 
     def setUp(self):
         self.db_path = _temp_db_path()
@@ -241,69 +257,75 @@ class TestWriterFromEnvDispatch(unittest.TestCase):
             if p.exists():
                 p.unlink()
 
-    def test_sqlite_path_selects_sqlite_writer(self):
+    def test_explicit_path_yields_enabled_writer(self):
         w = Writer.from_env(
             table="spots", mode="psk",
             env={"SIGMOND_SQLITE_PATH": self.db_path},
         )
-        self.assertIsInstance(w, SqliteWriter)
-        self.assertFalse(w.is_noop)
-
-    def test_clickhouse_url_selects_clickhouse_writer(self):
-        w = Writer.from_env(
-            table="spots", mode="psk",
-            env={"SIGMOND_CLICKHOUSE_URL": "http://localhost:8123"},
-        )
         self.assertIsInstance(w, Writer)
-        self.assertNotIsInstance(w, SqliteWriter)
         self.assertFalse(w.is_noop)
-
-    def test_clickhouse_wins_when_both_env_vars_set(self):
-        # ClickHouse is an explicit opt-in (operator set the URL on
-        # purpose), so when both vars are present it takes precedence
-        # over a stale or coexisting SIGMOND_SQLITE_PATH.
-        w = Writer.from_env(
-            table="spots", mode="psk",
-            env={
-                "SIGMOND_SQLITE_PATH": self.db_path,
-                "SIGMOND_CLICKHOUSE_URL": "http://localhost:8123",
-            },
-        )
-        self.assertIsInstance(w, Writer)
-        self.assertNotIsInstance(w, SqliteWriter)
 
     def test_neither_set_with_no_default_dir_yields_noop(self):
         # When /var/lib/sigmond doesn't exist and can't be created, the
         # fallback is no-op (preserves standalone-safety).  We force this
         # by monkeypatching the writability probe to return False.
-        from sigmond.hamsci_ch import writer as writer_mod
+        from sigmond.hamsci_sink import writer as writer_mod
         original = writer_mod._default_sqlite_writable
         writer_mod._default_sqlite_writable = lambda _p: False
         try:
             w = Writer.from_env(table="spots", mode="psk", env={})
-            self.assertIsInstance(w, Writer)
             self.assertTrue(w.is_noop)
         finally:
             writer_mod._default_sqlite_writable = original
 
-    def test_neither_set_with_writable_default_yields_sqlite(self):
-        # The new default: SQLite at /var/lib/sigmond/sink.db when the
+    def test_neither_set_with_writable_default_yields_enabled(self):
+        # The default: SQLite at /var/lib/sigmond/sink.db when the
         # parent dir is writable.  Inject a temp dir so the test doesn't
         # need /var/lib/sigmond on the host.
         tmpdir = tempfile.mkdtemp()
         try:
-            from sigmond.hamsci_ch import writer as writer_mod
+            from sigmond.hamsci_sink import writer as writer_mod
             original_path = writer_mod._DEFAULT_SQLITE_PATH
             writer_mod._DEFAULT_SQLITE_PATH = str(Path(tmpdir) / "sink.db")
             try:
                 w = Writer.from_env(table="spots", mode="psk", env={})
-                self.assertIsInstance(w, SqliteWriter)
                 self.assertFalse(w.is_noop)
             finally:
                 writer_mod._DEFAULT_SQLITE_PATH = original_path
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestFromEnvBatchRows(unittest.TestCase):
+    """`Writer.from_env` defaults `batch_rows` to the small SQLite
+    write-buffer size, and honors an explicit override."""
+
+    def setUp(self):
+        self.db_path = _temp_db_path()
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(self.db_path + suffix)
+            if p.exists():
+                p.unlink()
+
+    def test_default_batch_rows_is_sqlite_default(self):
+        from sigmond.hamsci_sink.writer import DEFAULT_SQLITE_BATCH_ROWS
+        w = Writer.from_env(
+            table="spots", mode="psk",
+            env={"SIGMOND_SQLITE_PATH": self.db_path},
+            # No batch_rows arg — caller uses Writer.from_env's default.
+        )
+        self.assertEqual(w.batch_rows, DEFAULT_SQLITE_BATCH_ROWS)
+
+    def test_explicit_batch_rows_honored(self):
+        w = Writer.from_env(
+            table="spots", mode="psk",
+            env={"SIGMOND_SQLITE_PATH": self.db_path},
+            batch_rows=42,
+        )
+        self.assertEqual(w.batch_rows, 42)
 
 
 class TestTimeBasedAutoFlush(unittest.TestCase):
@@ -340,7 +362,7 @@ class TestTimeBasedAutoFlush(unittest.TestCase):
 
     def test_age_trigger_fires_when_seconds_elapsed(self):
         # batch_rows=1000 (high) so size never trips; auto_flush=0.05s.
-        w = SqliteWriter.from_env(
+        w = Writer.from_env(
             table="spots", mode="psk",
             env={"SIGMOND_SQLITE_PATH": self.db_path},
             batch_rows=1000, auto_flush_seconds=0.05,
@@ -355,7 +377,7 @@ class TestTimeBasedAutoFlush(unittest.TestCase):
         self.assertEqual(self._row_count(), 2)
 
     def test_age_trigger_disabled_when_zero(self):
-        w = SqliteWriter.from_env(
+        w = Writer.from_env(
             table="spots", mode="psk",
             env={"SIGMOND_SQLITE_PATH": self.db_path},
             batch_rows=10, auto_flush_seconds=0,
@@ -370,47 +392,12 @@ class TestTimeBasedAutoFlush(unittest.TestCase):
         self.assertEqual(w.buffered, 2)
 
 
-class TestDispatchScalesBatchRowsForSqlite(unittest.TestCase):
-    """`Writer.from_env` should hand SqliteWriter a small default
-    batch_rows even when the caller relies on the CH-shaped default
-    of 50_000 — otherwise slow streams sit in memory for hours."""
-
-    def setUp(self):
-        self.db_path = _temp_db_path()
-
-    def tearDown(self):
-        for suffix in ("", "-wal", "-shm"):
-            p = Path(self.db_path + suffix)
-            if p.exists():
-                p.unlink()
-
-    def test_default_batch_rows_scaled_down_for_sqlite(self):
-        from sigmond.hamsci_ch.sqlite_writer import DEFAULT_SQLITE_BATCH_ROWS
-        w = Writer.from_env(
-            table="spots", mode="psk",
-            env={"SIGMOND_SQLITE_PATH": self.db_path},
-            # No batch_rows arg — caller uses Writer.from_env's default.
-        )
-        self.assertIsInstance(w, SqliteWriter)
-        self.assertEqual(w.batch_rows, DEFAULT_SQLITE_BATCH_ROWS)
-
-    def test_explicit_batch_rows_honored(self):
-        w = Writer.from_env(
-            table="spots", mode="psk",
-            env={"SIGMOND_SQLITE_PATH": self.db_path},
-            batch_rows=42,
-        )
-        self.assertIsInstance(w, SqliteWriter)
-        self.assertEqual(w.batch_rows, 42)
-
-
 class TestGroupWritablePerms(unittest.TestCase):
-    """SqliteWriter must make sink.db (+WAL/SHM) group-writable after
-    schema init so OTHER producers in the same supplementary group
-    can write to the same sink.  Without this, the first producer to
-    flush owns the files at mode 0644 and the rest hit
-    "attempt to write a readonly database" — observed on bee1
-    2026-05-12.
+    """Writer must make sink.db (+WAL/SHM) group-writable after schema
+    init so OTHER producers in the same supplementary group can write
+    to the same sink.  Without this, the first producer to flush owns
+    the files at mode 0644 and the rest hit "attempt to write a
+    readonly database" — observed on bee1 2026-05-12.
     """
 
     def setUp(self):
@@ -425,7 +412,7 @@ class TestGroupWritablePerms(unittest.TestCase):
 
     def test_main_db_is_group_writable_after_first_flush(self):
         import stat
-        w = SqliteWriter.from_env(
+        w = Writer.from_env(
             table="spots", mode="psk", env=self.env, batch_rows=1,
         )
         w.insert([{"x": 1}])  # triggers flush
@@ -437,7 +424,7 @@ class TestGroupWritablePerms(unittest.TestCase):
 
     def test_wal_and_shm_sidecars_are_group_writable_after_first_flush(self):
         import stat
-        w = SqliteWriter.from_env(
+        w = Writer.from_env(
             table="spots", mode="psk", env=self.env, batch_rows=1,
         )
         w.insert([{"x": 1}])
@@ -460,9 +447,8 @@ class TestGroupWritablePerms(unittest.TestCase):
         crash the flush — every sigmond-group writer would otherwise
         hit a hard error on every flush after the first producer
         creates the file."""
-        from sigmond.hamsci_ch.sqlite_writer import SqliteWriter as SW
         with patch("os.chmod", side_effect=PermissionError("not owner")):
-            w = SqliteWriter.from_env(
+            w = Writer.from_env(
                 table="spots", mode="psk", env=self.env, batch_rows=1,
             )
             # No raise — flush completes despite chmod's failure.

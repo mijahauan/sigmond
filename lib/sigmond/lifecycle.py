@@ -367,7 +367,7 @@ def order_units(
     Each component's priority comes from the catalog (which Wave 2 sources
     primarily from each client's ``deploy.toml [client.lifecycle]
     start_priority`` field).  ``radiod`` ships priority 0 (always first);
-    uploaders like ``wsprdaemon-client`` ship 900 (always last); everything
+    upload/forwarding services ship 900 (always last); everything
     else defaults to 100.
 
     Args:

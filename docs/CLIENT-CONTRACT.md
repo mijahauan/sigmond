@@ -4,23 +4,23 @@
 **Status:** Adopted. First full v0.2 implementation is `hf-timestd`
 v7.0.0 — see §9.  First greenfield v0.3 implementation is
 `psk-recorder` v0.1.0, which also surfaced the v0.4 hardening items in
-§12.  All four conformant clients (hf-timestd, psk-recorder,
-wspr-recorder, wsprdaemon-client) retrofitted to v0.5 on 2026-05-04.
-§17 (output sinks) drafted 2026-05-07; first client retrofit
-(`wsprdaemon-client` writing `wspr.spots`) lands in the local-CH
-Phase A.
+§12.  The conformant clients (hf-timestd, psk-recorder,
+wspr-recorder) retrofitted to v0.5 on 2026-05-04.
+§17 (output sinks) drafted 2026-05-07 and revised to keep the sink
+`kind` taxonomy engine-agnostic.
 
 v0.6 adds:
 
 - **§17 (new) — output sinks.**  Symmetric counterpart to §16's
   `data_path` (input).  New `data_sinks` array per instance in
-  inventory: each entry declares `kind ∈ {file, clickhouse}`,
+  inventory: each entry declares `kind ∈ {file, service}`,
   `target`, `schema_ref`, `retention_days`, `mb_per_day`, and (for
-  CH) a `health` field.  Backwards compat is unconditional: a v0.5
-  client that publishes only `disk_writes` is auto-promoted into
-  the equivalent file-sink form.  Motivated by the local
-  ClickHouse staging tier introduced as a sigmond-managed server
-  component (see `[storage.clickhouse]` in `coordination.toml`).
+  `service` sinks) a `health` field.  Backwards compat is
+  unconditional: a v0.5 client that publishes only `disk_writes`
+  is auto-promoted into the equivalent file-sink form.  The `kind`
+  enum is deliberately engine-agnostic: the contract-relevant
+  distinction is a local file sigmond disk-budgets versus an
+  external service sigmond health-checks, not a database product.
 
 v0.5 adds:
 
@@ -52,9 +52,10 @@ v0.5 adds:
 - **§16 (new) — independent data-source clients.**  `data_path.kind`
   per instance in inventory: `radiod-ka9q-python` (Path A, default),
   `radiod-direct` (Path B, explicit obligations), `kiwisdr`, `file`,
-  `other`.  §16.3.1 covers the meta-client pattern (e.g.
-  `wsprdaemon-client`) where `kind = "file"` with
-  `details.upstream_client` names a sibling that supplies the WAVs.
+  `other`.  §16.3.1 covers the meta-client pattern (e.g. a decoder
+  that reads another recorder's WAV spool) where `kind = "file"`
+  with `details.upstream_client` names a sibling that supplies the
+  WAVs.
 - **§3 amendment.**  Inventory adds `control_socket` (per §13.1) and
   `deploy_toml_path` (per §5) per instance.
 - **§6 amendment.**  The MUST on `ka9q-python` is relaxed to SHOULD,
@@ -885,7 +886,7 @@ first client built against v0.3 from day one.  It implements §7
 (no `destination=`), §10 (log paths in inventory), and §11 (runtime
 log level) natively.
 
-**v0.5 retrofits (2026-05-04).**  All four conformant clients
+**v0.5 retrofits (2026-05-04).**  All conformant clients
 declare `data_path` (§16.3) and bumped `contract_version` to
 `"0.5"`:
 
@@ -893,10 +894,6 @@ declare `data_path` (§16.3) and bumped `contract_version` to
   declare `kind = "radiod-ka9q-python"`.  Each adds `control_socket`
   (§3 amendment + §13.1) per instance; the socket itself is
   advisory until §13's server is implemented.
-- **wsprdaemon-client** — meta-client per §16.3.1.  Each
-  `(receiver, band)` instance declares `kind = "file"` with
-  `details.upstream_client` naming `wspr-recorder` (KA9Q
-  receivers) or `wd-kiwi-record` (KIWI receivers).
 
 The first end-to-end §16.4 (Path B / `radiod-direct`) candidate is
 David Goncalves' RX888 WebSDR-style client (early discussion as of
@@ -1191,7 +1188,7 @@ client-specific debug.  Sigmond never depends on `/x/...`.
   (`jt9` / `wsjtx`) lag and PSKReporter upload queue.
 - **`wspr-recorder`** — `channels` becomes the band list,
   `decodes_15m` becomes `spots_15m`, `pipeline` is the
-  wsprdaemon-client handoff (spool depth IS the queue, so
+  downstream decoder handoff (spool depth IS the queue, so
   `queue_depth = spool.depth_files`; `last_success_age_s` is the
   newest deletion from spool, observed by inotify or stat).
 - **`hf-timestd`** — keeps its existing web API.  v0.5 adds the
@@ -1446,7 +1443,7 @@ convention:
 | Client          | Single radiod | Multi radiod (n = `SIGMOND_RADIOD_INDEX`) |
 |---|---|---|
 | psk-recorder    | `AC0G`        | `AC0G/B<n>`     (e.g. `AC0G/B1`, `AC0G/B2`) |
-| wspr-recorder*  | `AC0G`        | `AC0G/B<n>`     (* reporter lives in wsprdaemon-client) |
+| wspr-recorder   | `AC0G`        | `AC0G/B<n>`     (e.g. `AC0G/B1`, `AC0G/B2`) |
 | hfdl-recorder   | `AC0G-1`      | `AC0G-<n>`      (airframes.io requires the suffix even for single) |
 
 Sigmond does not enforce these conventions — each client picks its
@@ -1649,12 +1646,12 @@ A meta-client is a client whose own data plane is files spooled by
 control connection or KiwiSDR socket; it consumes the WAV/IQ
 stream a sibling client has already written to disk.
 
-`wsprdaemon-client` is the canonical example: each instance reads
-WAVs from `wd-ka9q-record` (which itself execs `wspr-recorder`,
-declaring `radiod-ka9q-python`) or from `wd-kiwi-record`
-(declaring `kiwisdr`), and decodes/posts them.  The radiod-side
-facts (radiod_id, multicast destination, chain delay) live on the
-upstream client's inventory, not the meta-client's.
+A decoder that reads another recorder's WAV spool is the canonical
+example: each instance reads WAVs from an upstream recorder client
+(e.g. `wspr-recorder`, declaring `radiod-ka9q-python`) and
+decodes/posts them.  The radiod-side facts (radiod_id, multicast
+destination, chain delay) live on the upstream client's inventory,
+not the meta-client's.
 
 A meta-client MUST declare `kind = "file"` per instance with
 `details.upstream_client = "<sibling-client-name>"` plus enough
@@ -1796,13 +1793,11 @@ today:
    `/var/log/<client>/`, or `/var/spool/<client>/`.  This is the
    default and the only shape every conformant client supports.
 2. **Structured-row sinks.**  A client writes structured rows to a
-   local staging tier via `sigmond.hamsci_ch.Writer.from_env()`.
-   The default backend is SQLite (`/var/lib/sigmond/sink.db`);
-   ClickHouse remains an explicit opt-in (`SIGMOND_CLICKHOUSE_URL`)
-   for hosts that need the upstream-grade columnar tier.  Rows are
-   later read by the separate `hs-uploader` library — SQLite-only —
-   and shipped to upstream destinations (wsprdaemon.org,
-   psws.eng.ua.edu, etc.).
+   local staging tier via a producer-side sink library
+   (`sigmond.hamsci_sink.Writer.from_env()`).  The backend is
+   SQLite (`/var/lib/sigmond/sink.db`).  Rows are later read by the
+   separate `hs-uploader` library and shipped to upstream
+   destinations (e.g. psws.eng.ua.edu).
 
 This section makes the surface declarative so sigmond can budget
 disk and surface backpressure in `smd diag`.
@@ -1812,17 +1807,17 @@ disk and surface backpressure in `smd diag`.
 Through v0.5, output paths were inventory-by-convention: §3's
 `disk_writes` array told sigmond about file outputs, and that was
 enough because every conformant client was file-only.  The
-introduction of a local ClickHouse staging tier (a new
-`[storage.clickhouse]` block in `coordination.toml`) creates a
+introduction of a local structured-row staging tier creates a
 second output kind that needs the same disk-budget and
 operator-visibility surface that `disk_writes` already provides.
 
-Rather than fork "files vs. CH" into two parallel inventory arrays,
-§17 unifies them under a single `data_sinks` array parametrized by
-`kind`.  This is the symmetric counterpart to §16's `data_path`
-(input).  Backwards compatibility is unconditional: a v0.5 client
-that declares only `disk_writes` is auto-promoted by sigmond into
-the equivalent `data_sinks` shape (§17.4).
+Rather than fork "files vs. service" into two parallel inventory
+arrays, §17 unifies them under a single `data_sinks` array
+parametrized by `kind`.  This is the symmetric counterpart to
+§16's `data_path` (input).  Backwards compatibility is
+unconditional: a v0.5 client that declares only `disk_writes` is
+auto-promoted by sigmond into the equivalent `data_sinks` shape
+(§17.4).
 
 #### 17.3 Self-disclosure: `data_sinks` in inventory
 
@@ -1840,7 +1835,7 @@ A v0.6 client SHOULD report `data_sinks` per instance:
       "mb_per_day":     12
     },
     {
-      "kind":           "clickhouse",
+      "kind":           "service",
       "target":         "psk.spots",
       "schema_ref":     "psk:3",
       "retention_days": 30,
@@ -1855,15 +1850,15 @@ Each entry has:
 
 | field            | type    | meaning                                                          |
 |------------------|---------|------------------------------------------------------------------|
-| `kind`           | string  | One of `file`, `clickhouse`.  Unknown kinds: see §17.6.          |
-| `target`         | string  | Path (for `file`) or `<database>.<table>` (for `clickhouse`).    |
-| `schema_ref`     | string  | `<db>:<schema_version>` for `clickhouse`; `null` for `file`.     |
+| `kind`           | string  | One of `file`, `service`.  Unknown kinds: see §17.6.             |
+| `target`         | string  | Path (for `file`) or `<database>.<table>` (for service sinks).   |
+| `schema_ref`     | string  | `<db>:<schema_version>` for service sinks; `null` for `file`.    |
 | `retention_days` | integer | How long the client expects rows/bytes to stay accessible.       |
 | `mb_per_day`     | integer | Best-effort write rate; consumed by `[disk_budget]`.             |
-| `health`         | string  | (clickhouse only) `ok`, `unreachable`, `stale-schema`, `degraded`. |
+| `health`         | string  | (service sinks only) `ok`, `unreachable`, `stale-schema`, `degraded`. |
 
 A client MAY emit multiple entries when it writes the same data to
-multiple sinks (e.g. file *and* clickhouse during a migration
+multiple sinks (e.g. file *and* service during a migration
 window).  Each entry is independent for budget accounting.
 
 #### 17.4 Backwards compatibility with `disk_writes` (v0.5)
@@ -1890,59 +1885,55 @@ alongside `data_sinks` for tools that read either; if both are
 present and disagree, sigmond logs a `warn`-level issue and prefers
 `data_sinks`.
 
-#### 17.5 Obligations for `clickhouse` sinks
+#### 17.5 Obligations for `service` sinks
 
-A client that declares a `clickhouse` sink MUST:
+A client that declares a `service` sink MUST:
 
-1. **Read connection facts from `coordination.env`.**
-   `SIGMOND_CLICKHOUSE_URL`, `SIGMOND_CLICKHOUSE_USER`,
-   `SIGMOND_CLICKHOUSE_PASSWORD_FILE`, and the per-mode
-   `SIGMOND_CLICKHOUSE_DB_<MODE>` aliases.  Direct reads of
-   `coordination.toml` are not required and not recommended.
-2. **Treat connection failure as non-fatal.**  When CH is
-   unreachable, the client MUST continue running.  How a client
-   handles in-flight rows is its own choice (queue to file
-   sidecar, drop with metric, refuse new work) but MUST be
+1. **Read connection facts from `coordination.env`.**  The backend
+   URL, credentials, and per-mode database aliases are published
+   as environment variables in `coordination.env`.  Direct reads
+   of `coordination.toml` are not required and not recommended.
+2. **Treat backend unavailability as non-fatal.**  When the
+   backend is unreachable, the client MUST continue running.  How
+   a client handles in-flight rows is its own choice (queue to
+   file sidecar, drop with metric, refuse new work) but MUST be
    reflected in the entry's `health` field.  Silent loss is a
    contract violation.
-3. **Validate `schema_ref` at startup.**  The client MUST query CH
-   for the live `<database>.<table>` column hash and compare against
-   the `schema_version` it was built with.  Mismatch sets
-   `health = "stale-schema"` and a `warn`-level `validate --json`
-   issue.
-4. **Stay no-op when CH is not configured.**  When
-   `SIGMOND_CLICKHOUSE_URL` is unset, the CH writer MUST be a
-   silent no-op.  Standalone deployments (no sigmond) MUST still
-   run; the client falls back to file-only.
-5. **Ship a schema migration directory.**  `<repo>/clickhouse/schema/`
-   contains numbered idempotent SQL files (`001_*.sql`,
-   `002_*.sql`).  Sigmond's `smd apply` runs them in order at
-   install/upgrade.  The `[clickhouse]` block in `deploy.toml`
+3. **Validate `schema_ref` at startup.**  The client MUST query
+   the live backend for the `<database>.<table>` column hash and
+   compare against the `schema_version` it was built with.
+   Mismatch sets `health = "stale-schema"` and a `warn`-level
+   `validate --json` issue.
+4. **Stay no-op when no service backend is configured.**  When the
+   `coordination.env` connection facts are absent, the service
+   writer MUST be a silent no-op.  Standalone deployments (no
+   sigmond) MUST still run; the client falls back to file-only.
+5. **Ship a schema migration directory.**  The client repo
+   contains a directory of numbered idempotent SQL files
+   (`001_*.sql`, `002_*.sql`).  Sigmond's `smd apply` runs them in
+   order at install/upgrade.  The relevant block in `deploy.toml`
    names the schema directory and the version the client expects.
 
-A client MAY use the writer-side helper `sigmond.hamsci_ch.Writer`
-to satisfy items 1–4; nothing in §17 mandates a particular library.
+A client MAY use a writer-side helper such as
+`sigmond.hamsci_sink.Writer` to satisfy items 1–4; nothing in §17
+mandates a particular library.
 
-The `wspr` database is the exception: its DDL is **vendored from
-wsprdaemon-server** and lives in the sigmond-clickhouse component
-repo, not in any individual client's `clickhouse/schema/`
-directory.  Clients that write `wspr.spots` reference the
-upstream-pinned schema by version (e.g.
-`schema_ref = "wsprdaemon:1"`); they do not own the migrations.
-This keeps the local WSPR rows byte-identical to the rows
-wsprdaemon-server expects, so `hs-uploader` can ship them to
-wsprdaemon.org without transformation.
+A client MAY also reference a schema it does not itself own — one
+whose DDL is vendored from an external source — by citing the
+upstream-pinned schema version in `schema_ref` rather than shipping
+its own migrations.  In that case the client does not own the
+migration directory; it only declares the version it expects.
 
 #### 17.6 Sigmond's view
 
 Sigmond uses `data_sinks` for:
 
 - **Disk budget accounting.**  Sums `mb_per_day` across all sinks,
-  grouped by physical filesystem (for file sinks) and by ClickHouse
-  database (for CH sinks); compares against `[disk_budget]`
+  grouped by physical filesystem (for file sinks) and by service
+  backend (for service sinks); compares against `[disk_budget]`
   thresholds.
 - **`smd diag` annotations.**  Surfaces `health = "unreachable"`
-  or `"stale-schema"` for CH sinks; surfaces missing-path or
+  or `"stale-schema"` for service sinks; surfaces missing-path or
   permission-denied for file sinks.
 - **Status output.**  `smd status <client>` may list one row per
   sink.
@@ -1950,8 +1941,9 @@ Sigmond uses `data_sinks` for:
 Sigmond MUST treat unknown `kind` values as opaque — it accepts
 them (forwards-compatibility for future sink kinds), counts them
 in `mb_per_day`, but does not enforce kind-specific obligations.
-Sigmond MUST NOT enforce that any particular client opt into CH
-sinks; the file path is always sufficient for v0.6 conformance.
+Sigmond MUST NOT enforce that any particular client opt into
+`service` sinks; the file path is always sufficient for v0.6
+conformance.
 
 ## What sigmond promises in return
 
@@ -1990,9 +1982,7 @@ sinks; the file path is always sufficient for v0.6 conformance.
   operationally correct — `ka9q-python` honors an explicit destination —
   but should remove the call-site when upgrading.
 - **Clients requiring v0.3 retrofit:** `hf-timestd` (§7 simplification,
-  §10, §11 — see §9 retrofit checklist above).  `wsprdaemon-client`
-  needs the full v0.2 + v0.3 retrofit (contract subcommands, deploy.toml,
-  logging).
+  §10, §11 — see §9 retrofit checklist above).
 - **v0.3 → v0.4** adds §12 (validate hardening and deploy safety).
   Three MUST items: §12.1 entry-point reachability, §12.2 SSRC
   uniqueness, §12.3 `config_path` in inventory/validate output.
@@ -2004,8 +1994,7 @@ sinks; the file path is always sufficient for v0.6 conformance.
 - **Clients requiring v0.4 retrofit:** `psk-recorder` v0.1.1 (add
   §12.2 uniqueness check to `validate`, §12.3 `config_path` field —
   the Phase 1 deploy proved both items live), `hf-timestd` (same two
-  items, bundled with the v0.3 retrofit work).  `wsprdaemon-client`
-  targets v0.4 directly.
+  items, bundled with the v0.3 retrofit work).
 - `psk-recorder` was built greenfield against v0.3; v0.4 additions
   are a minor-release retrofit, not a fresh rewrite.
 - **v0.4 → v0.5** adds §5.0–§5.5 (lifecycle scope and unit
@@ -2020,21 +2009,19 @@ sinks; the file path is always sufficient for v0.6 conformance.
   `control_socket` or `deploy_toml_path` as "use the §13.1 / §12.5
   canonical default."  Inventory mismatch (v0.4 client on v0.5
   sigmond) emits a warn-level issue, not a hard fail.
-- **Clients requiring v0.5 retrofit:** all four conformant clients
+- **Clients requiring v0.5 retrofit:** all conformant clients
   retrofitted on 2026-05-04 — `hf-timestd`, `psk-recorder`,
   `wspr-recorder` declare `data_path = {kind:
-  "radiod-ka9q-python", radiod_id: ...}`; `wsprdaemon-client`
-  declares `kind = "file"` with `details.upstream_client` per
-  §16.3.1.  No client has yet implemented §13's control socket
-  (advisory `control_socket` paths are published; the server
-  itself ships in subsequent releases per the §13.1 transport
-  spec).
-- **v0.5 → v0.6** adds §17 (output sinks).  v0.5 clients pass
-  validation on a v0.6 sigmond unchanged; sigmond auto-promotes a
-  client's `disk_writes` array (§3) into the equivalent file-only
-  `data_sinks` shape per §17.4.  Only clients that opt into
-  ClickHouse sinks need to declare `data_sinks` explicitly and bump
-  `contract_version` to `0.6`.  The first client to do so is
-  `wsprdaemon-client` (Phase A canary, writing `wspr.spots` to a
-  local CH staging tier whose DDL is vendored from
-  wsprdaemon-server).
+  "radiod-ka9q-python", radiod_id: ...}`.  No client has yet
+  implemented §13's control socket (advisory `control_socket`
+  paths are published; the server itself ships in subsequent
+  releases per the §13.1 transport spec).
+- **v0.5 → v0.6** adds §17 (engine-agnostic output sinks).  v0.5
+  clients pass validation on a v0.6 sigmond unchanged; sigmond
+  auto-promotes a client's `disk_writes` array (§3) into the
+  equivalent file-only `data_sinks` shape per §17.4.  Only clients
+  that opt into `service` sinks need to declare `data_sinks`
+  explicitly and bump `contract_version` to `0.6`.  §17 was
+  subsequently revised in place to make the `kind` enum
+  engine-agnostic: a sink is either a local `file` or an external
+  `service`, with no database product named in the contract.

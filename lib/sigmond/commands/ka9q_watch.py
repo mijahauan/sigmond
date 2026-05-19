@@ -137,7 +137,6 @@ _VENV_KA9Q_GLOBS = [
     "/opt/hf-timestd/venv/lib/python*/site-packages/ka9q/compat.py",
     "/opt/psk-recorder/venv/lib/python*/site-packages/ka9q/compat.py",
     "/opt/wspr-recorder/venv/lib/python*/site-packages/ka9q/compat.py",
-    "/opt/wsprdaemon-client/venv/lib/python*/site-packages/ka9q/compat.py",
 ]
 
 

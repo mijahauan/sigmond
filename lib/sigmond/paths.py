@@ -17,6 +17,5 @@ ENVIRONMENT_CACHE   = SIGMOND_STATE / 'environment-cache.json'
 SDR_LABELS_PATH     = SIGMOND_STATE / 'sdr-labels.toml'
 SECRETS_ENV         = SIGMOND_CONF / 'secrets.env'
 
-WSPRDAEMON_CONF     = Path('/etc/wsprdaemon/wsprdaemon.conf')
 HF_TIMESTD_CONF     = Path('/etc/hf-timestd/timestd-config.toml')
 RADIO_CONF_DIR      = Path('/etc/radio')

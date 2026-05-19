@@ -1,7 +1,7 @@
-"""Tests for sigmond.commands.verifier_report_psk (Phase 2 PR 7).
+"""Tests for sigmond.commands.verifier_report_psk.
 
-We don't touch the network or ClickHouse — query_psk_server's HTTP
-call is faked, and the local sink db is a temp sqlite seeded inline.
+The local sink db is a temp sqlite seeded inline; there is no network
+or upstream dependency — the report audits the local queue only.
 """
 from __future__ import annotations
 
@@ -16,13 +16,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from sigmond.commands.verifier_report_psk import (
-    LocalRow, UpstreamResult, Cohorts, CycleStats,
-    SpotKey, _row_to_key, read_local_rows,
-    classify, cadence_stats, _split_userinfo,
-    _build_psk_query, _resolve_urls,
+    LocalRow, _row_to_key, read_local_rows,
+    classify, cadence_stats, oldest_age_sec,
     _parse_window, _detect_default_rx_call,
     DEFAULT_IN_FLIGHT_WINDOW_SEC,
-    DEFAULT_WD_URLS,
 )
 
 
@@ -135,8 +132,6 @@ class TestReadLocalRows(unittest.TestCase):
         self.tmp.close()
         self.path = self.tmp.name
         # 3 forward=true rows, 1 forward=false row, all within window.
-        # queued_at intentionally non-uniform so the cohort split is
-        # exercised by classify() later.
         rows = [
             ("psk", "spots", 2, _payload(time="2026-05-18T14:30:15Z",
                                           tx_call="K1ABC"),
@@ -215,7 +210,7 @@ class TestReadLocalRows(unittest.TestCase):
         self.assertIn("K9XX", {r.tx_call for r in rows})
 
 
-# ── classify: cohort assignment ─────────────────────────────────────────────
+# ── classify: queue-age cohort assignment ───────────────────────────────────
 
 class TestClassify(unittest.TestCase):
 
@@ -226,57 +221,66 @@ class TestClassify(unittest.TestCase):
             tx_call=tx, frequency=14_074_580,
         )
 
-    def test_delivered_when_in_upstream(self):
+    def test_in_flight_when_recently_queued(self):
         now = datetime(2026, 5, 18, 14, 35, tzinfo=UTC)
-        rows = [self._row(key_epoch=1747577415, tx="K1ABC",
-                          queued_at=now - timedelta(minutes=10))]
-        upstream = frozenset({(1747577415, "ft8", "K1ABC", 14_074_580)})
-        cohorts = classify(rows, upstream, now=now)
-        self.assertEqual(len(cohorts.delivered), 1)
-        self.assertEqual(len(cohorts.lost), 0)
-        self.assertEqual(len(cohorts.in_flight), 0)
-
-    def test_in_flight_when_recent_and_absent(self):
-        now = datetime(2026, 5, 18, 14, 35, tzinfo=UTC)
-        # queued just now; not in upstream — within in-flight window.
         rows = [self._row(key_epoch=1747577415, tx="K1ABC",
                           queued_at=now - timedelta(seconds=30))]
-        cohorts = classify(rows, frozenset(), now=now)
+        cohorts = classify(rows, now=now)
         self.assertEqual(len(cohorts.in_flight), 1)
-        self.assertEqual(len(cohorts.lost), 0)
+        self.assertEqual(len(cohorts.stale), 0)
 
-    def test_lost_when_old_and_absent(self):
+    def test_stale_when_queued_past_window(self):
         now = datetime(2026, 5, 18, 14, 35, tzinfo=UTC)
-        # queued well outside the in-flight window; not in upstream.
         rows = [self._row(key_epoch=1747577415, tx="K1ABC",
-                          queued_at=now - timedelta(seconds=DEFAULT_IN_FLIGHT_WINDOW_SEC + 60))]
-        cohorts = classify(rows, frozenset(), now=now)
-        self.assertEqual(len(cohorts.lost), 1)
+                          queued_at=now - timedelta(
+                              seconds=DEFAULT_IN_FLIGHT_WINDOW_SEC + 60))]
+        cohorts = classify(rows, now=now)
+        self.assertEqual(len(cohorts.stale), 1)
         self.assertEqual(len(cohorts.in_flight), 0)
 
     def test_custom_in_flight_window(self):
-        """Operator can shrink the window so 'should have arrived by now'
-        kicks in faster on a quiet host."""
+        """Operator can shrink the window so a backlog is flagged faster
+        on a quiet host."""
         now = datetime(2026, 5, 18, 14, 35, tzinfo=UTC)
         rows = [self._row(key_epoch=1747577415, tx="K1ABC",
                           queued_at=now - timedelta(seconds=120))]
-        # Default (300s): in_flight. Custom 60s: lost.
-        c_default = classify(rows, frozenset(), now=now)
-        c_tight   = classify(rows, frozenset(), now=now,
-                             in_flight_window_sec=60)
+        # Default (300s): in_flight. Custom 60s: stale.
+        c_default = classify(rows, now=now)
+        c_tight   = classify(rows, now=now, in_flight_window_sec=60)
         self.assertEqual(len(c_default.in_flight), 1)
-        self.assertEqual(len(c_tight.lost), 1)
+        self.assertEqual(len(c_tight.stale), 1)
 
     def test_classify_rejects_none_in_flight_sec(self):
         """A None in_flight_window_sec must blow up immediately, not
         silently — caller dispatch should resolve None → module default.
-        Regression for the argparse-None-as-default bug observed during
-        B4-100 rollout 2026-05-18.
         """
         now = datetime(2026, 5, 18, 14, 35, tzinfo=UTC)
         rows = [self._row(key_epoch=1, tx="K", queued_at=now)]
         with self.assertRaises(TypeError):
-            classify(rows, frozenset(), now=now, in_flight_window_sec=None)
+            classify(rows, now=now, in_flight_window_sec=None)
+
+
+# ── oldest_age_sec ──────────────────────────────────────────────────────────
+
+class TestOldestAge(unittest.TestCase):
+
+    def _row(self, queued_at):
+        return LocalRow(
+            key=(1, "ft8", "A", 14_074_580), queued_at=queued_at,
+            rx_sign="AC0G/B1", mode="ft8", tx_call="A", frequency=14_074_580,
+        )
+
+    def test_none_when_empty(self):
+        now = datetime(2026, 5, 18, 14, 35, tzinfo=UTC)
+        self.assertIsNone(oldest_age_sec([], now=now))
+
+    def test_age_of_oldest_row(self):
+        now = datetime(2026, 5, 18, 14, 35, tzinfo=UTC)
+        rows = [
+            self._row(now - timedelta(seconds=30)),
+            self._row(now - timedelta(seconds=600)),
+        ]
+        self.assertEqual(oldest_age_sec(rows, now=now), 600)
 
 
 # ── cadence_stats ───────────────────────────────────────────────────────────
@@ -310,61 +314,6 @@ class TestCadenceStats(unittest.TestCase):
         self.assertEqual(ft8.cycles_with_data, 1)
         self.assertEqual(ft8.cycles_zero, 3)
         self.assertEqual(ft8.total_spots, 4)
-
-
-# ── _split_userinfo + _build_psk_query + _resolve_urls ──────────────────────
-
-class TestUrlHelpers(unittest.TestCase):
-
-    def test_split_userinfo_present(self):
-        clean, user, pw = _split_userinfo("http://u:p@wd10.example.org")
-        self.assertEqual(clean, "http://wd10.example.org")
-        self.assertEqual(user, "u")
-        self.assertEqual(pw, "p")
-
-    def test_split_userinfo_absent(self):
-        clean, user, pw = _split_userinfo("http://wd10.example.org")
-        self.assertEqual(clean, "http://wd10.example.org")
-        self.assertIsNone(user)
-        self.assertIsNone(pw)
-
-    def test_split_userinfo_preserves_port(self):
-        clean, user, pw = _split_userinfo("http://u:p@wd10.example.org:8123")
-        self.assertEqual(clean, "http://wd10.example.org:8123")
-
-    def test_build_psk_query_includes_reporter(self):
-        sql = _build_psk_query("AC0G/B1", 30)
-        self.assertIn("rx_sign='AC0G/B1'", sql)
-        self.assertIn("INTERVAL 30 MINUTE", sql)
-        self.assertIn("now('UTC')", sql)  # TZ-safe
-        self.assertIn("FROM psk.spots", sql)
-
-    def test_build_psk_query_omits_reporter_when_none(self):
-        sql = _build_psk_query(None, 60)
-        self.assertNotIn("rx_sign=", sql)
-
-    def test_resolve_urls_arg_wins(self):
-        urls = _resolve_urls("http://a,http://b")
-        self.assertEqual(urls, ["http://a", "http://b"])
-
-    def test_resolve_urls_strips_blanks(self):
-        urls = _resolve_urls("http://a , ,http://b,")
-        self.assertEqual(urls, ["http://a", "http://b"])
-
-    def test_resolve_urls_default(self):
-        # No arg, clear env so the default is what comes back.
-        import os as _os
-        original = _os.environ.pop("WSPRDAEMON_VERIFY_URLS", None)
-        try:
-            urls = _resolve_urls(None)
-            self.assertEqual(urls, [
-                "http://wd10.wsprdaemon.org",
-                "http://wd20.wsprdaemon.org",
-                "http://wd30.wsprdaemon.org",
-            ])
-        finally:
-            if original is not None:
-                _os.environ["WSPRDAEMON_VERIFY_URLS"] = original
 
 
 # ── _detect_default_rx_call ─────────────────────────────────────────────────

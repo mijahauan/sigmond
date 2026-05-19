@@ -26,24 +26,17 @@ class TestLoadCatalog:
     def test_repo_default_loads(self):
         entries = load_catalog(REPO_CATALOG)
         assert set(entries.keys()) == {
-            'radiod', 'clickhouse',
+            'radiod',
             'wspr-recorder', 'psk-recorder', 'hf-timestd',
-            'wsprdaemon-client',
+            'mag-recorder',
         }
-
-    def test_clickhouse_server_entry(self):
-        entries = load_catalog(REPO_CATALOG)
-        ch = entries['clickhouse']
-        assert ch.kind == 'server'
-        assert ch.contract == '0.6'
-        assert ch.start_priority == 50
 
     def test_entry_fields_populated(self):
         entries = load_catalog(REPO_CATALOG)
         psk = entries['psk-recorder']
         assert psk.name == 'psk-recorder'
         assert psk.kind == 'client'
-        assert psk.contract == '0.5'
+        assert psk.contract == '0.6'
         assert psk.uses == ('ka9q-python',)
         assert psk.install_script == '/opt/git/sigmond/psk-recorder/scripts/install.sh'
         assert 'FT4' in psk.description or 'FT8' in psk.description
@@ -136,7 +129,6 @@ class TestAliasResolution:
         entries = load_catalog(REPO_CATALOG)
         aliases = build_alias_map(entries)
         assert aliases['grape'] == 'hf-timestd'
-        assert aliases['wspr'] == 'wsprdaemon-client'
         assert 'psk-recorder' not in aliases
 
     def test_resolve_name_canonical_passthrough(self):
@@ -177,7 +169,6 @@ class TestAliasResolution:
     def test_topology_alias_field_loaded(self):
         entries = load_catalog(REPO_CATALOG)
         assert entries['hf-timestd'].topology_alias == 'grape'
-        assert entries['wsprdaemon-client'].topology_alias == 'wspr'
         assert entries['psk-recorder'].topology_alias is None
 
 

@@ -5,12 +5,9 @@
 # that component.  Set enabled = false to skip a component entirely.
 #
 # Component names should match the catalog (etc/catalog.toml).
-# Legacy aliases (grape, wspr) are accepted but deprecated.
+# The legacy alias grape (→ hf-timestd) is accepted but deprecated.
 
 [sigmond]
-# Absolute path to the wsprdaemon-client source tree (legacy install path).
-wsprdaemon_client = "/home/wsprdaemon/wsprdaemon-client"
-
 # Where to install smd itself (must be in PATH)
 smd_bin = "/usr/local/sbin/smd"
 
@@ -51,10 +48,6 @@ description = "FT4/FT8 spot recorder for PSKReporter"
 [component.wspr-recorder]
 enabled = false
 description = "WSPR/FST4W audio recorder (period-aligned WAVs)"
-
-[component.wsprdaemon-client]
-enabled = true
-description = "WSPR decoder + poster + uploader (wsprd + jt9 --fst4w)"
 
 [component.ka9q-web]
 enabled = true

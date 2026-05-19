@@ -1,71 +1,56 @@
-"""`smd verifier report --target psk` — round-trip verification of
-psk.spots rows we sent via the wsprdaemon-tar transport.
+"""`smd verifier report --target psk` — local-sink audit of the
+FT8/FT4 spot forwarding queue.
 
-The Phase 2 forwarding path is:
+The forwarding path is:
 
-  psk-recorder ch_tailer  →  /var/lib/sigmond/sink.db (target_db='psk')
-                          →  hs-uploader wsprdaemon-tar transport
-                          →  wd{10,20,30}  psk.spots ClickHouse table
-                          →  gw1-elected pskreporter_forwarder
-                          →  pskreporter.info
+  psk-recorder  →  /var/lib/sigmond/sink.db (target_db='psk')
+                →  hs-uploader  →  upstream PSKReporter path
 
-PR 7 verifies the second arrow: did the rows we wrote locally
-actually land in at least one wd*'s ``psk.spots``?  That's the
-hop we own end-to-end (the producer is sigmond's local SQLite,
-the consumer is wsprdaemon-server's ClickHouse).  The third
-arrow's success — actual PSKReporter ingestion — is out of
-band: there's no scraping path back from pskreporter.info, and
-PSKReporter dedups so retries don't compound.
+This report audits the hop sigmond owns: the local SQLite sink.
+`hs-uploader` drains `pending_uploads` in FIFO order and deletes each
+row once it has been shipped upstream — so a row's *presence* in the
+queue means "not yet forwarded", and its *age* is the signal:
 
-Three operator-facing cohorts, matching the WSPR-side report:
+  * in_flight — queued recently; the uploader is expected to still be
+                working through it.  Normal.
+  * stale     — queued longer ago than the in-flight window and STILL
+                in the local queue.  The uploader is behind or failing
+                — this is the operator's investigation cohort.
 
-  * delivered — local row appears in at least one wd*.psk.spots
-  * lost      — local row was queued > in-flight-window minutes
-                ago, still absent from every wd*
-  * in_flight — local row was queued recently; still inside the
-                expected delivery window (tar cadence + ingest lag)
+There is no "delivered" cohort: a delivered row has been deleted from
+the queue, so the local sink cannot see it.  This report makes no
+claim about upstream PSKReporter ingestion — that is out of band.
 
-Plus cadence: did we miss any expected FT decode cycles?  FT8
-cycles are 15 s, FT4 cycles 7.5 s; in a healthy minute we expect
-4 FT8 cycles and 8 FT4 cycles.  A sudden zero-count cycle is a
-recorder hiccup; a long run of zeros is the symptom that radiod
-or psk-recorder fell over.
+Plus cadence: did we miss any expected FT decode cycles?  FT8 cycles
+are 15 s, FT4 cycles 7.5 s; in a healthy minute we expect 4 FT8
+cycles and 8 FT4 cycles.  A sudden zero-count cycle is a recorder
+hiccup; a long run of zeros is the symptom that radiod or
+psk-recorder fell over.
 """
 from __future__ import annotations
 
-import base64
 import json
 import logging
-import os
 import re
 import sqlite3
 import sys
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 DEFAULT_SINK_DB = "/var/lib/sigmond/sink.db"
-DEFAULT_WD_URLS = (
-    "http://wd10.wsprdaemon.org,"
-    "http://wd20.wsprdaemon.org,"
-    "http://wd30.wsprdaemon.org"
-)
-DEFAULT_IN_FLIGHT_WINDOW_SEC = 300         # 5 min — covers tar cadence + ingest
-DEFAULT_HTTP_TIMEOUT_SEC = 5
+# A row queued more recently than this is still "in flight" — the
+# uploader is expected to be working through it.  Older rows that are
+# still in the queue are flagged stale.
+DEFAULT_IN_FLIGHT_WINDOW_SEC = 300         # 5 min
 
 
-# Per-spot identity that's robust across the wire:
-#   * `epoch` is floored to the second (FT timing carries seconds; rounding
-#     to the minute like WSPR would collapse multiple decodes per cycle)
+# Per-spot identity:
+#   * `epoch` floored to the second (FT timing carries seconds)
 #   * `mode` lowercased, `tx_call` uppercased
 #   * `frequency` in Hz (integer)
 SpotKey = Tuple[int, str, str, int]
@@ -86,7 +71,7 @@ def _parse_window(spec: str) -> timedelta:
     return timedelta(**{unit: n})
 
 
-# ── Local-side: read rows from sink.db ──────────────────────────────────────
+# ── Read rows from sink.db ───────────────────────────────────────────────────
 
 @dataclass
 class LocalRow:
@@ -102,8 +87,7 @@ def _row_to_key(payload: dict) -> Optional[SpotKey]:
     """Build a SpotKey from a psk.spots payload_json.
 
     Returns None when essential fields are missing — those rows aren't
-    forwardable (they wouldn't have landed in upstream psk.spots either)
-    and including them would inflate the "lost" cohort spuriously.
+    forwardable and including them would inflate the cohorts spuriously.
     """
     try:
         ts_raw  = payload.get("time")
@@ -138,12 +122,14 @@ def read_local_rows(
     rx_sign: Optional[str] = None,
     forward_only: bool = True,
 ) -> List[LocalRow]:
-    """Read rows the local sink wrote into pending_uploads for psk.spots.
+    """Read psk.spots rows still queued in the local sink's pending_uploads.
+
+    Every row this returns is, by definition, not yet forwarded — the
+    uploader deletes rows on successful delivery.
 
     `forward_only`: when True (default), include only rows the producer
-    flagged ``forward_to_pskreporter=true``.  That's the cohort PR 7 is
-    actually verifying — the ``both`` / ``direct`` modes don't go via
-    wd* and we'd over-count "lost" otherwise.
+    flagged ``forward_to_pskreporter=true`` — the ``both`` / ``direct``
+    modes don't go through this queue at all.
     """
     sql = (
         "SELECT payload_json, queued_at "
@@ -171,6 +157,8 @@ def read_local_rows(
             qdt = datetime.fromisoformat(queued_at.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
             qdt = datetime.now(timezone.utc)
+        if qdt.tzinfo is None:
+            qdt = qdt.replace(tzinfo=timezone.utc)
         out.append(LocalRow(
             key=key, queued_at=qdt,
             rx_sign=str(payload.get("rx_sign") or ""),
@@ -179,171 +167,46 @@ def read_local_rows(
     return out
 
 
-# ── Upstream-side: query wd*.psk.spots over ClickHouse HTTP ─────────────────
-
-@dataclass
-class UpstreamResult:
-    url:      str        # userinfo stripped — safe to log
-    keys:     Set[SpotKey] = field(default_factory=set)
-    max_time: Optional[datetime] = None
-    rtt_ms:   int = 0
-    error:    Optional[str] = None
-
-
-def _split_userinfo(url: str) -> Tuple[str, Optional[str], Optional[str]]:
-    """Strip a ``user:pass@`` segment from an HTTP URL.
-
-    Mirrors wspr-recorder's wsprdaemon_verifier helper so the report
-    can take its --urls in the same form as the in-recorder thread.
-    """
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.username is None:
-        return url, None, None
-    user = urllib.parse.unquote(parsed.username)
-    password = (urllib.parse.unquote(parsed.password)
-                if parsed.password is not None else "")
-    netloc = parsed.hostname or ""
-    if parsed.port is not None:
-        netloc = f"{netloc}:{parsed.port}"
-    clean = urllib.parse.urlunsplit(
-        (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment),
-    )
-    return clean, user, password
-
-
-def _build_psk_query(reporter: Optional[str], window_min: int) -> str:
-    where_parts = [
-        f"time>=now('UTC')-INTERVAL {int(window_min)} MINUTE",
-    ]
-    if reporter:
-        # rx_sign is taken from local config (not user input); ClickHouse
-        # allows single quotes around string literals.
-        where_parts.append(f"rx_sign='{reporter}'")
-    where = " AND ".join(where_parts)
-    return (
-        "SELECT toUnixTimestamp(time) AS t, "
-        "       lower(mode) AS mode, "
-        "       upper(tx_call) AS tx, "
-        "       frequency "
-        f"FROM psk.spots "
-        f"WHERE {where} "
-        "FORMAT TabSeparated"
-    )
-
-
-def query_psk_server(
-    url: str,
-    *,
-    reporter: Optional[str],
-    window_min: int,
-    timeout_sec: int = DEFAULT_HTTP_TIMEOUT_SEC,
-) -> UpstreamResult:
-    """Issue one read against a wd*'s ``psk.spots`` table.
-
-    Returns the per-server set of SpotKey tuples and the most-recent
-    time observed (so the caller can detect a stale server even when
-    its set is non-empty).  Failures are recorded on the result rather
-    than raised — one bad server shouldn't blank the whole report.
-    """
-    clean_url, user, password = _split_userinfo(url)
-    res = UpstreamResult(url=clean_url)
-    sql = _build_psk_query(reporter, window_min)
-    qs = urllib.parse.urlencode({"query": sql})
-    full_url = f"{clean_url}/?{qs}"
-    req = urllib.request.Request(full_url)
-    if user is not None:
-        token = base64.b64encode(f"{user}:{password}".encode()).decode()
-        req.add_header("Authorization", f"Basic {token}")
-    t0 = time.monotonic()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as r:
-            body = r.read().decode("utf-8", errors="replace").strip()
-    except (urllib.error.URLError, OSError) as exc:
-        res.error = str(exc)
-        return res
-    res.rtt_ms = int((time.monotonic() - t0) * 1000)
-
-    max_epoch = 0
-    for line in body.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 4:
-            continue
-        try:
-            epoch = int(parts[0])
-            mode  = parts[1].lower()
-            tx    = parts[2].upper()
-            freq  = int(parts[3])
-        except ValueError:
-            continue
-        res.keys.add((epoch, mode, tx, freq))
-        if epoch > max_epoch:
-            max_epoch = epoch
-    if max_epoch:
-        res.max_time = datetime.fromtimestamp(max_epoch, tz=timezone.utc)
-    return res
-
-
-def query_all(
-    urls: Iterable[str],
-    *,
-    reporter: Optional[str],
-    window_min: int,
-    timeout_sec: int = DEFAULT_HTTP_TIMEOUT_SEC,
-) -> List[UpstreamResult]:
-    """Fan out one round-trip per server in parallel.  Order of the
-    returned list mirrors the input order so the operator's diff is
-    stable across runs.
-    """
-    urls = list(urls)
-    with ThreadPoolExecutor(max_workers=max(1, len(urls))) as ex:
-        futs = [ex.submit(query_psk_server, u,
-                          reporter=reporter, window_min=window_min,
-                          timeout_sec=timeout_sec)
-                for u in urls]
-        return [f.result() for f in futs]
-
-
 # ── Cohort assignment ────────────────────────────────────────────────────────
 
 @dataclass
 class Cohorts:
-    delivered: List[LocalRow] = field(default_factory=list)
-    lost:      List[LocalRow] = field(default_factory=list)
     in_flight: List[LocalRow] = field(default_factory=list)
+    stale:     List[LocalRow] = field(default_factory=list)
 
 
 def classify(
     local_rows: List[LocalRow],
-    upstream_union: FrozenSet[SpotKey],
     *,
     now: datetime,
     in_flight_window_sec: int = DEFAULT_IN_FLIGHT_WINDOW_SEC,
 ) -> Cohorts:
-    """Bucket each local row into delivered / lost / in_flight.
+    """Bucket each queued row into in_flight / stale by queue age.
 
-    A row is *delivered* iff its SpotKey appears in at least one wd*'s
-    upstream set — the union over all responding servers.  The wsprdaemon
-    tars usually fan out to multiple wd servers, so success on any single
-    one is enough.
+    A row is *in_flight* when it was queued more recently than
+    `in_flight_window_sec` ago — the uploader is expected to still be
+    working through it.
 
-    A row is *in-flight* when it was queued more recently than
-    `in_flight_window_sec` ago and isn't in the upstream union — we
-    don't yet expect it to be there.
-
-    A row is *lost* when it was queued earlier than the window and
-    still isn't in the upstream union.  This is the operator's primary
-    investigation cohort.
+    A row is *stale* when it was queued earlier than that window and is
+    still sitting in the local queue — the uploader is behind or
+    failing.  This is the operator's primary investigation cohort.
     """
     cutoff = now - timedelta(seconds=in_flight_window_sec)
     c = Cohorts()
     for row in local_rows:
-        if row.key in upstream_union:
-            c.delivered.append(row)
-        elif row.queued_at >= cutoff:
+        if row.queued_at >= cutoff:
             c.in_flight.append(row)
         else:
-            c.lost.append(row)
+            c.stale.append(row)
     return c
+
+
+def oldest_age_sec(local_rows: List[LocalRow], *, now: datetime) -> Optional[int]:
+    """Age, in seconds, of the oldest row still in the queue (or None)."""
+    if not local_rows:
+        return None
+    oldest = min(r.queued_at for r in local_rows)
+    return max(0, int((now - oldest).total_seconds()))
 
 
 # ── Cadence ─────────────────────────────────────────────────────────────────
@@ -374,9 +237,9 @@ def cadence_stats(
     cycle length.  We bucket each local_row's `epoch` to its cycle, then
     count distinct buckets per mode.
 
-    Reported per-mode so the operator can see a partial outage that hit
-    only FT4 (radiod restart between ft4 cycles, etc.) without summing
-    away the asymmetry.
+    Note: because the uploader deletes rows on delivery, a long window
+    only sees the cycles whose rows are still queued — cadence is most
+    meaningful over a window close to the in-flight horizon.
     """
     out: List[CycleStats] = []
     s_epoch = int(since.timestamp())
@@ -404,46 +267,47 @@ def cadence_stats(
 
 # ── Rendering ───────────────────────────────────────────────────────────────
 
+def _fmt_age(sec: Optional[int]) -> str:
+    if sec is None:
+        return "-"
+    if sec < 90:
+        return f"{sec}s"
+    if sec < 5400:
+        return f"{sec // 60}m"
+    return f"{sec // 3600}h"
+
+
 def _format_summary(
     *,
     window_label: str,
     rx_call: Optional[str],
     n_local: int,
     cohorts: Cohorts,
-    upstream: List[UpstreamResult],
+    oldest_sec: Optional[int],
 ) -> List[str]:
     out = []
     out.append(
         f"window: last {window_label}   "
-        f"reporter: {rx_call or '(all)'}   target: psk.spots"
+        f"reporter: {rx_call or '(all)'}   target: local psk queue"
     )
     out.append("")
     if not n_local:
-        out.append("local rows queued for forwarding in window: 0")
-        out.append("  (nothing to verify — check WSPRDAEMON_INGEST_PSK / "
-                   "PSK_DELIVERY_MODE on this host)")
+        out.append("psk rows in the local forwarding queue: 0")
+        out.append("  (queue empty — either nothing decoded in window, or "
+                   "hs-uploader has drained it; check PSK_DELIVERY_MODE)")
     else:
-        d, l, f = (len(cohorts.delivered), len(cohorts.lost),
-                   len(cohorts.in_flight))
-        dp = 100.0 * d / n_local
-        lp = 100.0 * l / n_local
+        f, s = len(cohorts.in_flight), len(cohorts.stale)
         fp = 100.0 * f / n_local
-        out.append(f"local rows queued for forwarding: {n_local}")
-        out.append(f"  delivered: {d:6d}  ({dp:5.1f}%)  "
-                   "in at least one wd*.psk.spots")
-        out.append(f"  lost:      {l:6d}  ({lp:5.1f}%)  "
-                   "queued > in-flight window, still absent everywhere")
+        sp = 100.0 * s / n_local
+        out.append(f"psk rows still queued for forwarding: {n_local}")
         out.append(f"  in_flight: {f:6d}  ({fp:5.1f}%)  "
-                   "still inside the expected delivery window")
-    out.append("")
-    out.append("upstream servers:")
-    for r in upstream:
-        if r.error:
-            out.append(f"  {r.url:50s}  ERROR: {r.error}")
-        else:
-            mt = r.max_time.isoformat(timespec='seconds') if r.max_time else '-'
-            out.append(f"  {r.url:50s}  rows={len(r.keys):6d}  "
-                       f"max_time={mt}  rtt={r.rtt_ms}ms")
+                   "queued recently — uploader expected to be working it")
+        out.append(f"  stale:     {s:6d}  ({sp:5.1f}%)  "
+                   "queued past the in-flight window, still not forwarded")
+        out.append(f"  oldest queued row: {_fmt_age(oldest_sec)} ago")
+        if s:
+            out.append("  → stale rows present: hs-uploader is behind or "
+                       "failing — check its journal")
     return out
 
 
@@ -463,15 +327,15 @@ def _format_cadence(stats: List[CycleStats]) -> List[str]:
     return out
 
 
-def _format_lost(cohort: List[LocalRow], cap: int = 50) -> List[str]:
+def _format_stale(cohort: List[LocalRow], cap: int = 50) -> List[str]:
     out = []
     rows = sorted(cohort, key=lambda r: (r.key[0], r.tx_call))
     n = len(rows)
     if cap and n > cap:
-        out.append(f"lost spots ({n} — showing first {cap} by spot time):")
+        out.append(f"stale spots ({n} — showing first {cap} by spot time):")
         rows = rows[:cap]
     else:
-        out.append(f"lost spots ({n}):")
+        out.append(f"stale spots ({n}):")
     for r in rows:
         ts = datetime.fromtimestamp(r.key[0], tz=timezone.utc) \
                   .strftime("%H:%M:%S")
@@ -481,23 +345,6 @@ def _format_lost(cohort: List[LocalRow], cap: int = 50) -> List[str]:
             f"queued={r.queued_at.strftime('%H:%M:%S')}"
         )
     return out
-
-
-# ── Default URL resolution ──────────────────────────────────────────────────
-
-def _resolve_urls(arg_value: Optional[str]) -> List[str]:
-    """Pick the source for --urls in priority order:
-
-      1. --urls explicit flag
-      2. WSPRDAEMON_VERIFY_URLS env var (shared with wspr-recorder's verifier)
-      3. DEFAULT_WD_URLS
-
-    Empty entries are skipped so a trailing comma in the env var doesn't
-    produce a zero-host probe.
-    """
-    raw = arg_value or os.environ.get("WSPRDAEMON_VERIFY_URLS") \
-        or DEFAULT_WD_URLS
-    return [u.strip() for u in raw.split(",") if u.strip()]
 
 
 # ── Detect default rx_call ──────────────────────────────────────────────────
@@ -565,20 +412,14 @@ def cmd_verifier_report_psk(args) -> int:
         local_rows = read_local_rows(conn,
                                      since_iso=since_iso, rx_sign=rx_call)
 
-        urls = _resolve_urls(getattr(args, "psk_urls", None))
-        window_min = max(1, int(window.total_seconds() // 60))
-        upstream = query_all(urls, reporter=rx_call, window_min=window_min)
-        upstream_union: Set[SpotKey] = set()
-        for r in upstream:
-            upstream_union |= r.keys
-
         # argparse default is None (so we can detect "not passed"); turn
         # that into the module default here rather than at parser
         # construction time so the env-var path can also override.
         in_flight_sec = (getattr(args, "psk_in_flight_sec", None)
                          or DEFAULT_IN_FLIGHT_WINDOW_SEC)
-        cohorts = classify(local_rows, frozenset(upstream_union),
-                           now=now, in_flight_window_sec=in_flight_sec)
+        cohorts = classify(local_rows, now=now,
+                           in_flight_window_sec=in_flight_sec)
+        oldest_sec = oldest_age_sec(local_rows, now=now)
 
         cadence = cadence_stats(local_rows, since=since, until=now)
 
@@ -588,19 +429,9 @@ def cmd_verifier_report_psk(args) -> int:
                 "window": args.window,
                 "rx_call": rx_call,
                 "n_local": len(local_rows),
-                "delivered": len(cohorts.delivered),
-                "lost":      len(cohorts.lost),
                 "in_flight": len(cohorts.in_flight),
-                "upstream": [
-                    {
-                        "url": r.url,
-                        "rows": len(r.keys),
-                        "max_time": (r.max_time.isoformat(timespec="seconds")
-                                     if r.max_time else None),
-                        "rtt_ms": r.rtt_ms,
-                        "error": r.error,
-                    } for r in upstream
-                ],
+                "stale":     len(cohorts.stale),
+                "oldest_queued_sec": oldest_sec,
                 "cadence": [
                     {
                         "mode": c.mode, "cycle_sec": c.cycle_sec,
@@ -612,27 +443,27 @@ def cmd_verifier_report_psk(args) -> int:
                 ],
             }
             if getattr(args, "lost", False):
-                payload["lost_spots"] = [
+                payload["stale_spots"] = [
                     {
                         "epoch": r.key[0], "mode": r.mode,
                         "tx_call": r.tx_call, "frequency": r.frequency,
                         "queued_at": r.queued_at.isoformat(timespec="seconds"),
-                    } for r in cohorts.lost
+                    } for r in cohorts.stale
                 ]
             print(json.dumps(payload, indent=2))
             return 0
 
         for line in _format_summary(
             window_label=args.window, rx_call=rx_call,
-            n_local=len(local_rows), cohorts=cohorts, upstream=upstream,
+            n_local=len(local_rows), cohorts=cohorts, oldest_sec=oldest_sec,
         ):
             print(line)
         print()
         for line in _format_cadence(cadence):
             print(line)
-        if getattr(args, "lost", False) and cohorts.lost:
+        if getattr(args, "lost", False) and cohorts.stale:
             print()
-            for line in _format_lost(cohorts.lost):
+            for line in _format_stale(cohorts.stale):
                 print(line)
         return 0
     finally:

@@ -23,12 +23,6 @@ tui = [
   "rich>=13.0.0",
   "ka9q-python",
 ]
-# Required only by clients that opt into a CONTRACT §17 ClickHouse sink.
-# `sigmond.hamsci_ch.Writer` lazy-imports clickhouse-connect, so installing
-# sigmond without this extra leaves the core stdlib-only.
-clickhouse = [
-  "clickhouse-connect>=0.7.0",
-]
 dev = [
   "pytest>=7.0.0",
 ]

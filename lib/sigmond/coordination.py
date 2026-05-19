@@ -59,7 +59,7 @@ class Cpu:
 
 @dataclass
 class ClientInstance:
-    client_type: str              # "hf-timestd", "wspr", "ka9q-web", ...
+    client_type: str              # "hf-timestd", "psk-recorder", "ka9q-web", ...
     instance:    str = "default"
     radiod_id:   Optional[str] = None
     extras:      dict = field(default_factory=dict)
@@ -77,56 +77,12 @@ class DiskBudget:
 
 
 @dataclass
-class ClickHouseStorage:
-    """Local ClickHouse staging tier — see CONTRACT §17.
-
-    Optional.  When absent from coordination.toml, sigmond publishes
-    nothing into coordination.env and §17 clients fall back to file-only
-    behavior (the CH writer becomes a silent no-op).
-    """
-    host:                   str  = "localhost"
-    http_port:              int  = 8123
-    native_port:            int  = 9000
-    listen:                 str  = "loopback"          # "loopback" | "lan"
-    user:                   str  = "sigmond"
-    password_file:          str  = "/etc/sigmond/secrets/clickhouse-sigmond.pass"
-    default_retention_days: int  = 30
-    per_mode_retention:     dict = field(default_factory=dict)
-
-    @property
-    def is_local(self) -> bool:
-        return self.host in ("localhost", "127.0.0.1", "::1", "")
-
-    @property
-    def http_url(self) -> str:
-        return f"http://{self.host}:{self.http_port}"
-
-
-@dataclass
-class Storage:
-    """Container for [storage.*] blocks in coordination.toml.
-
-    Currently only ClickHouse is defined; future sink kinds slot in here.
-    """
-    clickhouse: Optional[ClickHouseStorage] = None
-
-
-# Modes whose per-mode `SIGMOND_CLICKHOUSE_DB_<MODE>` aliases sigmond
-# unconditionally publishes when [storage.clickhouse] is present.  Each
-# entry is the database name a client looks up via
-# SIGMOND_CLICKHOUSE_DB_<MODE>.  Adding a mode here is the only place a
-# new per-mode CH database becomes visible to clients.
-_CLICKHOUSE_DEFAULT_MODES: tuple = ("wspr", "psk", "hfdl", "codar", "timestd")
-
-
-@dataclass
 class Coordination:
     host:    Host                  = field(default_factory=Host)
     radiods: dict                  = field(default_factory=dict)   # id -> Radiod
     cpu:     Cpu                   = field(default_factory=Cpu)
     clients: list                  = field(default_factory=list)   # list[ClientInstance]
     disk_budget: DiskBudget        = field(default_factory=DiskBudget)
-    storage: Storage               = field(default_factory=Storage)
     source_path: Optional[Path]    = None
 
     def instances_of(self, client_type: str) -> list:
@@ -212,39 +168,12 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
         warn_percent=int(disk_raw.get('warn_percent', 80) or 80),
     )
 
-    storage_raw = raw.get('storage', {}) or {}
-    ch_raw = storage_raw.get('clickhouse')
-    clickhouse: Optional[ClickHouseStorage] = None
-    if ch_raw is not None:
-        ch_raw = ch_raw or {}
-        per_mode = ch_raw.get('per_mode_retention', {}) or {}
-        clickhouse = ClickHouseStorage(
-            host=ch_raw.get('host', 'localhost'),
-            http_port=int(ch_raw.get('http_port', 8123) or 8123),
-            native_port=int(ch_raw.get('native_port', 9000) or 9000),
-            listen=ch_raw.get('listen', 'loopback'),
-            user=ch_raw.get('user', 'sigmond'),
-            password_file=ch_raw.get(
-                'password_file',
-                '/etc/sigmond/secrets/clickhouse-sigmond.pass',
-            ),
-            default_retention_days=int(
-                ch_raw.get('default_retention_days', 30) or 30
-            ),
-            per_mode_retention={
-                str(k): int(v) for k, v in per_mode.items()
-                if isinstance(v, (int, float)) and int(v) > 0
-            },
-        )
-    storage = Storage(clickhouse=clickhouse)
-
     return Coordination(
         host=host,
         radiods=radiods,
         cpu=cpu,
         clients=clients,
         disk_budget=disk,
-        storage=storage,
         source_path=source_path,
     )
 
@@ -360,16 +289,6 @@ def render_env(coord: Coordination,
         prefix = _env_key(c.client_type, c.instance)
         lines.append(f'{prefix}_RADIOD={c.radiod_id}')
     if any(c.radiod_id for c in coord.clients):
-        lines.append('')
-
-    if coord.storage.clickhouse is not None:
-        ch = coord.storage.clickhouse
-        lines.append(f'SIGMOND_CLICKHOUSE_URL={ch.http_url}')
-        lines.append(f'SIGMOND_CLICKHOUSE_USER={ch.user}')
-        lines.append(f'SIGMOND_CLICKHOUSE_PASSWORD_FILE={ch.password_file}')
-        lines.append(f'SIGMOND_CLICKHOUSE_LISTEN={ch.listen}')
-        for mode in _CLICKHOUSE_DEFAULT_MODES:
-            lines.append(f'SIGMOND_CLICKHOUSE_DB_{mode.upper()}={mode}')
         lines.append('')
 
     # Generic extras passthrough — clients opt in via deploy.toml

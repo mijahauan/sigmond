@@ -1,7 +1,7 @@
 """Storage-backend migration: from local ClickHouse to local SQLite.
 
 Why this exists:
-    SQLite is now the default sigmond sink (see hamsci_ch.Writer.from_env).
+    SQLite is the sigmond sink (see hamsci_sink.Writer.from_env).
     On hosts that were installed back when ClickHouse was the only choice,
     `clickhouse-server` plus its data dir continue to consume 1-2 GB of
     RAM and several merge-CPU cores even when no producer writes to it.
@@ -55,7 +55,7 @@ CH_SIGMOND_UNIT_FILE = "/etc/systemd/system/sigmond-clickhouse.service"
 CH_SIGMOND_SYMLINK = "/usr/local/sbin/sigmond-clickhouse"
 
 # Where sigmond writes its shared producer-side env vars.  Producers
-# (psk-recorder, hf-timestd, wsprdaemon-client, etc.) pull this via
+# (psk-recorder, hf-timestd, etc.) pull this via
 # systemd EnvironmentFile=, so flipping SIGMOND_CLICKHOUSE_URL off here
 # is what makes them fall through to the default-SQLite dispatch on
 # next restart.
@@ -85,7 +85,7 @@ INSERTED_HEADER = "# Added by `smd storage migrate-to-sqlite` to pin the SQLite 
 BACKUP_SUFFIX = ".bak-pre-sqlite"
 
 # Producer-side sink location.  Producers run as non-root users (pskrec,
-# hf-timestd, wsprdaemon-client, etc.); putting the sink under
+# hf-timestd, etc.); putting the sink under
 # /var/lib/sigmond with mode 0775 root:sigmond means every producer in
 # the `sigmond` group can write rows here, and a single hs-uploader
 # reader can drain everything from one place.  Don't change the path

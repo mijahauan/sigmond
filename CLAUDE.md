@@ -58,13 +58,13 @@ smd ka9q-watch           Compare pinned ka9q-radio commit vs upstream and
 smd diag                 Network + deps + client validation diagnostics
 smd tui                  Launch interactive TUI configurator
 smd environment list|probe|describe   Situational awareness of network peers
-smd storage migrate-to-sqlite   Remove leftover local ClickHouse install once
-                         SQLite (the default sink) is in use. Dry-run by
-                         default; --yes to execute. Requires root.
-smd storage trim         TTL-based janitor for the local sink.
+smd storage migrate-to-sqlite   Remove a leftover legacy ClickHouse
+                         install once SQLite (the sole local sink) is in
+                         use. Dry-run by default; --yes to execute.
+                         Requires root.
+smd storage trim         TTL-based janitor for the local SQLite sink.
                          `--all` applies per-target policies from env
-                         (PSK_RETENTION_MIN=60 min,
-                         WSPR_RETENTION_MIN=1440 min); 30-min floor
+                         (PSK_RETENTION_MIN=60 min); 30-min floor
                          enforced. One-shot mode: `--target-db psk
                          --max-age 2h`. Systemd timer
                          `sigmond-storage-trim-all.timer` (15 min).
@@ -72,31 +72,27 @@ smd verifier report      Windowed audit of upload delivery. Default
                          `--target wspr` reads wsprnet_audit (per-spot
                          delivered/lost/in_flight/rejected/silent_drop
                          cohorts + cadence). `--target psk` audits the
-                         FT8/FT4 via-server forwarding path by diffing
-                         the local psk.spots queue against
-                         wd*.psk.spots over ClickHouse, with cadence
-                         on the 15s / 7.5s FT cycles.
+                         local SQLite sink for FT8/FT4 spot delivery,
+                         with cadence on the 15s / 7.5s FT cycles.
 ```
 
 ## Sink backend selection
 
-`sigmond.hamsci_ch.Writer.from_env()` picks the producer-side sink at
+`sigmond.hamsci_sink.Writer.from_env()` picks the producer-side sink at
 construction time:
 
-- `SIGMOND_CLICKHOUSE_URL` set → ClickHouse `Writer` (explicit opt-in).
-- `SIGMOND_SQLITE_PATH` set    → `SqliteWriter` at that path (override).
-- Neither set                  → `SqliteWriter` at `/var/lib/sigmond/sink.db`
+- `SIGMOND_SQLITE_PATH` set → `Writer` at that path (override).
+- Unset                    → `Writer` at `/var/lib/sigmond/sink.db`
   if writable, else no-op (preserves standalone-safety).
 
-SQLite is the default; ClickHouse is opt-in for hosts that need the
-upstream-grade columnar tier. Use `smd storage migrate-to-sqlite` to
-clean up a stale ClickHouse install after switching.
+SQLite is the sole local sink. On a host carrying a leftover legacy
+ClickHouse install, use `smd storage migrate-to-sqlite` to clean it up.
 
 ## Architecture layers
 
 1. **Catalog** (`etc/catalog.toml`, `lib/sigmond/catalog.py`) — static
    registry of known clients.  Answers "what could be installed?"
-   Includes topology-alias bridge (grape → hf-timestd, wspr → wsprdaemon-client).
+   Includes topology-alias bridge (grape → hf-timestd).
 
 2. **Installer** (`lib/sigmond/installer.py`) — catalog-driven install:
    clone repo to `/opt/git/sigmond/<name>`, run the client's canonical `install.sh`.
@@ -199,9 +195,6 @@ enabled = true
 
 [component.wspr-recorder]
 enabled = false
-
-[component.wsprdaemon-client]
-enabled = true
 ```
 
 Old topology names (`grape`, `wspr`) are accepted as aliases with deprecation
@@ -220,12 +213,6 @@ warnings.  The canonical names match `etc/catalog.toml`.
   - Binaries: `/usr/local/bin/smd` (symlink to the repo's `bin/smd`)
   - Logs: `/var/log/sigmond/`
   - State: `/var/lib/sigmond/`
-
-## Companion project
-
-`wsprdaemon-client` lives at `/home/wsprdaemon/wsprdaemon-client` and is
-the repo Sigmond will install and manage. Its `deps.conf` is the
-authoritative source for dependency commit pins.
 
 ## Generic Workflow Orchestration
 

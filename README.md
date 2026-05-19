@@ -76,11 +76,10 @@ smd list --catalog
   Servers (1)
     ·  radiod                 ka9q-radio SDR daemon
 
-  Clients (4)
+  Clients (3)
     ·  hf-timestd             HF time-standard analyzer (WWV/WWVH/CHU/BPM)
     ·  psk-recorder           FT4/FT8 spot recorder for PSKReporter
     ·  wspr-recorder          WSPR/FST4W audio recorder (period-aligned WAVs)
-    ·  wsprdaemon-client      WSPR decoder + poster + uploader
 
   Infrastructure (3)
     ·  igmp-querier           IGMPv2 querier daemon for multicast LANs
@@ -116,7 +115,6 @@ for your station:
 | hf-timestd | `/etc/hf-timestd/timestd-config.toml` |
 | psk-recorder | `/etc/psk-recorder/psk-recorder-config.toml` |
 | wspr-recorder | `/etc/wspr-recorder/wspr-recorder.toml` |
-| wsprdaemon-client | `/etc/wsprdaemon/wsprdaemon.conf` |
 
 Sigmond's own coordination config lives at `/etc/sigmond/topology.toml`.
 Copy the example to get started:
@@ -313,8 +311,7 @@ smd status
 | **radiod** | ka9q-radio SDR daemon — receives RF and multicasts IQ channels | [ka9q/ka9q-radio](https://github.com/ka9q/ka9q-radio) |
 | **hf-timestd** | HF time-standard analyzer — extracts clock offsets from WWV/WWVH/CHU/BPM | [mijahauan/hf-timestd](https://github.com/mijahauan/hf-timestd) |
 | **psk-recorder** | FT4/FT8 spot recorder — decodes and uploads to PSKReporter | [mijahauan/psk-recorder](https://github.com/mijahauan/psk-recorder) |
-| **wspr-recorder** | WSPR/FST4W audio recorder — produces period-aligned WAVs for wsprdaemon-client | [mijahauan/wspr-recorder](https://github.com/mijahauan/wspr-recorder) |
-| **wsprdaemon-client** | WSPR decoder + poster + uploader — decodes WAVs and reports to wsprnet.org | [rrobinett/wsprdaemon-client](https://github.com/rrobinett/wsprdaemon-client) |
+| **wspr-recorder** | WSPR/FST4W audio recorder — produces period-aligned WAVs for WSPR decoding | [mijahauan/wspr-recorder](https://github.com/mijahauan/wspr-recorder) |
 
 ### Infrastructure components
 

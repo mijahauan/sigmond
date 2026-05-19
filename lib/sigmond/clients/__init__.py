@@ -7,9 +7,9 @@ Wave 2 collapsed dispatch around the generic ``ContractAdapter`` (which
 shells out to ``<client> inventory|validate --json`` per the contract).
 The legacy bespoke adapters survive only for clients that have a
 file-read fallback path the contract surface doesn't yet replace —
-``RadiodAdapter`` (radiod isn't contract-conformant by design),
-``HfTimestdAdapter`` and ``WsprAdapter`` (they wrap ContractAdapter with a
-TOML/INI fallback for older binaries that lack ``inventory``).  New
+``RadiodAdapter`` (radiod isn't contract-conformant by design) and
+``HfTimestdAdapter`` (it wraps ContractAdapter with a TOML fallback
+for older binaries that lack ``inventory``).  New
 clients don't need a registry entry: ``load_adapter`` finds them via the
 catalog and returns a generic ``ContractAdapter`` automatically.
 """
@@ -18,7 +18,6 @@ from .base import ClientAdapter, ClientView, InstanceView
 from .contract import ContractAdapter
 from .hftimestd import HfTimestdAdapter
 from .radiod import RadiodAdapter
-from .wspr import WsprAdapter
 
 
 # Bespoke adapters that wrap or replace ContractAdapter for clients that
@@ -27,8 +26,6 @@ from .wspr import WsprAdapter
 REGISTRY = {
     'ka9q-radio': RadiodAdapter,
     'radiod':     RadiodAdapter,    # legacy topology alias
-    'wspr':       WsprAdapter,
-    'wsprdaemon-client': WsprAdapter,
     'grape':      HfTimestdAdapter,
     'hf-timestd': HfTimestdAdapter,
 }
@@ -75,6 +72,6 @@ def load_adapter(component_name: str) -> ClientAdapter | None:
 
 __all__ = [
     'ClientAdapter', 'ClientView', 'InstanceView',
-    'ContractAdapter', 'HfTimestdAdapter', 'RadiodAdapter', 'WsprAdapter',
+    'ContractAdapter', 'HfTimestdAdapter', 'RadiodAdapter',
     'REGISTRY', 'load_adapter',
 ]
