@@ -30,6 +30,7 @@ Observe (what is, read-only):
     smd wspr-watch  [N | -v]                                     WSPRnet upload events (alias)
     smd hfdl-watch  [N | -v]                                     HFDL decoded-frame activity (alias)
     smd codar-watch [N | -v]                                     CODAR ionospheric soundings (alias)
+    smd sources     list | add | remove | apply                  per-client SDR source selection
 
 Operate (run things now, may need sudo):
     smd start       [<component> [<instance>]]
@@ -4538,7 +4539,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage public-ip completion"
+    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage sources public-ip completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -4624,6 +4625,9 @@ _smd_complete() {
                     ;;
                 public-ip)
                     COMPREPLY=($(compgen -W "--no-v6 -q --quiet" -- "$cur"))
+                    ;;
+                sources)
+                    COMPREPLY=($(compgen -W "list add remove apply" -- "$cur"))
                     ;;
                 tui)
                     COMPREPLY=()
@@ -4741,6 +4745,28 @@ _smd_complete() {
                             ;;
                         *)
                             COMPREPLY=($(compgen -W "report" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
+                sources)
+                    case "${words[2]}" in
+                        list)
+                            COMPREPLY=($(compgen -W "--clients-only --inventory" -- "$cur"))
+                            ;;
+                        add|remove)
+                            # Position 3 = client; position 4 = source key.
+                            # Static list of well-known clients (matches sources.KNOWN_CLIENTS).
+                            if [[ $cword -eq 3 ]]; then
+                                COMPREPLY=($(compgen -W "wspr-recorder psk-recorder hfdl-recorder codar-sounder" -- "$cur"))
+                            fi
+                            # Dynamic source-key completion at position 4 would
+                            # require running `smd sources list --inventory`,
+                            # which costs an mDNS round-trip per <TAB>.  Skip
+                            # for now and rely on the operator copy-pasting
+                            # from the list output.
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "list add remove apply" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -5330,6 +5356,212 @@ def _fetch_public_ip(url: str, timeout: float = 5.0) -> Optional[str]:
     except (urllib.error.URLError, TimeoutError, OSError):
         pass
     return None
+
+
+def _sources_inventory():
+    """Probe the environment and return (rows, error_msg).
+
+    Imported lazily so smd's top-level doesn't depend on the sigmond
+    discovery code path at import time.
+    """
+    if not _HAS_SIGMOND_LIB:
+        return None, ('sigmond library not found; install lib/sigmond '
+                      'alongside bin/smd to use `smd sources`')
+    from sigmond.environment import Environment
+    from sigmond.discovery import mdns
+    from sigmond import sources as _sources_mod
+    env = Environment()
+    observations = mdns.probe(env, timeout=5.0)
+    return _sources_mod.inventory(observations), None
+
+
+def _sources_resolve_key(token: str, inventory_rows):
+    """Resolve a user-supplied token to a SourceKey.
+
+    Accepted forms:
+      * full key:   ``radiod:bee1-status.local``
+      * unique substring of any inventory row's key or label
+
+    Returns ``(key, error_msg)``.  Either field is None.
+    """
+    from sigmond.sources import SourceKey
+    if ":" in token:
+        try:
+            return SourceKey.parse(token), None
+        except ValueError as exc:
+            return None, str(exc)
+    # No colon — try fuzzy match against inventory keys + labels.
+    needle = token.lower()
+    matches = [
+        r for r in inventory_rows
+        if needle in str(r.key).lower() or needle in r.label.lower()
+    ]
+    if len(matches) == 1:
+        return matches[0].key, None
+    if not matches:
+        return None, (
+            f"no source matches {token!r}; pass a full "
+            "'<type>:<identifier>' key, or run `smd sources list` "
+            "to see what's available"
+        )
+    return None, (
+        f"{token!r} is ambiguous (matched {len(matches)} sources); "
+        "supply more characters or the full key"
+    )
+
+
+def cmd_sources_list(args) -> int:
+    """List per-client source selections and the discovered inventory.
+
+    Default mode prints both: (1) each known client and the keys it's
+    consuming from, and (2) the full set of sources currently visible
+    on the LAN.  ``--clients-only`` or ``--inventory`` narrows the
+    output for scripting.
+    """
+    if not _HAS_SIGMOND_LIB:
+        _err('sigmond library not found; install lib/sigmond alongside bin/smd')
+        return 1
+    from sigmond.sources import (
+        KNOWN_CLIENTS,
+        load_all_selections,
+        DEFAULT_CLIENTS_ROOT,
+    )
+
+    show_clients = not bool(getattr(args, 'inventory', False))
+    show_inventory = not bool(getattr(args, 'clients_only', False))
+
+    if show_clients:
+        _heading('Per-client source selections')
+        _info(f'  storage: {DEFAULT_CLIENTS_ROOT}/<client>.sources.toml')
+        selections = load_all_selections()
+        for client in KNOWN_CLIENTS:
+            cs = selections[client]
+            n = len(cs.selected)
+            label = f'{client:<16}'
+            if n == 0:
+                print(f'  {label}  (no sources selected — using legacy single-radiod config)')
+                continue
+            print(f'  {label}  {n} source(s):')
+            for k in cs.selected:
+                print(f'                      {k}')
+        print(flush=True)
+
+    if show_inventory:
+        rows, err = _sources_inventory()
+        if err is not None:
+            _err(err)
+            return 1
+        _heading(f'Discovered sources ({len(rows)} reachable)')
+        if not rows:
+            _info('  none — check that avahi-daemon is running and '
+                  'producers publish mDNS')
+            return 0
+        # Header
+        print(f'  {"KEY":<48}  LABEL')
+        print(f'  {"-" * 48}  {"-" * 40}')
+        for r in rows:
+            print(f'  {str(r.key):<48}  {r.label}')
+    return 0
+
+
+def cmd_sources_add(args) -> int:
+    """Add a source-key to a client's selection."""
+    if not _HAS_SIGMOND_LIB:
+        _err('sigmond library not found; install lib/sigmond alongside bin/smd')
+        return 1
+    from sigmond.sources import ClientSources, KNOWN_CLIENTS
+
+    client = args.client
+    if client not in KNOWN_CLIENTS:
+        _info(f'  ⚠ {client!r} is not in the well-known clients list '
+              f'{list(KNOWN_CLIENTS)} — selection will be recorded anyway')
+
+    rows, _err_msg = _sources_inventory()
+    rows = rows or []
+    key, err = _sources_resolve_key(args.source, rows)
+    if err is not None:
+        _err(err)
+        return 1
+
+    cs = ClientSources.load(client)
+    if not cs.add(key):
+        _info(f'{client}: already has {key} (no change)')
+        return 0
+    cs.save()
+    print(f'{client}: added {key} ({len(cs.selected)} source(s) total)')
+    _info('  run `smd sources apply` to render the change into the client config')
+    return 0
+
+
+def cmd_sources_remove(args) -> int:
+    """Drop a source-key from a client's selection."""
+    if not _HAS_SIGMOND_LIB:
+        _err('sigmond library not found; install lib/sigmond alongside bin/smd')
+        return 1
+    from sigmond.sources import ClientSources
+
+    client = args.client
+    cs = ClientSources.load(client)
+    if not cs.selected:
+        _info(f'{client}: no sources selected (nothing to remove)')
+        return 0
+
+    rows, _err_msg = _sources_inventory()
+    rows = rows or []
+    key, err = _sources_resolve_key(args.source, rows)
+    if err is not None:
+        # Fall back: try matching against the client's CURRENT selection
+        # in case the source was removed from inventory but still in the
+        # saved selection.
+        from sigmond.sources import SourceKey
+        try:
+            key = SourceKey.parse(args.source)
+        except ValueError:
+            _err(err)
+            return 1
+
+    if not cs.remove(key):
+        _info(f'{client}: {key} not in selection (no change)')
+        return 0
+    cs.save()
+    print(f'{client}: removed {key} ({len(cs.selected)} source(s) remain)')
+    _info('  run `smd sources apply` to render the change into the client config')
+    return 0
+
+
+def cmd_sources_apply(args) -> int:
+    """Phase 2 stub — show what would be rendered to each client's env.
+
+    Today clients are still single-radiod and the renderer that
+    propagates multi-source selections into their config will land in
+    Phase 3.  This verb currently prints a dry-run summary so the
+    operator can preview the future render.
+    """
+    if not _HAS_SIGMOND_LIB:
+        _err('sigmond library not found; install lib/sigmond alongside bin/smd')
+        return 1
+    from sigmond.sources import KNOWN_CLIENTS, load_all_selections
+
+    _heading('sources apply — dry-run preview')
+    _info('  Phase 2 ships the selection model + CLI only; the renderer that')
+    _info('  propagates these into each client\'s env/config lands in Phase 3.')
+    _info('  Today: clients still bind to a single radiod via their existing env.')
+    print(flush=True)
+
+    selections = load_all_selections()
+    any_selected = False
+    for client in KNOWN_CLIENTS:
+        cs = selections[client]
+        if not cs.selected:
+            continue
+        any_selected = True
+        print(f'  {client}:')
+        for k in cs.selected:
+            print(f'    {k}')
+    if not any_selected:
+        _info('  No client has any source selected yet.')
+        _info('  Add one with `smd sources add <client> <source-key>`.')
+    return 0
 
 
 def cmd_public_ip(args) -> int:
@@ -8531,6 +8763,48 @@ def main() -> int:
                        help='print only the IP(s) on stdout, no decorations '
                             '(scriptable: `MY_IP=$(smd public-ip -q --no-v6)`)')
 
+    # sources — per-client SDR source selection (multi-RX888 plan, phase 2)
+    p_sources = sub.add_parser(
+        'sources',
+        help='select which SDR sources each client (wspr-recorder, '
+             'psk-recorder, …) consumes from',
+        description=(
+            'Sources are radiod control planes (local USB-attached or '
+            'remote on the LAN), KiwiSDRs, etc.  Each client gets an '
+            'independent selection stored at '
+            '/etc/sigmond/clients/<client>.sources.toml.  See '
+            'tasks/plan-multi-rx888-sources.md for the broader plan.'
+        ),
+    )
+    sources_sub = p_sources.add_subparsers(dest='sources_command')
+    p_src_list = sources_sub.add_parser(
+        'list',
+        help='show current selections and discovered inventory',
+    )
+    p_src_list.add_argument('--clients-only', action='store_true',
+                            help='omit the inventory section (just per-client selections)')
+    p_src_list.add_argument('--inventory', action='store_true',
+                            help='omit the per-client section (just discovered sources)')
+    p_src_add = sources_sub.add_parser(
+        'add',
+        help='add a source-key to a client\'s selection',
+    )
+    p_src_add.add_argument('client', help='client name (e.g. wspr-recorder)')
+    p_src_add.add_argument('source', metavar='SOURCE',
+                           help='full key "<type>:<id>" or unique substring of one')
+    p_src_remove = sources_sub.add_parser(
+        'remove',
+        help='drop a source-key from a client\'s selection',
+    )
+    p_src_remove.add_argument('client', help='client name (e.g. wspr-recorder)')
+    p_src_remove.add_argument('source', metavar='SOURCE',
+                              help='key to remove (full or unique substring)')
+    p_src_apply = sources_sub.add_parser(
+        'apply',
+        help='render selections to each client\'s env/config (dry-run in '
+             'phase 2; real apply lands in phase 3)',
+    )
+
     # completion
     p_completion = sub.add_parser('completion', help='emit shell tab-completion script')
     completion_sub = p_completion.add_subparsers(dest='completion_command')
@@ -8906,6 +9180,19 @@ def main() -> int:
         'tui':     cmd_tui,
         'public-ip': cmd_public_ip,
     }
+
+    if args.command == 'sources':
+        sub_cmd = getattr(args, 'sources_command', None)
+        if sub_cmd == 'list':
+            return cmd_sources_list(args)
+        if sub_cmd == 'add':
+            return cmd_sources_add(args)
+        if sub_cmd == 'remove':
+            return cmd_sources_remove(args)
+        if sub_cmd == 'apply':
+            return cmd_sources_apply(args)
+        p_sources.print_help()
+        return 0
 
     if args.command == 'completion':
         return cmd_completion(args)
