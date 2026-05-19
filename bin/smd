@@ -4613,6 +4613,15 @@ _smd_complete() {
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
                     ;;
+                wspr-watch)
+                    COMPREPLY=($(compgen -W "-v --verbose --instance --backlog --rejected -r" -- "$cur"))
+                    ;;
+                psk-watch|hfdl-watch|codar-watch)
+                    COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
+                    ;;
+                ka9q-watch)
+                    COMPREPLY=($(compgen -W "--ka9q-python --ka9q-radio --remote --branch --no-fetch --json" -- "$cur"))
+                    ;;
                 public-ip)
                     COMPREPLY=($(compgen -W "--no-v6 -q --quiet" -- "$cur"))
                     ;;
@@ -4635,7 +4644,10 @@ _smd_complete() {
                     ;;
                 watch)
                     case "${words[2]}" in
-                        wspr|psk|hfdl|codar)
+                        wspr)
+                            COMPREPLY=($(compgen -W "-v --verbose --instance --backlog --rejected -r" -- "$cur"))
+                            ;;
+                        psk|hfdl|codar)
                             COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
                             ;;
                         ka9q)
