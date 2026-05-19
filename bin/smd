@@ -4741,10 +4741,13 @@ _smd_complete() {
                 verifier)
                     case "${words[2]}" in
                         report)
-                            COMPREPLY=($(compgen -W "--window --rx-call --lost --in-flight --delivered --cadence --rejected --silent-drop --json --db" -- "$cur"))
+                            COMPREPLY=($(compgen -W "--window --rx-call --lost --in-flight --delivered --cadence --rejected --silent-drop --suppressed --json --db" -- "$cur"))
+                            ;;
+                        rehabilitate)
+                            COMPREPLY=($(compgen -W "--db" -- "$cur"))
                             ;;
                         *)
-                            COMPREPLY=($(compgen -W "report" -- "$cur"))
+                            COMPREPLY=($(compgen -W "report rehabilitate" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -9132,6 +9135,14 @@ def main() -> int:
              'prerequisite)',
     )
     p_v_report.add_argument(
+        '--suppressed', action='store_true',
+        help='list callsigns the negative cache has marked as '
+             'consistently-rejected by wsprnet — these are filtered '
+             'out of hashtable.txt / fst4w_calls.txt automatically. '
+             'Use `smd verifier rehabilitate <rx_call> <call>` to '
+             'undo a suppression manually.',
+    )
+    p_v_report.add_argument(
         '--delivered', action='store_true',
         help='list each delivered spot under the summary (verified '
              'present in wspr.rx); useful for sanity-checking but '
@@ -9159,6 +9170,24 @@ def main() -> int:
         help='--target=psk only: queue-age window after which a row '
              'still in the local queue counts as stale rather than '
              'in_flight (default 300s = 5 min).',
+    )
+
+    # rehabilitate — operator override to clear a negative-cache
+    # suppression so wsprd / jt9 see the callsign again.
+    p_v_reh = verifier_sub.add_parser(
+        'rehabilitate',
+        help='clear wsprnet_reject_cache suppression for one '
+             '(rx_call, call) pair so wsprd / jt9 are re-fed the '
+             'callsign on the next cycle',
+    )
+    p_v_reh.add_argument('rx_call',
+                         help='reporter callsign (e.g. AC0G/B4)')
+    p_v_reh.add_argument('call',
+                         help='tx callsign to rehabilitate '
+                              '(e.g. W4UK/P)')
+    p_v_reh.add_argument(
+        '--db', metavar='PATH', default='/var/lib/sigmond/sink.db',
+        help='sink.db path (default /var/lib/sigmond/sink.db)',
     )
 
     p_storage = sub.add_parser('storage',
@@ -9545,6 +9574,20 @@ def main() -> int:
                 return 1
             from sigmond.commands.verifier_report import cmd_verifier_report
             return cmd_verifier_report(args)
+        if verifier_cmd == 'rehabilitate':
+            if not _HAS_SIGMOND_LIB:
+                print(
+                    'smd: sigmond library not found; install '
+                    'lib/sigmond alongside bin/smd',
+                    file=sys.stderr,
+                )
+                return 1
+            if _need_root('verifier rehabilitate'):
+                return 1
+            from sigmond.commands.verifier_report import (
+                cmd_verifier_rehabilitate,
+            )
+            return cmd_verifier_rehabilitate(args)
         p_verifier.print_help()
         return 0
 

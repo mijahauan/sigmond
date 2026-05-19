@@ -769,6 +769,138 @@ def cmd_verifier_report(args) -> int:
                         "enabled — set WSPRNET_BATCH_SIZE=1 to detect)"
                     )
                 print(msg)
+        if getattr(args, 'suppressed', False):
+            print()
+            rows = _suppressed_query(conn, rx_call)
+            if rows:
+                print(
+                    f"suppressed callsigns ({len(rows)}) — wsprnet "
+                    "consistently rejected, no longer fed to wsprd/jt9:"
+                )
+                for r in rows:
+                    rxc, call, rc, first, last, supp = r
+                    print(
+                        f"  {rxc:<10} {call:<14} "
+                        f"rejected={rc:<4} "
+                        f"first={first[:19]}  last={last[:19]}  "
+                        f"suppressed_since={supp[:19]}"
+                    )
+                print()
+                print(
+                    "  manual override: smd verifier rehabilitate "
+                    "<rx_call> <call>"
+                )
+            else:
+                print("suppressed callsigns: (none — nothing auto-filtered)")
+        return 0
+    finally:
+        conn.close()
+
+
+def _suppressed_query(conn, rx_call):
+    """Read the wsprnet_reject_cache rows that are currently
+    suppressed.  Returns [(rx_call, call, rejected_count,
+    first_rejected, last_rejected, suppressed_at)].  Empty list when
+    the table doesn't exist yet (host hasn't shipped a batch since the
+    negative-cache feature landed)."""
+    existing = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='wsprnet_reject_cache'"
+    ).fetchone()
+    if not existing:
+        return []
+    if rx_call:
+        cur = conn.execute(
+            """
+            SELECT rx_call, call, rejected_count, first_rejected,
+                   last_rejected, suppressed_at
+              FROM wsprnet_reject_cache
+             WHERE suppressed_at IS NOT NULL AND rx_call = ?
+          ORDER BY last_rejected DESC
+            """,
+            (rx_call,),
+        )
+    else:
+        cur = conn.execute(
+            """
+            SELECT rx_call, call, rejected_count, first_rejected,
+                   last_rejected, suppressed_at
+              FROM wsprnet_reject_cache
+             WHERE suppressed_at IS NOT NULL
+          ORDER BY last_rejected DESC
+            """,
+        )
+    return list(cur)
+
+
+def cmd_verifier_rehabilitate(args) -> int:
+    """`smd verifier rehabilitate <rx_call> <call>` — operator override.
+
+    Clears ``suppressed_at`` and zeros the counters for one row in
+    ``wsprnet_reject_cache``.  The next ``CallsignDB.write_*`` pass
+    will re-include the call, letting wsprd see it again.  Idempotent
+    — re-running on an already-active call returns success with
+    ``changed=0``.  Requires write access to sink.db so it self-
+    elevates via the calling smd wrapper.
+    """
+    db_path = Path(
+        args.db if hasattr(args, "db") and args.db
+        else DEFAULT_SINK_DB
+    )
+    if not db_path.exists():
+        print(
+            f"smd verifier rehabilitate: sink db not found at {db_path}",
+            file=sys.stderr,
+        )
+        return 2
+    rx_call = (args.rx_call or "").strip()
+    call = (args.call or "").strip().upper()
+    if not rx_call or not call:
+        print(
+            "smd verifier rehabilitate: both rx_call and call are required",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+    except sqlite3.Error as exc:
+        print(
+            f"smd verifier rehabilitate: open sink db failed: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        existing = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='wsprnet_reject_cache'"
+        ).fetchone()
+        if not existing:
+            print(
+                "smd verifier rehabilitate: wsprnet_reject_cache "
+                "table not present yet — nothing to rehabilitate."
+            )
+            return 0
+        with conn:
+            cur = conn.execute(
+                """
+                UPDATE wsprnet_reject_cache
+                   SET suppressed_at = NULL,
+                       rejected_count = 0
+                 WHERE rx_call = ? AND call = ?
+                """,
+                (rx_call, call),
+            )
+            changed = cur.rowcount
+        if changed:
+            print(
+                f"rehabilitated {call} for {rx_call} — wsprd will "
+                "be re-fed this callsign on the next decode cycle"
+            )
+        else:
+            print(
+                f"no matching cache row for ({rx_call}, {call}) — "
+                "nothing to do"
+            )
         return 0
     finally:
         conn.close()
