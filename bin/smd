@@ -6508,6 +6508,7 @@ def cmd_wspr_watch(args) -> int:
         cap = n_recent if n_recent > 0 else 0
     show_spots = cap != 0
     backlog_min = max(0, int(getattr(args, 'backlog', 10) or 0))
+    show_rejected = bool(getattr(args, 'rejected', False))
 
     import re as _re
     import datetime as _datetime
@@ -6659,6 +6660,80 @@ def cmd_wspr_watch(args) -> int:
         except Exception:
             return None
 
+    # --- rejected-spot lookup (--rejected flag) --------------------------
+    # State across iterations: highest wsprnet_audit_batch.id we've shown
+    # rejects for.  Bumped after each query so we don't replay history.
+    # Initialized lazily on first query (we can't query before journal
+    # data appears).
+    _rejected_state = {'last_batch_id': None}
+
+    def _query_rejected_since() -> list:
+        """Return new rejected (spot_key, uploaded_at) since last call.
+
+        Only meaningful when WSPRNET_BATCH_SIZE=1 — for larger batches
+        n_posted > 1 and we can't attribute rejection to a specific
+        spot_key.  Returns [] when the audit tables don't exist, the
+        sink db is missing, or no new rejects since last call.
+        """
+        if not _SINK_DB.exists():
+            return []
+        try:
+            import sqlite3 as _sqlite3
+            uri = f'file:{_SINK_DB}?mode=ro'
+            con = _sqlite3.connect(uri, uri=True, timeout=2.0)
+            try:
+                # Init last_batch_id on first call to avoid dumping
+                # every historical rejection — we only want events
+                # since the watch started.
+                if _rejected_state['last_batch_id'] is None:
+                    cur = con.execute(
+                        "SELECT COALESCE(MAX(id), 0) "
+                        "FROM wsprnet_audit_batch"
+                    )
+                    _rejected_state['last_batch_id'] = cur.fetchone()[0]
+                    return []
+                last_id = _rejected_state['last_batch_id']
+                cur = con.execute(
+                    """
+                    SELECT a.spot_key, a.uploaded_at, b.id
+                      FROM wsprnet_audit a
+                      JOIN wsprnet_audit_batch b ON a.batch_id = b.id
+                     WHERE b.id > ?
+                       AND b.n_posted = 1
+                       AND b.n_added = 0
+                  ORDER BY b.id
+                    """,
+                    (last_id,),
+                )
+                rows = cur.fetchall()
+                # Track the max id we've SEEN, not just rejected — so a
+                # successful batch between rejected ones still bumps us
+                # forward.  Cheap second query rather than tangling the
+                # logic.
+                cur = con.execute(
+                    "SELECT COALESCE(MAX(id), ?) FROM wsprnet_audit_batch",
+                    (last_id,),
+                )
+                _rejected_state['last_batch_id'] = cur.fetchone()[0]
+                return rows
+            finally:
+                con.close()
+        except Exception:
+            return []
+
+    def _format_rejected(spot_key: str) -> str:
+        """spot_key format: '<cycle_iso>|<callsign>|<freq_hz>'."""
+        try:
+            cycle_iso, call, freq_hz = spot_key.split('|', 2)
+            freq_mhz = f'{int(freq_hz) / 1_000_000:.6f}'
+            cycle_short = cycle_iso[11:16]  # 'HH:MM'
+        except (ValueError, TypeError):
+            cycle_short = '?'
+            call = spot_key
+            freq_mhz = '?'
+        return (f'             ↳ rejected by wsprnet  cycle {cycle_short}  '
+                f'{call:>12}  @ {freq_mhz} MHz')
+
     # Band display order: low → high, with the 17 default bands first
     # so the per-band counts read naturally.  Unknown bands fall to end.
     _BAND_ORDER = {b: i for i, b in enumerate([
@@ -6786,12 +6861,27 @@ def cmd_wspr_watch(args) -> int:
                     tot_field = f'{tot_added}/{tot_posted}'
                 else:
                     tot_field = f'{tot_posted}'
+                # When the pump had under-acceptance and --rejected was
+                # requested, fetch the per-spot rejections so they can
+                # be printed under the relevant cycle/standalone line.
+                rejected_extras: list = []
+                if show_rejected and pump_posted > pump_added:
+                    for spot_key, _uploaded_at, _bid in _query_rejected_since():
+                        rejected_extras.append(_format_rejected(spot_key))
+                elif show_rejected:
+                    # Still drain the query so last_batch_id advances —
+                    # otherwise the FIRST under-accept after several
+                    # clean pumps would dump every reject since startup.
+                    _query_rejected_since()
+
                 if pending:
                     # Merge with the pending cycle: append delivery
                     # summary to the cycle line, then print everything.
                     # "delivered" — wsprnet's pump completed with the
                     # server's added-count (not just upload finished).
                     ship_delta_s = int(time.monotonic() - pending['ts'])
+                    if rejected_extras:
+                        pending['extras'].extend(rejected_extras)
                     _flush_pending(
                         f'  → delivered {pump_field} in {ship_delta_s}s '
                         f'(total {tot_field}, batch {work_n})'
@@ -6814,6 +6904,8 @@ def cmd_wspr_watch(args) -> int:
                             f'(total {tot_field}, batch {work_n})',
                             flush=True,
                         )
+                        for extra in rejected_extras:
+                            print(extra, flush=True)
                 continue
 
             cm = cycle_re.search(line)
@@ -8044,6 +8136,13 @@ def _add_wspr_watch_args(p) -> None:
                         'history (default 10; rows for those cycles have '
                         'usually been shipped + deleted so per-band '
                         'detail will be missing)')
+    p.add_argument('--rejected', '-r', action='store_true',
+                   help='when a cycle ships with posted > added (wsprnet '
+                        'rejected some spots), list the individual '
+                        'rejected spot_keys under the cycle line.  '
+                        'Requires WSPRNET_AUDIT=1 + WSPRNET_BATCH_SIZE=1 '
+                        'on the producer; for larger batches wsprnet '
+                        'reports aggregate rejection only.')
 
 
 def _add_psk_watch_args(p) -> None:
