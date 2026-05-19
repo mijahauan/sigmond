@@ -4751,19 +4751,22 @@ _smd_complete() {
                 sources)
                     case "${words[2]}" in
                         list)
-                            COMPREPLY=($(compgen -W "--clients-only --inventory" -- "$cur"))
+                            COMPREPLY=($(compgen -W "--clients-only --inventory --keys" -- "$cur"))
                             ;;
                         add|remove)
                             # Position 3 = client; position 4 = source key.
                             # Static list of well-known clients (matches sources.KNOWN_CLIENTS).
                             if [[ $cword -eq 3 ]]; then
                                 COMPREPLY=($(compgen -W "wspr-recorder psk-recorder hfdl-recorder codar-sounder" -- "$cur"))
+                            elif [[ $cword -eq 4 ]]; then
+                                # Costs one mDNS round-trip (~1 s).  Acceptable
+                                # since the operator already typed a verb +
+                                # client and is committed to the action; cache
+                                # would help if it gets annoying.
+                                local _keys
+                                _keys=$(smd sources list --keys 2>/dev/null)
+                                COMPREPLY=($(compgen -W "$_keys" -- "$cur"))
                             fi
-                            # Dynamic source-key completion at position 4 would
-                            # require running `smd sources list --inventory`,
-                            # which costs an mDNS round-trip per <TAB>.  Skip
-                            # for now and rely on the operator copy-pasting
-                            # from the list output.
                             ;;
                         *)
                             COMPREPLY=($(compgen -W "list add remove apply" -- "$cur"))
@@ -5416,7 +5419,8 @@ def cmd_sources_list(args) -> int:
     Default mode prints both: (1) each known client and the keys it's
     consuming from, and (2) the full set of sources currently visible
     on the LAN.  ``--clients-only`` or ``--inventory`` narrows the
-    output for scripting.
+    output for scripting.  ``--keys`` emits one source key per line
+    with no decoration — used by bash completion.
     """
     if not _HAS_SIGMOND_LIB:
         _err('sigmond library not found; install lib/sigmond alongside bin/smd')
@@ -5426,6 +5430,20 @@ def cmd_sources_list(args) -> int:
         load_all_selections,
         DEFAULT_CLIENTS_ROOT,
     )
+
+    # Plain machine-readable mode: just the keys, one per line.  Suppresses
+    # all decoration so completion / scripts can consume directly.
+    if bool(getattr(args, 'keys', False)):
+        rows, err = _sources_inventory()
+        if err is not None:
+            # Stay silent on stdout in machine mode so the completion
+            # script doesn't surface the failure as bogus candidates;
+            # the error still goes to stderr.
+            print(err, file=sys.stderr)
+            return 1
+        for r in rows:
+            print(str(r.key), flush=True)
+        return 0
 
     show_clients = not bool(getattr(args, 'inventory', False))
     show_inventory = not bool(getattr(args, 'clients_only', False))
@@ -5469,6 +5487,8 @@ def cmd_sources_add(args) -> int:
     if not _HAS_SIGMOND_LIB:
         _err('sigmond library not found; install lib/sigmond alongside bin/smd')
         return 1
+    if _need_root('sources add'):
+        return 1
     from sigmond.sources import ClientSources, KNOWN_CLIENTS
 
     client = args.client
@@ -5497,6 +5517,8 @@ def cmd_sources_remove(args) -> int:
     """Drop a source-key from a client's selection."""
     if not _HAS_SIGMOND_LIB:
         _err('sigmond library not found; install lib/sigmond alongside bin/smd')
+        return 1
+    if _need_root('sources remove'):
         return 1
     from sigmond.sources import ClientSources
 
@@ -8785,6 +8807,9 @@ def main() -> int:
                             help='omit the inventory section (just per-client selections)')
     p_src_list.add_argument('--inventory', action='store_true',
                             help='omit the per-client section (just discovered sources)')
+    p_src_list.add_argument('--keys', action='store_true',
+                            help='emit one source-key per line, no decoration '
+                                 '(used by bash completion; scriptable)')
     p_src_add = sources_sub.add_parser(
         'add',
         help='add a source-key to a client\'s selection',
