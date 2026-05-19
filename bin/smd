@@ -4792,6 +4792,9 @@ _smd_complete() {
                                 fi
                             fi
                             ;;
+                        apply)
+                            COMPREPLY=($(compgen -W "--dry-run" -- "$cur"))
+                            ;;
                         *)
                             COMPREPLY=($(compgen -W "list add remove apply" -- "$cur"))
                             ;;
@@ -5575,38 +5578,227 @@ def cmd_sources_remove(args) -> int:
     return 0
 
 
-def cmd_sources_apply(args) -> int:
-    """Phase 2 stub — show what would be rendered to each client's env.
+def _render_source_block(key_str: str,
+                         status_address: str,
+                         label: str = "") -> str:
+    """Format one ``[[source]]`` TOML table for the wspr-recorder
+    config schema (matches ``wspr_recorder.config.load_config``)."""
+    lines = [
+        "[[source]]",
+        f'key = "{key_str}"',
+        f'status_address = "{status_address}"',
+    ]
+    if label:
+        # Escape any embedded double quotes so the operator-edited
+        # mDNS name "AC0G's RX" doesn't break TOML parsing.
+        safe_label = label.replace('\\', '\\\\').replace('"', '\\"')
+        lines.append(f'label = "{safe_label}"')
+    lines.append("")
+    return "\n".join(lines)
 
-    Today clients are still single-radiod and the renderer that
-    propagates multi-source selections into their config will land in
-    Phase 3.  This verb currently prints a dry-run summary so the
-    operator can preview the future render.
+
+def _strip_existing_source_blocks(body: str) -> str:
+    """Remove every ``[[source]] … `` block from a TOML body, plus any
+    legacy management-comment headers from earlier sigmond versions.
+
+    A ``[[source]]`` block runs from its header line until either the
+    next ``[`` header on a new line or end-of-file.  We also drop
+    standalone "# Source selection — managed by …" comment lines that
+    earlier versions of this verb appended, so repeated apply runs
+    converge to a clean file.
+
+    Conservative regex: doesn't touch ``[radiod]`` or any other
+    section; only the ``[[source]]`` array-of-tables form + its
+    historical comment header.
+    """
+    import re as _re
+    # Drop the historical management-comment header (any version of it
+    # that earlier sigmond builds wrote out).
+    body = _re.sub(
+        r'(?m)^# Source selection.*?\n',
+        '',
+        body,
+    )
+    pattern = _re.compile(
+        r'(?ms)^\[\[source\]\][^\n]*\n'    # the header line
+        r'(?:[^\n]*\n)*?'                  # body lines (non-greedy)
+        r'(?=^\[|\Z)'                       # stop at next section / EOF
+    )
+    return pattern.sub('', body)
+
+
+def _apply_sources_to_wspr_recorder(
+    selected_keys, inventory_rows, config_path, dry_run: bool,
+) -> tuple:
+    """Render ``selected_keys`` into ``[[source]]`` blocks in the
+    wspr-recorder config.toml.
+
+    Returns ``(changed, message)``.  No-op when the rendered output
+    matches what's already on disk.  When dry_run=True returns the
+    diff without writing.
+    """
+    if not config_path.exists():
+        return (False,
+                f'  ✗ {config_path}: not found — skipping wspr-recorder')
+
+    body_before = config_path.read_text()
+    # Build a lookup: stable key → InventoryRow (so we can pull label
+    # and address from a live probe when available).
+    by_key = {str(r.key): r for r in inventory_rows}
+
+    blocks: list[str] = []
+    for key in selected_keys:
+        key_str = str(key)
+        row = by_key.get(key_str)
+        if row is not None:
+            # Inventory hit — use the discovered hostname + label.
+            label = row.label or ''
+            # For radiod sources the identifier IS the status_address.
+            # For other types this would need adapting; phase 3d
+            # supports radiod only.
+            if key.type != 'radiod':
+                continue
+            status_address = key.identifier
+        else:
+            # Operator selected something that's not currently visible
+            # on the LAN.  Render with the key's identifier as the
+            # status_address and no label; the recorder will still
+            # try to reach it.
+            if key.type != 'radiod':
+                continue
+            status_address = key.identifier
+            label = ''
+        blocks.append(_render_source_block(
+            key_str=key_str,
+            status_address=status_address,
+            label=label,
+        ))
+
+    # Strip any pre-existing [[source]] blocks and append the new
+    # set (or nothing, if the selection is empty).
+    body_stripped = _strip_existing_source_blocks(body_before).rstrip() + '\n'
+    if blocks:
+        # No header comment — repeated applies must be idempotent and
+        # any prose we add would have to be stripped on re-write to
+        # avoid drift.  The ``[[source]]`` table header is
+        # self-documenting and the operator can read this file with
+        # `sudo cat /etc/wspr-recorder/config.toml`.
+        body_after = body_stripped + '\n' + '\n'.join(blocks)
+    else:
+        body_after = body_stripped
+
+    if body_after == body_before:
+        return (False, f'  ✓ {config_path}: already up to date')
+
+    if dry_run:
+        return (True,
+                f'  ⌗ {config_path}: would rewrite '
+                f'({len(blocks)} [[source]] entries; dry-run)')
+
+    # Atomic write via temp-rename so an interrupted apply leaves the
+    # prior config intact.  Preserve the file's owner/mode (typical
+    # ownership is wsprrec:wsprrec 0640).
+    import shutil as _shutil
+    tmp_path = config_path.with_suffix(config_path.suffix + '.tmp')
+    tmp_path.write_text(body_after)
+    # Match the original file's permissions and ownership so the
+    # recorder (running as wsprrec) keeps read access.
+    try:
+        st = config_path.stat()
+        os.chmod(tmp_path, st.st_mode & 0o7777)
+        os.chown(tmp_path, st.st_uid, st.st_gid)
+    except OSError as exc:
+        # chmod/chown failures aren't fatal — the rename will still
+        # happen and the operator can fix perms with chmod/chown if
+        # needed.
+        logger = None  # avoid linter complaint
+        del exc
+    tmp_path.replace(config_path)
+    return (True,
+            f'  ✓ {config_path}: wrote {len(blocks)} [[source]] entries')
+
+
+def cmd_sources_apply(args) -> int:
+    """Render every client's source selection into its config.
+
+    For wspr-recorder this means writing ``[[source]]`` blocks into
+    ``/etc/wspr-recorder/config.toml``.  Pre-existing source blocks
+    are replaced; legacy ``[radiod]`` sections are left untouched
+    (the recorder's config loader treats them as a fallback when
+    no ``[[source]]`` entries are present).
+
+    Does NOT restart the service — print the next step instead so
+    the operator decides when to disrupt running cycles.  Other
+    clients (psk-recorder, hfdl-recorder, codar-sounder) are not
+    yet multi-source aware; this verb prints a deferred-note for
+    them and exits cleanly.
     """
     if not _HAS_SIGMOND_LIB:
         _err('sigmond library not found; install lib/sigmond alongside bin/smd')
         return 1
+    dry_run = bool(getattr(args, 'dry_run', False))
+    # Self-elevate even for dry-run: the wspr-recorder config.toml is
+    # owned by the wsprrec user (mode 0640) so we need root to read it
+    # before we can diff and report.
+    if _need_root('sources apply'):
+        return 1
     from sigmond.sources import KNOWN_CLIENTS, load_all_selections
 
-    _heading('sources apply — dry-run preview')
-    _info('  Phase 2 ships the selection model + CLI only; the renderer that')
-    _info('  propagates these into each client\'s env/config lands in Phase 3.')
-    _info('  Today: clients still bind to a single radiod via their existing env.')
-    print(flush=True)
+    _heading(
+        'sources apply — dry-run' if dry_run else 'sources apply',
+    )
+
+    # Probe inventory once so per-client renders can look up labels.
+    inventory_rows, err = _sources_inventory()
+    inventory_rows = inventory_rows or []
+    if err:
+        _info(f'  ⚠ {err} — proceeding without inventory enrichment')
 
     selections = load_all_selections()
-    any_selected = False
+    any_changed = False
+    restart_hints: list = []
+
     for client in KNOWN_CLIENTS:
         cs = selections[client]
-        if not cs.selected:
+        if client != 'wspr-recorder':
+            # Other clients aren't multi-source aware yet (phase 4+).
+            # If the operator has a selection for them, surface it
+            # but explain it won't take effect today.
+            if cs.selected:
+                _info(
+                    f'  ⊘ {client}: {len(cs.selected)} source(s) '
+                    'selected but {client} is not yet multi-source aware '
+                    '(deferred to a later phase)'
+                )
             continue
-        any_selected = True
-        print(f'  {client}:')
-        for k in cs.selected:
-            print(f'    {k}')
-    if not any_selected:
-        _info('  No client has any source selected yet.')
-        _info('  Add one with `smd sources add <client> <source-key>`.')
+
+        from pathlib import Path as _Path
+        config_path = _Path('/etc/wspr-recorder/config.toml')
+        changed, message = _apply_sources_to_wspr_recorder(
+            cs.selected, inventory_rows, config_path, dry_run=dry_run,
+        )
+        print(message, flush=True)
+        if changed:
+            any_changed = True
+            restart_hints.append(
+                f'wspr-recorder@<instance>.service (e.g. '
+                f'sudo systemctl restart wspr-recorder@AC0G-B4)'
+            )
+
+    if not any_changed:
+        _info('  nothing to do; every client already in sync with its selection')
+        return 0
+
+    if dry_run:
+        _info('  re-run without --dry-run to apply')
+        return 0
+
+    print(flush=True)
+    _heading('next step')
+    for hint in restart_hints:
+        _info(f'  restart {hint}')
+    _info('  the new [[source]] entries take effect on next start')
+    return 0
     return 0
 
 
@@ -8850,8 +9042,12 @@ def main() -> int:
                               help='key to remove (full or unique substring)')
     p_src_apply = sources_sub.add_parser(
         'apply',
-        help='render selections to each client\'s env/config (dry-run in '
-             'phase 2; real apply lands in phase 3)',
+        help='render selections to each client\'s config (writes '
+             '[[source]] tables; operator restarts the service)',
+    )
+    p_src_apply.add_argument(
+        '--dry-run', action='store_true', dest='dry_run',
+        help='show what would change without writing',
     )
 
     # completion
