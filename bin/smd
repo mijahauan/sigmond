@@ -7009,8 +7009,14 @@ def cmd_wspr_watch(args) -> int:
     #         wspr.noise (4 bands, write 2 ms)
     # The noise clause is captured optionally so pre-Phase-2 hosts
     # without noise plumbing still parse correctly.
+    # Two log-line shapes accepted:
+    #   pre-2026-05-19: ``cycle UTC HH:MM → N spots in wspr.spots …``
+    #   post-2026-05-19 (multi-source): ``cycle UTC HH:MM rx=<source-key> → N spots …``
+    # ``rx`` is captured as group 3 when present (empty string otherwise).
     cycle_re = _re.compile(
-        r'cycle\s+UTC\s+(\d{2}):(\d{2})\s+\S+\s+'
+        r'cycle\s+UTC\s+(\d{2}):(\d{2})\s+'
+        r'(?:rx=(\S+)\s+)?'
+        r'\S+\s+'                       # arrow ("→" or "->")
         r'(\d+)\s+spots\s+in\s+wspr\.spots'
         r'(?:,\s+(\d+)\s+noise\s+rows\s+in\s+wspr\.noise)?\s+'
         r'\((\d+)\s+bands?,\s+(?:sqlite\s+)?write\s+(\d+)\s*ms\)'
@@ -7396,7 +7402,7 @@ def cmd_wspr_watch(args) -> int:
             cm = cycle_re.search(line)
             if not cm:
                 continue
-            hh, mm, spots_n_s, noise_n_s, bands_n_s, write_ms_s = cm.groups()
+            hh, mm, rx, spots_n_s, noise_n_s, bands_n_s, write_ms_s = cm.groups()
             cycle_iso = _cycle_iso(hh, mm)
             tm = ts_re.match(line)
             hms = tm.group(2) if tm else _datetime.datetime.now().strftime('%H:%M:%S')
@@ -7418,8 +7424,25 @@ def cmd_wspr_watch(args) -> int:
                 counts_part = '  [shipped]'
 
             noise_part = f' / {noise_n} noise' if noise_n else ''
+            # Render rx_source as a compact tag: strip ``radiod:`` and
+            # the ``-status.local`` suffix so the typical multi-source
+            # key ``radiod:bee1-status.local`` shows as ``bee1``.
+            # Empty / missing rx (pre-rx-tag log lines or unconfigured
+            # single-source) renders without a tag at all.
+            rx_part = ''
+            if rx:
+                short = rx
+                for prefix in ('radiod:', 'kiwisdr:', 'usb:'):
+                    if short.startswith(prefix):
+                        short = short[len(prefix):]
+                        break
+                for suffix in ('-status.local', '.local'):
+                    if short.endswith(suffix):
+                        short = short[:-len(suffix)]
+                        break
+                rx_part = f' rx={short}'
             cycle_text = (
-                f'[{hms}] cycle UTC {hh}:{mm}  '
+                f'[{hms}] cycle UTC {hh}:{mm}{rx_part}  '
                 f'{spots_n:>3} spots{noise_part} / {bands_n} bands  '
                 f'(write {write_ms} ms){counts_part}'
             )
