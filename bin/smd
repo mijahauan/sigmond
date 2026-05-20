@@ -4455,73 +4455,42 @@ def cmd_diag_sftp(args) -> int:
     import socket as _socket
     import subprocess as _sub
     import time as _time
-    from collections import defaultdict
+    from sigmond.diag_sftp import (
+        DEFAULT_PORT, DEFAULT_USER, DEFAULT_KEY_ENV, DEFAULT_SERVERS_ENV,
+        classify_flapping,
+        find_env_var,
+        parse_servers_list,
+        parse_ssh_keygen_l_line,
+    )
 
     # --- collect servers --------------------------------------------------
-    servers = []
-    if getattr(args, 'servers', None):
-        servers = [s.strip() for s in args.servers.split(',') if s.strip()]
-    else:
-        # Discover from wspr-recorder env files.  Same shape as the unit
-        # itself reads — fail loudly if WD_SFTP_SERVERS isn't set so the
-        # operator notices a config gap.
-        env_dir = Path('/etc/wspr-recorder/env')
-        if env_dir.is_dir():
-            for env_file in sorted(env_dir.glob('*.env')):
-                try:
-                    text = env_file.read_text()
-                except OSError:
-                    continue
-                for line in text.splitlines():
-                    line = line.strip()
-                    if line.startswith('WD_SFTP_SERVERS='):
-                        raw = line.split('=', 1)[1].strip().strip('"').strip("'")
-                        servers.extend(
-                            s.strip() for s in raw.split(',') if s.strip()
-                        )
-                        break
-                if servers:
-                    break
-    # Each entry may be "user@host" (legacy SSH userinfo form); split it.
-    parsed: list[tuple[str, str, int]] = []  # (user, host, port)
-    default_user = getattr(args, 'user', None) or 'wsprdaemon'
-    default_port = int(getattr(args, 'port', None) or 22)
-    for s in servers:
-        host = s
-        user = default_user
-        port = default_port
-        if '@' in host:
-            user, host = host.split('@', 1)
-        if ':' in host:
-            host, port_s = host.rsplit(':', 1)
-            try:
-                port = int(port_s)
-            except ValueError:
-                pass
-        parsed.append((user, host, port))
+    default_user = getattr(args, 'user', None) or DEFAULT_USER
+    default_port = int(getattr(args, 'port', None) or DEFAULT_PORT)
+    env_dir = Path('/etc/wspr-recorder/env')
+
+    servers_csv = getattr(args, 'servers', None)
+    if not servers_csv:
+        servers_csv = find_env_var(env_dir, DEFAULT_SERVERS_ENV) or ''
+
+    try:
+        parsed = parse_servers_list(
+            servers_csv,
+            default_user=default_user,
+            default_port=default_port,
+        )
+    except ValueError as exc:
+        _err(f'malformed server entry: {exc}')
+        return 2
 
     if not parsed:
-        _err('no SFTP servers — pass --servers or set WD_SFTP_SERVERS '
-             'in /etc/wspr-recorder/env/*.env')
+        _err(f'no SFTP servers — pass --servers or set '
+             f'{DEFAULT_SERVERS_ENV} in /etc/wspr-recorder/env/*.env')
         return 2
 
     repeat = max(1, int(getattr(args, 'repeat', 3) or 3))
     key_file = getattr(args, 'key', None)
     if key_file is None:
-        # Pick up the canonical wspr-recorder key path from the env files,
-        # so the probe uses the same identity the live service does.
-        env_dir = Path('/etc/wspr-recorder/env')
-        if env_dir.is_dir():
-            for env_file in sorted(env_dir.glob('*.env')):
-                try:
-                    for line in env_file.read_text().splitlines():
-                        if line.strip().startswith('HS_UPLOADER_SSH_KEY_FILE='):
-                            key_file = line.split('=', 1)[1].strip().strip('"').strip("'")
-                            break
-                    if key_file:
-                        break
-                except OSError:
-                    continue
+        key_file = find_env_var(env_dir, DEFAULT_KEY_ENV)
 
     want_json = bool(getattr(args, 'json', False))
     report: dict = {'servers': [], 'key_file': key_file, 'repeat': repeat}
@@ -4542,6 +4511,9 @@ def cmd_diag_sftp(args) -> int:
             'attempts': [],
             'fingerprints': set(),
             'banners': set(),
+            # Per-attempt {key_type: fingerprint_line} dicts — fed to
+            # ``classify_flapping`` after the loop.
+            '_per_attempt_fps_by_type': [],
         }
         if not want_json:
             print()
@@ -4579,6 +4551,7 @@ def cmd_diag_sftp(args) -> int:
             ks_cmd = ['ssh-keyscan', '-T', '5', '-p', str(port), '-t', 'ed25519,rsa', host]
             ks = _sub.run(ks_cmd, capture_output=True, text=True, timeout=10)
             fp_lines = []
+            this_attempt_by_type: dict[str, str] = {}
             for line in ks.stdout.splitlines():
                 line = line.strip()
                 if line and not line.startswith('#'):
@@ -4588,19 +4561,13 @@ def cmd_diag_sftp(args) -> int:
                     )
                     if fp_proc.returncode == 0:
                         fp_line = fp_proc.stdout.strip()
-                        # ``ssh-keygen -l`` output: ``<bits> <fp> <comment> (<TYPE>)``
-                        # — extract the (TYPE) suffix so we can group.
                         fp_lines.append(fp_line)
-                        key_type = 'UNKNOWN'
-                        if fp_line.endswith(')'):
-                            paren_open = fp_line.rfind('(')
-                            if paren_open != -1:
-                                key_type = fp_line[paren_open + 1:-1]
-                        srv_record.setdefault(
-                            'fingerprints_by_type', defaultdict(set)
-                        )[key_type].add(fp_line)
-                        # Keep the flat set too for the JSON report.
                         srv_record['fingerprints'].add(fp_line)
+                        parsed_kt = parse_ssh_keygen_l_line(fp_line)
+                        if parsed_kt is not None:
+                            kt, _ = parsed_kt
+                            this_attempt_by_type[kt] = fp_line
+            srv_record['_per_attempt_fps_by_type'].append(this_attempt_by_type)
             attempt['host_keys'] = fp_lines
 
             # Auth attempt: ssh -o BatchMode=yes; capture exit code +
@@ -4659,14 +4626,22 @@ def cmd_diag_sftp(args) -> int:
         # is: same key TYPE shows multiple fingerprints across
         # attempts.  Different TYPES with one fingerprint each is
         # normal (ed25519 + rsa coexist on every modern OpenSSH).
-        by_type = dict(srv_record.pop('fingerprints_by_type', {}))
-        # Serialize as {key_type: [sorted fingerprints]} for JSON.
+        flapping = classify_flapping(
+            srv_record.pop('_per_attempt_fps_by_type')
+        )
+        # JSON-friendly per-type fingerprint summary across ALL attempts
+        # (includes non-flapping types too — useful for incident reports).
+        all_by_type: dict[str, set[str]] = {}
+        for fp in srv_record['fingerprints']:
+            parsed_kt = parse_ssh_keygen_l_line(fp)
+            if parsed_kt is None:
+                continue
+            kt, _ = parsed_kt
+            all_by_type.setdefault(kt, set()).add(fp)
         srv_record['fingerprints_by_type'] = {
-            k: sorted(v) for k, v in by_type.items()
+            k: sorted(v) for k, v in all_by_type.items()
         }
-        flapping_types = [
-            k for k, v in by_type.items() if len(v) > 1
-        ]
+        flapping_types = sorted(flapping.keys())
         srv_record['flapping_key_types'] = flapping_types
         srv_record['banner_count'] = len(srv_record['banners'])
         srv_record['fingerprints'] = sorted(srv_record['fingerprints'])
@@ -4687,11 +4662,11 @@ def cmd_diag_sftp(args) -> int:
                     'per-backend keys, or server-side rekey storm)'
                 )
                 for k in flapping_types:
-                    for fp in sorted(by_type[k]):
+                    for fp in flapping[k]:
                         _info(f'    {fp}')
-            elif by_type:
+            elif all_by_type:
                 _ok(f'  {host}: stable host keys')
-                for k, fps in sorted(by_type.items()):
+                for k, fps in sorted(all_by_type.items()):
                     for fp in sorted(fps):
                         _info(f'    {fp}')
             if srv_record['banner_count'] > 1:
