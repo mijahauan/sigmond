@@ -7020,6 +7020,12 @@ def cmd_wspr_watch(args) -> int:
         r'(\d+)\s+spots\s+in\s+wspr\.spots'
         r'(?:,\s+(\d+)\s+noise\s+rows\s+in\s+wspr\.noise)?\s+'
         r'\((\d+)\s+bands?,\s+(?:sqlite\s+)?write\s+(\d+)\s*ms\)'
+        # Optional trailing ``bands=[40:10 30:7 ...]`` — wspr-recorder
+        # emits this from the in-memory cycle batch so we don't have
+        # to race sqlite's cross-rx dedup to render the per-rx
+        # breakdown.  Bare band names; "m" suffix is added by the
+        # display formatter.
+        r'(?:\s+bands=\[([^\]]*)\])?'
     )
     # wd-upload-hs's per-pump line.  Two shapes — the simple one when
     # posted==added, and the "posted:N/added:M" shape when wsprnet
@@ -7487,7 +7493,8 @@ def cmd_wspr_watch(args) -> int:
             cm = cycle_re.search(line)
             if not cm:
                 continue
-            hh, mm, rx, spots_n_s, noise_n_s, bands_n_s, write_ms_s = cm.groups()
+            (hh, mm, rx, spots_n_s, noise_n_s, bands_n_s, write_ms_s,
+             inline_bands_s) = cm.groups()
             cycle_iso = _cycle_iso(hh, mm)
             tm = ts_re.match(line)
             hms = tm.group(2) if tm else _datetime.datetime.now().strftime('%H:%M:%S')
@@ -7496,33 +7503,45 @@ def cmd_wspr_watch(args) -> int:
             bands_n = int(bands_n_s)
             write_ms = int(write_ms_s)
 
-            # Query rows immediately — race window is ~18 s before
-            # wd-upload-hs sweeps, so live events always succeed.  Filter
-            # by the raw ``rx`` capture (matches payload's rx_source) so
-            # the histogram only counts spots THIS rx contributed; in
-            # dual-source mode the second commit line would otherwise
-            # repeat the first's histogram (bee1's 54-spot breakdown
-            # showed up unchanged on B4-100's 9-spot line).
-            rows = _query_cycle(cycle_iso, rx or '') or []
             counts_part = ''
-            if rows:
-                # Show whatever we have.  We used to require an exact
-                # ``len(rows) == spots_n`` match to filter out partial
-                # band-dedup residue in backlog mode, but that races
-                # against sqlite WAL visibility — the cycle-commit log
-                # line emits before the sqlite WAL fsync becomes
-                # visible to read connections, so a fresh query can
-                # legitimately return slightly fewer rows than what
-                # the recorder wrote.  The looser predicate also stops
-                # falsely flagging "[shipped]" when the wsprnet-
-                # verifier deletes a few rows mid-cycle.
-                counts_part = '  [' + _format_band_counts(
-                    _per_band_counts(rows)) + ']'
-            elif backlog_min > 0:
-                # Backlog cycle with zero residual rows — wsprnet pump
-                # + verifier flushed everything; can't reconstruct the
-                # per-band breakdown.
-                counts_part = '  [shipped]'
+            if inline_bands_s is not None:
+                # wspr-recorder emitted the per-band breakdown in the
+                # log line itself — use it verbatim.  This bypasses
+                # the sqlite query (and the cross-rx dedup race that
+                # deletes "loser" siblings within ms of insert,
+                # making bee1/bee2's breakdowns disappear before we
+                # could read them in 3-source mode).
+                counts: dict = {}
+                for tok in inline_bands_s.split():
+                    if ':' not in tok:
+                        continue
+                    band, _, count_s = tok.partition(':')
+                    try:
+                        counts[band] = int(count_s)
+                    except ValueError:
+                        continue
+                if counts:
+                    counts_part = '  [' + _format_band_counts(counts) + ']'
+            else:
+                # Older wspr-recorder log format (no inline breakdown)
+                # — fall back to querying pending_uploads.  Filter by
+                # the raw ``rx`` capture so the histogram only counts
+                # spots THIS rx contributed.
+                rows = _query_cycle(cycle_iso, rx or '') or []
+                if rows:
+                    # Show whatever we have.  We used to require an
+                    # exact ``len(rows) == spots_n`` match but that
+                    # races sqlite WAL visibility — the cycle-commit
+                    # log line emits before the WAL fsync becomes
+                    # visible to read connections, so a fresh query
+                    # can legitimately return slightly fewer rows.
+                    counts_part = '  [' + _format_band_counts(
+                        _per_band_counts(rows)) + ']'
+                elif backlog_min > 0:
+                    # Backlog cycle with zero residual rows — wsprnet
+                    # pump + verifier flushed everything; can't
+                    # reconstruct the per-band breakdown.
+                    counts_part = '  [shipped]'
 
             # Pad noise + write_ms to a fixed column width so each
             # column lines up across cycles regardless of digit count.
