@@ -7299,6 +7299,11 @@ def cmd_wspr_watch(args) -> int:
     # was lost and the consumer's 60 s polling tick will fire eventually,
     # but we don't want to block the UI on it).
     pending: dict = {}    # keys: 'line', 'extras', 'ts', 'deadline'
+    # Track the last cycle's HH:MM so we can emit a blank line between
+    # blocks of cycle output for visual separation (two source lines
+    # per cycle were getting mashed together with the prior cycle's
+    # rejected-spot tail).
+    last_cycle_hhmm: list = [None]
 
     def _flush_pending(ship_suffix: str = '') -> None:
         if not pending:
@@ -7460,6 +7465,14 @@ def cmd_wspr_watch(args) -> int:
             # If a previous cycle is still pending (no shipped event
             # ever arrived) flush it before starting the new one.
             _flush_pending()
+
+            # Visual separator between cycle blocks — print a blank
+            # line each time we cross from one HH:MM to the next.
+            # Within a single cycle (multi-source), both rx lines stay
+            # together with no separator.
+            if last_cycle_hhmm[0] is not None and last_cycle_hhmm[0] != (hh, mm):
+                print(flush=True)
+            last_cycle_hhmm[0] = (hh, mm)
 
             # Per-spot detail prints under the summary line after the
             # cycle+ship are merged.  Build it now into `extras` so it
