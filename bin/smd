@@ -4430,6 +4430,288 @@ def cmd_diag_net(args) -> int:
     return 0
 
 
+def cmd_diag_sftp(args) -> int:
+    """Probe wsprdaemon-server SFTP gateways for connectivity + auth.
+
+    Repeats each probe N times by default so a flapping host key
+    (gateway behind a load balancer, server-side rekey storm) shows
+    up as fingerprint variance in the report — that's the failure
+    signature behind the
+    ``WsprdaemonTarSftp: gw1.wsprdaemon.org failed: d to add the host
+    to the list of known hosts`` warnings.
+
+    Per attempt, captures: TCP port-22 latency, SSH banner (server
+    version), host-key fingerprint (SHA256), key-auth result.  Runs
+    as the invoking user with ``-o BatchMode=yes`` (no interactive
+    prompts), pointed at the wspr-recorder service's SSH key
+    (``HS_UPLOADER_SSH_KEY_FILE`` from
+    ``/etc/wspr-recorder/env/*.env`` — unset means try the user's
+    default key).
+
+    Exit code is 0 when every server passed every attempt; 1 if any
+    attempt failed; 2 if no servers were probed (config error).
+    """
+    import json as _json
+    import socket as _socket
+    import subprocess as _sub
+    import time as _time
+    from collections import defaultdict
+
+    # --- collect servers --------------------------------------------------
+    servers = []
+    if getattr(args, 'servers', None):
+        servers = [s.strip() for s in args.servers.split(',') if s.strip()]
+    else:
+        # Discover from wspr-recorder env files.  Same shape as the unit
+        # itself reads — fail loudly if WD_SFTP_SERVERS isn't set so the
+        # operator notices a config gap.
+        env_dir = Path('/etc/wspr-recorder/env')
+        if env_dir.is_dir():
+            for env_file in sorted(env_dir.glob('*.env')):
+                try:
+                    text = env_file.read_text()
+                except OSError:
+                    continue
+                for line in text.splitlines():
+                    line = line.strip()
+                    if line.startswith('WD_SFTP_SERVERS='):
+                        raw = line.split('=', 1)[1].strip().strip('"').strip("'")
+                        servers.extend(
+                            s.strip() for s in raw.split(',') if s.strip()
+                        )
+                        break
+                if servers:
+                    break
+    # Each entry may be "user@host" (legacy SSH userinfo form); split it.
+    parsed: list[tuple[str, str, int]] = []  # (user, host, port)
+    default_user = getattr(args, 'user', None) or 'wsprdaemon'
+    default_port = int(getattr(args, 'port', None) or 22)
+    for s in servers:
+        host = s
+        user = default_user
+        port = default_port
+        if '@' in host:
+            user, host = host.split('@', 1)
+        if ':' in host:
+            host, port_s = host.rsplit(':', 1)
+            try:
+                port = int(port_s)
+            except ValueError:
+                pass
+        parsed.append((user, host, port))
+
+    if not parsed:
+        _err('no SFTP servers — pass --servers or set WD_SFTP_SERVERS '
+             'in /etc/wspr-recorder/env/*.env')
+        return 2
+
+    repeat = max(1, int(getattr(args, 'repeat', 3) or 3))
+    key_file = getattr(args, 'key', None)
+    if key_file is None:
+        # Pick up the canonical wspr-recorder key path from the env files,
+        # so the probe uses the same identity the live service does.
+        env_dir = Path('/etc/wspr-recorder/env')
+        if env_dir.is_dir():
+            for env_file in sorted(env_dir.glob('*.env')):
+                try:
+                    for line in env_file.read_text().splitlines():
+                        if line.strip().startswith('HS_UPLOADER_SSH_KEY_FILE='):
+                            key_file = line.split('=', 1)[1].strip().strip('"').strip("'")
+                            break
+                    if key_file:
+                        break
+                except OSError:
+                    continue
+
+    want_json = bool(getattr(args, 'json', False))
+    report: dict = {'servers': [], 'key_file': key_file, 'repeat': repeat}
+
+    if not want_json:
+        _heading('SFTP probe')
+        _info(f'servers: {", ".join(f"{u}@{h}:{p}" for u, h, p in parsed)}')
+        _info(f'attempts per server: {repeat}')
+        if key_file:
+            _info(f'identity: {key_file}')
+        else:
+            _info('identity: (default ~/.ssh/id_*)')
+
+    overall_ok = True
+    for (user, host, port) in parsed:
+        srv_record: dict = {
+            'user': user, 'host': host, 'port': port,
+            'attempts': [],
+            'fingerprints': set(),
+            'banners': set(),
+        }
+        if not want_json:
+            print()
+            _info(f'-- {user}@{host}:{port} --')
+
+        for i in range(1, repeat + 1):
+            attempt: dict = {'n': i}
+            # TCP probe (capture latency + the SSH banner)
+            t0 = _time.monotonic()
+            banner = ''
+            tcp_err = None
+            try:
+                with _socket.create_connection((host, port), timeout=5.0) as sock:
+                    sock.settimeout(3.0)
+                    try:
+                        banner = sock.recv(256).decode('latin-1', 'replace').strip()
+                    except _socket.timeout:
+                        banner = '(no banner within 3s)'
+            except (_socket.gaierror, _socket.timeout, OSError) as exc:
+                tcp_err = f'{type(exc).__name__}: {exc}'
+            rtt_ms = int((_time.monotonic() - t0) * 1000)
+            attempt['tcp_ms'] = rtt_ms
+            if tcp_err:
+                attempt['tcp_error'] = tcp_err
+            if banner:
+                attempt['banner'] = banner[:120]
+                srv_record['banners'].add(attempt['banner'])
+
+            # Host-key fingerprint via ssh-keyscan (independent of auth).
+            # Most servers advertise multiple host-key TYPES (ed25519 +
+            # rsa); that's normal, not a flap.  Bucket fingerprints by
+            # key type so the cross-attempt check only flags when the
+            # SAME type returns DIFFERENT fingerprints — that's the
+            # genuine load-balancer / rekey signature.
+            ks_cmd = ['ssh-keyscan', '-T', '5', '-p', str(port), '-t', 'ed25519,rsa', host]
+            ks = _sub.run(ks_cmd, capture_output=True, text=True, timeout=10)
+            fp_lines = []
+            for line in ks.stdout.splitlines():
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    fp_proc = _sub.run(
+                        ['ssh-keygen', '-l', '-f', '-'],
+                        input=line, capture_output=True, text=True, timeout=5,
+                    )
+                    if fp_proc.returncode == 0:
+                        fp_line = fp_proc.stdout.strip()
+                        # ``ssh-keygen -l`` output: ``<bits> <fp> <comment> (<TYPE>)``
+                        # — extract the (TYPE) suffix so we can group.
+                        fp_lines.append(fp_line)
+                        key_type = 'UNKNOWN'
+                        if fp_line.endswith(')'):
+                            paren_open = fp_line.rfind('(')
+                            if paren_open != -1:
+                                key_type = fp_line[paren_open + 1:-1]
+                        srv_record.setdefault(
+                            'fingerprints_by_type', defaultdict(set)
+                        )[key_type].add(fp_line)
+                        # Keep the flat set too for the JSON report.
+                        srv_record['fingerprints'].add(fp_line)
+            attempt['host_keys'] = fp_lines
+
+            # Auth attempt: ssh -o BatchMode=yes; capture exit code +
+            # any stderr (PermissionDenied / Connection refused / etc.)
+            ssh_cmd = [
+                'ssh', '-n',
+                '-o', 'BatchMode=yes',
+                '-o', 'ConnectTimeout=5',
+                '-o', 'NumberOfPasswordPrompts=0',
+                '-o', 'StrictHostKeyChecking=no',
+                '-o', 'UserKnownHostsFile=/dev/null',
+                '-o', 'GlobalKnownHostsFile=/dev/null',
+                '-o', 'LogLevel=ERROR',
+                '-p', str(port),
+            ]
+            if key_file:
+                ssh_cmd += ['-i', key_file, '-o', 'IdentitiesOnly=yes']
+            ssh_cmd += [f'{user}@{host}', 'true']
+            t0 = _time.monotonic()
+            try:
+                ssh = _sub.run(
+                    ssh_cmd, capture_output=True, text=True, timeout=10,
+                )
+                auth_rc = ssh.returncode
+                attempt['auth_ms'] = int((_time.monotonic() - t0) * 1000)
+                attempt['auth_rc'] = auth_rc
+                if auth_rc == 0:
+                    attempt['auth'] = 'ok'
+                else:
+                    err = (ssh.stderr or '').strip().splitlines()
+                    attempt['auth'] = 'fail'
+                    attempt['auth_stderr'] = err[-1] if err else '(no stderr)'
+            except _sub.TimeoutExpired:
+                attempt['auth'] = 'timeout'
+                attempt['auth_rc'] = -1
+                attempt['auth_ms'] = int((_time.monotonic() - t0) * 1000)
+
+            srv_record['attempts'].append(attempt)
+
+            ok = attempt.get('auth') == 'ok' and not tcp_err
+            if not want_json:
+                tag = '✓' if ok else '✗'
+                tcp_part = (
+                    f'tcp {rtt_ms:>3d}ms'
+                    if tcp_err is None else f'tcp FAIL ({tcp_err})'
+                )
+                fp_tag = (fp_lines[0].split()[1][:16] if fp_lines else '<no keys>')
+                auth_part = (
+                    f'auth {attempt.get("auth"):<7}'
+                    + (f' ({attempt.get("auth_stderr","")})'
+                       if attempt.get('auth') != 'ok' else '')
+                )
+                print(f'  {tag} attempt {i}/{repeat}: {tcp_part}  key={fp_tag}  {auth_part}')
+
+        # Per-server cross-attempt summary.  The genuine flap signal
+        # is: same key TYPE shows multiple fingerprints across
+        # attempts.  Different TYPES with one fingerprint each is
+        # normal (ed25519 + rsa coexist on every modern OpenSSH).
+        by_type = dict(srv_record.pop('fingerprints_by_type', {}))
+        # Serialize as {key_type: [sorted fingerprints]} for JSON.
+        srv_record['fingerprints_by_type'] = {
+            k: sorted(v) for k, v in by_type.items()
+        }
+        flapping_types = [
+            k for k, v in by_type.items() if len(v) > 1
+        ]
+        srv_record['flapping_key_types'] = flapping_types
+        srv_record['banner_count'] = len(srv_record['banners'])
+        srv_record['fingerprints'] = sorted(srv_record['fingerprints'])
+        srv_record['banners'] = sorted(srv_record['banners'])
+        all_ok = all(
+            a.get('auth') == 'ok' and 'tcp_error' not in a
+            for a in srv_record['attempts']
+        )
+        if not all_ok:
+            overall_ok = False
+
+        if not want_json:
+            if flapping_types:
+                _warn(
+                    f'  {host}: host key flapping — type(s) '
+                    f'{flapping_types} returned multiple fingerprints '
+                    'across attempts (load-balancer with mismatched '
+                    'per-backend keys, or server-side rekey storm)'
+                )
+                for k in flapping_types:
+                    for fp in sorted(by_type[k]):
+                        _info(f'    {fp}')
+            elif by_type:
+                _ok(f'  {host}: stable host keys')
+                for k, fps in sorted(by_type.items()):
+                    for fp in sorted(fps):
+                        _info(f'    {fp}')
+            if srv_record['banner_count'] > 1:
+                _warn(f'  {host}: {srv_record["banner_count"]} distinct SSH banners')
+                for b in srv_record['banners']:
+                    _info(f'    {b}')
+
+        report['servers'].append(srv_record)
+
+    if want_json:
+        print(_json.dumps(report, indent=2, default=str))
+    else:
+        print()
+        if overall_ok:
+            _ok('all SFTP servers passed every attempt')
+        else:
+            _warn('one or more attempts failed — see per-server detail above')
+    return 0 if overall_ok else 1
+
+
 def cmd_diag(args) -> int:
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
     client_dir = topology['client_dir']
@@ -9148,6 +9430,54 @@ def main() -> int:
     p.add_argument('--json', action='store_true',
                    help='emit full report as JSON')
 
+    # SFTP probe — connectivity + host-key fingerprint + auth across
+    # the configured wsprdaemon-server gateways.  Catches the gw1
+    # host-key-flapping pattern (different fingerprints per attempt)
+    # that surfaces as the "failed: d to add the host to the list of
+    # known hosts" warning in wspr-recorder's journal.
+    p = diag_sub.add_parser(
+        'sftp',
+        help='probe wsprdaemon-server SFTP gateways (connectivity, '
+             'host-key stability, auth)',
+        description=(
+            'Connect to each configured SFTP gateway N times in '
+            'succession and report:\n'
+            '  - TCP port-22 reachability + latency\n'
+            '  - SSH server banner\n'
+            '  - Host-key fingerprint (SHA256) per attempt\n'
+            '  - Auth result with the wspr-recorder service key\n\n'
+            'A gateway that returns more than one distinct fingerprint '
+            'across attempts is flagged — that pattern (load-balancer '
+            'with mismatched per-backend keys, server-side rekey '
+            'storm) is the underlying cause of wspr-recorder\'s '
+            '"failed: d to add the host to the list of known hosts" '
+            'warning.  Servers + identity default to whatever '
+            '/etc/wspr-recorder/env/*.env declares (WD_SFTP_SERVERS, '
+            'HS_UPLOADER_SSH_KEY_FILE) so the probe uses the same '
+            'credentials the live service does.\n\n'
+            'Exit code: 0 if all attempts on all servers passed, '
+            '1 if any failed, 2 if no servers were resolvable from '
+            'config + flags.'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument('--servers', metavar='LIST',
+                   help='comma-separated user@host[:port] (default: '
+                        'WD_SFTP_SERVERS from /etc/wspr-recorder/env/*.env)')
+    p.add_argument('--user', metavar='USER',
+                   help='SSH user when a server entry has none (default: '
+                        'wsprdaemon)')
+    p.add_argument('--port', type=int, metavar='PORT',
+                   help='SSH port when a server entry has none (default: 22)')
+    p.add_argument('--repeat', type=int, default=3, metavar='N',
+                   help='attempts per server (default: 3; bump higher to '
+                        'catch intermittent host-key changes)')
+    p.add_argument('--key', metavar='PATH',
+                   help='SSH identity file (default: HS_UPLOADER_SSH_KEY_FILE '
+                        'from env files; else system default)')
+    p.add_argument('--json', action='store_true',
+                   help='emit full report as JSON')
+
     # public-ip — quick outbound-IP lookup
     p_pip = sub.add_parser(
         'public-ip',
@@ -9669,6 +9999,8 @@ def main() -> int:
             return cmd_diag_cpu_freq(args)
         if diag_cmd == 'net':
             return cmd_diag_net(args)
+        if diag_cmd == 'sftp':
+            return cmd_diag_sftp(args)
         return cmd_diag(args)
 
     if args.command == 'psk-watch':
