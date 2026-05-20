@@ -7115,9 +7115,14 @@ def cmd_wspr_watch(args) -> int:
             cycle -= _datetime.timedelta(days=1)
         return cycle.strftime('%Y-%m-%dT%H:%M:00Z')
 
-    def _query_cycle(cycle_iso: str):
+    def _query_cycle(cycle_iso: str, rx_source: str = ''):
         """Return [(band, callsign, grid, snr_db, dt, drift_hz_s,
         freq_hz, pwr_dbm), ...] for one cycle, or None on error / no rows.
+
+        When ``rx_source`` is supplied (the recorder's raw ``rx=`` value,
+        e.g. ``radiod:bee1-status.local``), rows are filtered to that
+        stream so the per-rx commit line's histogram matches its own
+        spot count.  Without it, all rx for the cycle are returned.
 
         We open read-only so this never contends with the producer's
         writer thread.  Empty result (rows already shipped + deleted)
@@ -7129,21 +7134,39 @@ def cmd_wspr_watch(args) -> int:
             uri = f'file:{_SINK_DB}?mode=ro'
             con = _sqlite3.connect(uri, uri=True, timeout=2.0)
             try:
-                cur = con.execute(
-                    "SELECT json_extract(payload_json,'$.band'),"
-                    "       json_extract(payload_json,'$.callsign'),"
-                    "       json_extract(payload_json,'$.grid'),"
-                    "       json_extract(payload_json,'$.snr_db'),"
-                    "       json_extract(payload_json,'$.dt'),"
-                    "       json_extract(payload_json,'$.drift_hz_per_s'),"
-                    "       json_extract(payload_json,'$.frequency_hz'),"
-                    "       json_extract(payload_json,'$.pwr_dbm') "
-                    "FROM pending_uploads "
-                    "WHERE target_db='wspr' AND target_table='spots' "
-                    "  AND json_extract(payload_json,'$.time')=? "
-                    "ORDER BY 1, 7, 2",
-                    (cycle_iso,),
-                )
+                if rx_source:
+                    cur = con.execute(
+                        "SELECT json_extract(payload_json,'$.band'),"
+                        "       json_extract(payload_json,'$.callsign'),"
+                        "       json_extract(payload_json,'$.grid'),"
+                        "       json_extract(payload_json,'$.snr_db'),"
+                        "       json_extract(payload_json,'$.dt'),"
+                        "       json_extract(payload_json,'$.drift_hz_per_s'),"
+                        "       json_extract(payload_json,'$.frequency_hz'),"
+                        "       json_extract(payload_json,'$.pwr_dbm') "
+                        "FROM pending_uploads "
+                        "WHERE target_db='wspr' AND target_table='spots' "
+                        "  AND json_extract(payload_json,'$.time')=? "
+                        "  AND json_extract(payload_json,'$.rx_source')=? "
+                        "ORDER BY 1, 7, 2",
+                        (cycle_iso, rx_source),
+                    )
+                else:
+                    cur = con.execute(
+                        "SELECT json_extract(payload_json,'$.band'),"
+                        "       json_extract(payload_json,'$.callsign'),"
+                        "       json_extract(payload_json,'$.grid'),"
+                        "       json_extract(payload_json,'$.snr_db'),"
+                        "       json_extract(payload_json,'$.dt'),"
+                        "       json_extract(payload_json,'$.drift_hz_per_s'),"
+                        "       json_extract(payload_json,'$.frequency_hz'),"
+                        "       json_extract(payload_json,'$.pwr_dbm') "
+                        "FROM pending_uploads "
+                        "WHERE target_db='wspr' AND target_table='spots' "
+                        "  AND json_extract(payload_json,'$.time')=? "
+                        "ORDER BY 1, 7, 2",
+                        (cycle_iso,),
+                    )
                 rows = cur.fetchall()
             finally:
                 con.close()
@@ -7158,13 +7181,24 @@ def cmd_wspr_watch(args) -> int:
     # data appears).
     _rejected_state = {'last_batch_id': None}
 
-    def _query_rejected_since() -> list:
-        """Return new rejected (spot_key, uploaded_at) since last call.
+    def _query_rejected_since(limit: int = None) -> list:
+        """Return rejected (spot_key, uploaded_at, batch_id) tuples newer
+        than the bookmark, ordered by batch id.
+
+        ``limit`` caps the number of rows returned.  In replay/backlog
+        mode the bookmark spans multiple pumps' worth of rejections, so
+        passing ``limit = pump_posted - pump_added`` lets each pump
+        consume only its own slice instead of dumping the entire replay
+        window under the first under-accepting pump.
+
+        In live mode bookmark = current MAX(id) at startup, so the
+        result is just "new rejections since last call" and ``limit``
+        is moot.
 
         Only meaningful when WSPRNET_BATCH_SIZE=1 — for larger batches
         n_posted > 1 and we can't attribute rejection to a specific
         spot_key.  Returns [] when the audit tables don't exist, the
-        sink db is missing, or no new rejects since last call.
+        sink db is missing, or no new rejects.
         """
         if not _SINK_DB.exists():
             return []
@@ -7173,47 +7207,84 @@ def cmd_wspr_watch(args) -> int:
             uri = f'file:{_SINK_DB}?mode=ro'
             con = _sqlite3.connect(uri, uri=True, timeout=2.0)
             try:
-                # Init last_batch_id on first call to avoid dumping
-                # every historical rejection — we only want events
-                # since the watch started.
+                # Init bookmark on first call.  In live mode set to
+                # current MAX(id) so historical rejects aren't dumped.
+                # In backlog/replay mode set to MAX(id) older than the
+                # replay window so each replayed pump can surface its
+                # own rejections via the ``limit`` slice.
                 if _rejected_state['last_batch_id'] is None:
+                    if backlog_min > 0:
+                        cur = con.execute(
+                            "SELECT COALESCE(MAX(id), 0) "
+                            "FROM wsprnet_audit_batch "
+                            "WHERE uploaded_at < "
+                            "  strftime('%Y-%m-%dT%H:%M:%SZ', "
+                            "          'now', ?)",
+                            (f'-{backlog_min} minutes',),
+                        )
+                    else:
+                        cur = con.execute(
+                            "SELECT COALESCE(MAX(id), 0) "
+                            "FROM wsprnet_audit_batch"
+                        )
+                    _rejected_state['last_batch_id'] = cur.fetchone()[0]
+                    # Live mode: nothing newer to return on the same
+                    # call.  Backlog mode: fall through so the first
+                    # under-accepting pump can take its slice.
+                    if backlog_min == 0:
+                        return []
+                last_id = _rejected_state['last_batch_id']
+                if limit is not None and limit <= 0:
+                    return []
+                # LEFT JOIN audit so we surface batches whose
+                # spot_key collided in INSERT OR IGNORE (the rejected
+                # spot was a duplicate of one already-uploaded earlier
+                # in the run).  Without the LEFT JOIN those rejections
+                # were invisible to ``--rejected`` even though
+                # ``+N/M`` clearly showed a rejection happened.  The
+                # caller's ``_format_rejected`` handles NULL spot_key.
+                sql = (
+                    "SELECT a.spot_key, b.uploaded_at, b.id "
+                    "FROM wsprnet_audit_batch b "
+                    "LEFT JOIN wsprnet_audit a ON a.batch_id = b.id "
+                    "WHERE b.id > ? "
+                    "  AND b.n_posted = 1 "
+                    "  AND b.n_added = 0 "
+                    "ORDER BY b.id"
+                )
+                params: tuple = (last_id,)
+                if limit is not None:
+                    sql += " LIMIT ?"
+                    params = (last_id, int(limit))
+                cur = con.execute(sql, params)
+                rows = cur.fetchall()
+                if rows:
+                    # Advance bookmark to the highest batch id we just
+                    # consumed so the next pump's slice starts after.
+                    _rejected_state['last_batch_id'] = rows[-1][2]
+                elif limit is None:
+                    # Drain mode: bump to current MAX so successful
+                    # batches between rejected ones don't replay later.
                     cur = con.execute(
-                        "SELECT COALESCE(MAX(id), 0) "
-                        "FROM wsprnet_audit_batch"
+                        "SELECT COALESCE(MAX(id), ?) "
+                        "FROM wsprnet_audit_batch",
+                        (last_id,),
                     )
                     _rejected_state['last_batch_id'] = cur.fetchone()[0]
-                    return []
-                last_id = _rejected_state['last_batch_id']
-                cur = con.execute(
-                    """
-                    SELECT a.spot_key, a.uploaded_at, b.id
-                      FROM wsprnet_audit a
-                      JOIN wsprnet_audit_batch b ON a.batch_id = b.id
-                     WHERE b.id > ?
-                       AND b.n_posted = 1
-                       AND b.n_added = 0
-                  ORDER BY b.id
-                    """,
-                    (last_id,),
-                )
-                rows = cur.fetchall()
-                # Track the max id we've SEEN, not just rejected — so a
-                # successful batch between rejected ones still bumps us
-                # forward.  Cheap second query rather than tangling the
-                # logic.
-                cur = con.execute(
-                    "SELECT COALESCE(MAX(id), ?) FROM wsprnet_audit_batch",
-                    (last_id,),
-                )
-                _rejected_state['last_batch_id'] = cur.fetchone()[0]
                 return rows
             finally:
                 con.close()
         except Exception:
             return []
 
-    def _format_rejected(spot_key: str) -> str:
-        """spot_key format: '<cycle_iso>|<callsign>|<freq_hz>'."""
+    def _format_rejected(spot_key) -> str:
+        """spot_key format: '<cycle_iso>|<callsign>|<freq_hz>' — or None
+        when the batch's audit row was suppressed by PK collision (the
+        rejected spot was a duplicate of an earlier upload with the
+        same cycle/call/freq).  Surface those too with a clear marker."""
+        if spot_key is None:
+            return ('             ↳ rejected by wsprnet  '
+                    '(duplicate of earlier upload — same cycle/call/freq)')
         try:
             cycle_iso, call, freq_hz = spot_key.split('|', 2)
             freq_mhz = f'{int(freq_hz) / 1_000_000:.6f}'
@@ -7362,13 +7433,22 @@ def cmd_wspr_watch(args) -> int:
                 # be printed under the relevant cycle/standalone line.
                 rejected_extras: list = []
                 if show_rejected and pump_posted > pump_added:
-                    for spot_key, _uploaded_at, _bid in _query_rejected_since():
+                    # Limit to this pump's rejection count so during
+                    # replay we attribute the right slice to the right
+                    # pump (and don't bleed later-pump rejects up).
+                    n_rejected = pump_posted - pump_added
+                    for spot_key, _uploaded_at, _bid in (
+                        _query_rejected_since(limit=n_rejected)
+                    ):
                         rejected_extras.append(_format_rejected(spot_key))
                 elif show_rejected:
-                    # Still drain the query so last_batch_id advances —
-                    # otherwise the FIRST under-accept after several
-                    # clean pumps would dump every reject since startup.
-                    _query_rejected_since()
+                    # Clean pump (posted == added).  In live mode this
+                    # call just initializes / advances the bookmark.  In
+                    # replay mode we explicitly DON'T drain — leaving
+                    # the slice for the next under-accepting pump to
+                    # claim.  Calling with limit=0 is a no-op that still
+                    # triggers the init branch when bookmark is None.
+                    _query_rejected_since(limit=0)
 
                 if pending:
                     # Merge with the pending cycle: append delivery
@@ -7417,15 +7497,23 @@ def cmd_wspr_watch(args) -> int:
             write_ms = int(write_ms_s)
 
             # Query rows immediately — race window is ~18 s before
-            # wd-upload-hs sweeps, so live events always succeed.
-            rows = _query_cycle(cycle_iso) or []
+            # wd-upload-hs sweeps, so live events always succeed.  Filter
+            # by the raw ``rx`` capture (matches payload's rx_source) so
+            # the histogram only counts spots THIS rx contributed; in
+            # dual-source mode the second commit line would otherwise
+            # repeat the first's histogram (bee1's 54-spot breakdown
+            # showed up unchanged on B4-100's 9-spot line).
+            rows = _query_cycle(cycle_iso, rx or '') or []
             counts_part = ''
-            if rows:
+            if rows and len(rows) == spots_n:
+                # Full set survived → real per-rx histogram.
                 counts_part = '  [' + _format_band_counts(
                     _per_band_counts(rows)) + ']'
             elif backlog_min > 0:
-                # Backlog cycle: rows already shipped + deleted.
-                # Still useful to show the journal-line counts.
+                # Backlog cycle: the wsprnet pump already deleted the
+                # winners; only band-dedup losers remain (which do not
+                # correspond to what this rx committed).  Marking
+                # [shipped] is more honest than a partial histogram.
                 counts_part = '  [shipped]'
 
             # Pad noise + write_ms to a fixed column width so each
