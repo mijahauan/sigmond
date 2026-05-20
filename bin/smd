@@ -4845,7 +4845,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "$log_clients --files --level --topology" -- "$cur"))
                     ;;
                 diag)
-                    COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net sftp --components --topology" -- "$cur"))
                     ;;
                 cpu)
                     COMPREPLY=($(compgen -W "--apply --reapply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
@@ -4955,8 +4955,11 @@ _smd_complete() {
                         net)
                             COMPREPLY=($(compgen -W "--interface --listen --json --topology" -- "$cur"))
                             ;;
+                        sftp)
+                            COMPREPLY=($(compgen -W "--servers --user --port --repeat --key --json --topology" -- "$cur"))
+                            ;;
                         *)
-                            COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
+                            COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net sftp --components --topology" -- "$cur"))
                             ;;
                     esac
                     ;;
