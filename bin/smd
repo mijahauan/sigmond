@@ -4662,14 +4662,47 @@ def cmd_diag_sftp(args) -> int:
             srv_record['_per_attempt_fps_by_type'].append(this_attempt_by_type)
             attempt['host_keys'] = fp_lines
 
-            # Auth attempt: ssh -o BatchMode=yes; capture exit code +
-            # any stderr (PermissionDenied / Connection refused / etc.)
-            # Wrap in ``sudo -n -u <service-user>`` so the probe uses
-            # the same identity context as the live wspr-recorder
-            # service (it owns the key file's group; its known_hosts
-            # is what the running unit actually consults).
-            ssh_cmd = sudo_prefix + [
-                'ssh', '-n',
+            # Round-trip SFTP probe: open an sftp session, ``put`` a
+            # small file to the writable upload dir, ``rm`` it, exit.
+            # This is the SAME wire path the wsprdaemon-tar transport
+            # uses, so success here means the production upload path
+            # works end-to-end against this gateway — not just that
+            # auth succeeded.  The previous ``ssh ... true`` probe
+            # got rejected with "This service allows sftp connections
+            # only." on these ForceCommand-restricted accounts.
+            #
+            # Gateway chroot lands at ``/`` (the user's home, owned
+            # by root); ``./uploads/`` is the only directory the
+            # per-station account can write to.  Probe filename
+            # encodes the calling PID so concurrent runs don't
+            # collide; the ``rm`` at the end keeps the gateway
+            # clean.
+            import tempfile as _tempfile
+            payload = (
+                f'smd diag sftp round-trip probe — '
+                f'{_time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())} '
+                f'pid={_os.getpid()}\n'
+            ).encode('utf-8')
+            # Local file must be readable by the run-as user (we may
+            # be invoking sftp via sudo); /tmp + mode 0644 covers it.
+            tf = _tempfile.NamedTemporaryFile(
+                prefix='smd-diag-sftp-probe-', suffix='.txt',
+                dir='/tmp', delete=False,
+            )
+            tf.write(payload)
+            tf.close()
+            _os.chmod(tf.name, 0o644)
+            remote_name = (
+                f'uploads/smd-diag-sftp-probe-{_os.getpid()}-{i}.txt'
+            )
+            sftp_batch = (
+                f'put {tf.name} {remote_name}\n'
+                f'rm {remote_name}\n'
+                f'bye\n'
+            )
+            sftp_cmd = sudo_prefix + [
+                'sftp',
+                '-b', '-',
                 '-o', 'BatchMode=yes',
                 '-o', 'ConnectTimeout=5',
                 '-o', 'NumberOfPasswordPrompts=0',
@@ -4677,40 +4710,58 @@ def cmd_diag_sftp(args) -> int:
                 '-o', 'UserKnownHostsFile=/dev/null',
                 '-o', 'GlobalKnownHostsFile=/dev/null',
                 '-o', 'LogLevel=ERROR',
-                '-p', str(port),
+                '-P', str(port),
             ]
             if key_file:
-                ssh_cmd += ['-i', key_file, '-o', 'IdentitiesOnly=yes']
-            ssh_cmd += [f'{user}@{host}', 'true']
+                sftp_cmd += ['-i', key_file, '-o', 'IdentitiesOnly=yes']
+            sftp_cmd += [f'{user}@{host}']
             t0 = _time.monotonic()
             try:
-                ssh = _sub.run(
-                    ssh_cmd, capture_output=True, text=True, timeout=10,
+                sftp = _sub.run(
+                    sftp_cmd,
+                    input=sftp_batch,
+                    capture_output=True, text=True, timeout=15,
                 )
-                auth_rc = ssh.returncode
+                auth_rc = sftp.returncode
                 attempt['auth_ms'] = int((_time.monotonic() - t0) * 1000)
                 attempt['auth_rc'] = auth_rc
-                # SFTP-only accounts (the wsprdaemon-server gateway
-                # convention) reject the post-auth ``true`` exec with
-                # "This service allows sftp connections only.", and
-                # ssh exits non-zero.  But auth itself SUCCEEDED —
-                # which is all this probe is testing.  Detect that
-                # signature on stdout/stderr and treat it as ok.
-                combined = ((ssh.stdout or '') + (ssh.stderr or '')).lower()
-                sftp_only = 'sftp connections only' in combined
+                combined = (
+                    (sftp.stdout or '') + (sftp.stderr or '')
+                ).lower()
                 if auth_rc == 0:
                     attempt['auth'] = 'ok'
-                elif sftp_only:
-                    attempt['auth'] = 'ok'
-                    attempt['auth_note'] = 'sftp-only account (auth verified)'
+                    attempt['auth_note'] = 'sftp put+rm round-trip'
                 else:
-                    err = (ssh.stderr or '').strip().splitlines()
+                    # Pick the most useful error line — last non-empty
+                    # of stderr first, then stdout.
+                    for stream in (sftp.stderr or '', sftp.stdout or ''):
+                        lines = [
+                            ln.strip() for ln in stream.splitlines()
+                            if ln.strip()
+                        ]
+                        if lines:
+                            err_line = lines[-1]
+                            break
+                    else:
+                        err_line = '(no output)'
                     attempt['auth'] = 'fail'
-                    attempt['auth_stderr'] = err[-1] if err else '(no stderr)'
+                    attempt['auth_stderr'] = err_line
+                    # Classify for the operator: most likely cause.
+                    if 'permission denied' in combined:
+                        attempt['auth_note'] = 'auth or path permission denied'
+                    elif 'connection refused' in combined:
+                        attempt['auth_note'] = 'TCP refused'
+                    elif 'no such file' in combined:
+                        attempt['auth_note'] = 'remote upload dir missing'
             except _sub.TimeoutExpired:
                 attempt['auth'] = 'timeout'
                 attempt['auth_rc'] = -1
                 attempt['auth_ms'] = int((_time.monotonic() - t0) * 1000)
+            finally:
+                try:
+                    _os.unlink(tf.name)
+                except OSError:
+                    pass
 
             srv_record['attempts'].append(attempt)
 
