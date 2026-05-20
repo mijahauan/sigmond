@@ -7505,15 +7505,23 @@ def cmd_wspr_watch(args) -> int:
             # showed up unchanged on B4-100's 9-spot line).
             rows = _query_cycle(cycle_iso, rx or '') or []
             counts_part = ''
-            if rows and len(rows) == spots_n:
-                # Full set survived → real per-rx histogram.
+            if rows:
+                # Show whatever we have.  We used to require an exact
+                # ``len(rows) == spots_n`` match to filter out partial
+                # band-dedup residue in backlog mode, but that races
+                # against sqlite WAL visibility — the cycle-commit log
+                # line emits before the sqlite WAL fsync becomes
+                # visible to read connections, so a fresh query can
+                # legitimately return slightly fewer rows than what
+                # the recorder wrote.  The looser predicate also stops
+                # falsely flagging "[shipped]" when the wsprnet-
+                # verifier deletes a few rows mid-cycle.
                 counts_part = '  [' + _format_band_counts(
                     _per_band_counts(rows)) + ']'
             elif backlog_min > 0:
-                # Backlog cycle: the wsprnet pump already deleted the
-                # winners; only band-dedup losers remain (which do not
-                # correspond to what this rx committed).  Marking
-                # [shipped] is more honest than a partial histogram.
+                # Backlog cycle with zero residual rows — wsprnet pump
+                # + verifier flushed everything; can't reconstruct the
+                # per-band breakdown.
                 counts_part = '  [shipped]'
 
             # Pad noise + write_ms to a fixed column width so each
