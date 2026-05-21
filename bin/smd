@@ -7382,31 +7382,25 @@ def cmd_wspr_watch(args) -> int:
     # rejected-spot tail).
     last_cycle_hhmm: list = [None]
 
-    def _flush_pending(ship_suffix: str = '') -> None:
-        """Close the inline-printed cycle line.
+    def _flush_pending(ship_line: str = '') -> None:
+        """Print the upload-event line + clear pending state.
 
-        Cycle lines now print IMMEDIATELY when their commit event
-        arrives, with the cursor left at end-of-line (no newline yet).
-        This call appends ``ship_suffix`` (typically the
-        ``→ delivered +N`` annotation, or empty for a bare close) and
-        the trailing newline, then prints any buffered per-spot
-        ``extras``.  Result: operators see the cycle's decode counts
-        the moment the cycle commits, not 30-60 s later when the
-        uploader pump returns.
+        Cycle commit lines print IMMEDIATELY when each receiver's
+        commit arrives (own newline) — see the buffering site below.
+        The upload event prints as its OWN separate line rather than
+        being merged into the last rx's cycle line, so multi-source
+        operators read it as "[N receivers committed] → [one upload]"
+        instead of a confusing tail-appended single line.
 
-        ``printed_inline`` is set by the buffering site below; if a
-        future code path buffered a line WITHOUT inline printing, the
-        fallback branch reprints the full line so we still emit
-        something rather than silently dropping it.
+        ``ship_line``: the standalone delivered/uploaded line.  Empty
+        on idle / shutdown flushes — just clears pending state.
         """
-        if not pending:
-            return
-        if pending.get('printed_inline'):
-            print(ship_suffix, flush=True)
-        else:
-            print(pending['line'] + ship_suffix, flush=True)
-        for extra in pending['extras']:
-            print(extra, flush=True)
+        if ship_line:
+            print(ship_line, flush=True)
+        # Pending's only job now is deadline tracking + correlating
+        # cycle UTC for the upload line.  Any extras (per-spot detail)
+        # were already printed inline under the cycle line, so no
+        # extras list to drain here.
         pending.clear()
 
     try:
@@ -7476,17 +7470,21 @@ def cmd_wspr_watch(args) -> int:
                     _query_rejected_since(limit=0)
 
                 if pending:
-                    # Merge with the pending cycle: append delivery
-                    # summary to the cycle line, then print everything.
-                    # "delivered" — wsprnet's pump completed with the
-                    # server's added-count (not just upload finished).
+                    # Upload event for the cycle whose commits just
+                    # printed above.  Stamp the cycle UTC in the line
+                    # so the operator sees which cycle this batch
+                    # corresponds to — even when several cycles' rx
+                    # commits scroll past between pump events.
                     ship_delta_s = int(time.monotonic() - pending['ts'])
-                    if rejected_extras:
-                        pending['extras'].extend(rejected_extras)
+                    cy_hh, cy_mm = pending.get('cycle_hhmm', ('--', '--'))
                     _flush_pending(
-                        f'  → delivered {pump_field} in {ship_delta_s}s '
-                        f'(total {tot_field}, batch {work_n})'
+                        f'[{hms}] cycle UTC {cy_hh}:{cy_mm}'
+                        f'                    '
+                        f'  uploaded {pump_field} to wsprnet  '
+                        f'in {ship_delta_s}s (total {tot_field}, batch {work_n})'
                     )
+                    for extra in rejected_extras:
+                        print(extra, flush=True)
                 else:
                     # Standalone — no cycle is waiting (e.g. backlog
                     # drain across multiple cycles, or signal-wake
@@ -7500,8 +7498,8 @@ def cmd_wspr_watch(args) -> int:
                     # spot) we still print — that's a real signal.
                     if pump_posted or pump_added:
                         print(
-                            f'[{hms}] delivered            '
-                            f'{pump_field:>7} wsprnet  '
+                            f'[{hms}] uploaded            '
+                            f'{pump_field:>7} to wsprnet  '
                             f'(total {tot_field}, batch {work_n})',
                             flush=True,
                         )
@@ -7634,30 +7632,34 @@ def cmd_wspr_watch(args) -> int:
                             f'more on {band}m)'
                         )
 
-            # Print the cycle line IMMEDIATELY (no trailing newline yet)
-            # — the upcoming shipped event will append the delivered
-            # annotation in-place, finishing the line.  The v3-style UX
-            # operators asked for: see the decode counts the moment a
-            # cycle commits, not 30-60 s later when the uploader pump
-            # returns.  The next cycle commit OR the shipped event OR
-            # the deadline closes the line with a newline.
+            # Print each rx's cycle commit line on its OWN line as it
+            # arrives — operators see decode counts the instant any
+            # receiver finishes, not buffered until the cycle's
+            # uploader pump returns.  The matching uploader-pump event
+            # later prints as a SEPARATE line ("→ delivered +N to
+            # wsprnet ..."), so the multi-source flow reads as:
             #
-            # With cross-rx sync, the LAST rx's line for a cycle is the
-            # one that picks up the delivered annotation (since the
-            # uploader pump fires once per cycle, after all rx
-            # commit).  Earlier rx lines for the same cycle get a bare
-            # newline-close when the next rx's commit arrives.
-            print(cycle_text, end='', flush=True)
+            #   [hh:mm:ss] cycle UTC X rx=bee2       → 31 spots / 17 noise / 5 bands [...]
+            #   [hh:mm:ss] cycle UTC X rx=rx888mk2   → 36 spots / 17 noise / 5 bands [...]
+            #   [hh:mm:ss] cycle UTC X rx=bee1       → 44 spots / 17 noise / 7 bands [...]
+            #   [hh:mm:ss] cycle UTC X uploaded +43 to wsprnet (total ..., batch ...)
+            #
+            # With cross-rx sync (CycleBatcher.set_expected_rx_sources),
+            # the uploader-pump line fires once per cycle, after the
+            # last rx has committed — matching the visual grouping
+            # above.
+            print(cycle_text, flush=True)
+            for extra in extras:
+                print(extra, flush=True)
+            # ``pending`` is now just a correlation handle so the
+            # upcoming uploader-pump line knows the cycle's UTC.  The
+            # 90 s deadline is a safety net to clear stale state if
+            # the pump's wake never arrives (rare — the in-process
+            # wake_callback usually fires within milliseconds).
             pending.update({
-                'line': cycle_text,
-                'extras': extras,
+                'cycle_hhmm': (hh, mm),
                 'ts': time.monotonic(),
-                # 90 s: wsprnet pump cadence is ~60 s; observed ship
-                # latency runs 25-40 s post-decode.  30 s was too tight
-                # and split ~1-in-3 cycles into separate cycle+shipped
-                # lines.
                 'deadline': time.monotonic() + 90.0,
-                'printed_inline': True,
             })
 
     except KeyboardInterrupt:
