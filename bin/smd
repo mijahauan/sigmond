@@ -7180,6 +7180,46 @@ def cmd_wspr_watch(args) -> int:
         except Exception:
             return None
 
+    def _query_audit_uploaded_for_cycle(cycle_iso: str) -> tuple[int, int, int]:
+        """Return (uploaded, verified, dropped) for ``cycle_iso``.
+
+        wsprnet_audit has one row per spot the client posted, keyed
+        by (rx_call, spot_key) where spot_key = ``<cycle>|<call>|<freq>``.
+        We count rows whose spot_key starts with this cycle's ISO.
+
+        Source of truth for "how many spots from this cycle reached
+        wsprnet?" — every row was created at upload time, so the
+        sum across however many pump batches the spots actually
+        crossed is correct.  This replaces the per-pump ``+N`` count
+        from the ``shipped wsprdaemon=X wsprnet=Y`` log line, which
+        was misleading because pump batches don't align with cycles
+        (one cycle's spots can split across two pumps; a pump can
+        also carry backlog from earlier cycles).
+        """
+        if not _SINK_DB.exists():
+            return 0, 0, 0
+        try:
+            import sqlite3 as _sqlite3
+            uri = f'file:{_SINK_DB}?mode=ro'
+            con = _sqlite3.connect(uri, uri=True, timeout=2.0)
+            try:
+                cur = con.execute(
+                    "SELECT COUNT(*),"
+                    " SUM(CASE WHEN verified_at IS NOT NULL THEN 1 ELSE 0 END),"
+                    " SUM(CASE WHEN dropped_at IS NOT NULL THEN 1 ELSE 0 END)"
+                    " FROM wsprnet_audit"
+                    " WHERE spot_key LIKE ?",
+                    (cycle_iso[:17] + '%',),
+                )
+                row = cur.fetchone()
+            finally:
+                con.close()
+            if row:
+                return (row[0] or 0, row[1] or 0, row[2] or 0)
+            return 0, 0, 0
+        except Exception:
+            return 0, 0, 0
+
     # --- rejected-spot lookup (--rejected flag) --------------------------
     # State across iterations: highest wsprnet_audit_batch.id we've shown
     # rejects for.  Bumped after each query so we don't replay history.
@@ -7470,21 +7510,34 @@ def cmd_wspr_watch(args) -> int:
                     _query_rejected_since(limit=0)
 
                 if pending:
-                    # Upload event for the cycle whose commits just
-                    # printed above.  Stamp the cycle UTC in the line
-                    # so the operator sees which cycle this batch
-                    # corresponds to — even when several cycles' rx
-                    # commits scroll past between pump events.
-                    ship_delta_s = int(time.monotonic() - pending['ts'])
+                    # The pump's per-batch count (``pump_field``) is
+                    # MISLEADING for per-cycle attribution: one cycle's
+                    # spots can split across multiple pumps, and a
+                    # single pump can carry spots from backlog cycles
+                    # too.  Query wsprnet_audit for the cycle's actual
+                    # uploaded count — that's the source of truth
+                    # (one row per spot at upload time, keyed by
+                    # spot_key=<cycle>|<call>|<freq>).  If a later
+                    # pump bumps that count, we'll re-print the line
+                    # then; if no spots from this cycle were uploaded,
+                    # we suppress entirely so empty pump events don't
+                    # produce misleading "uploaded +0" lines.
                     cy_hh, cy_mm = pending.get('cycle_hhmm', ('--', '--'))
-                    _flush_pending(
-                        f'[{hms}] cycle UTC {cy_hh}:{cy_mm}'
-                        f'                    '
-                        f'  uploaded {pump_field} to wsprnet  '
-                        f'in {ship_delta_s}s (total {tot_field}, batch {work_n})'
+                    cycle_iso = pending.get('cycle_iso') or _cycle_iso(cy_hh, cy_mm)
+                    uploaded, verified, dropped = (
+                        _query_audit_uploaded_for_cycle(cycle_iso)
                     )
-                    for extra in rejected_extras:
-                        print(extra, flush=True)
+                    if uploaded > 0:
+                        ship_delta_s = int(time.monotonic() - pending['ts'])
+                        _flush_pending(
+                            f'[{hms}] cycle UTC {cy_hh}:{cy_mm}'
+                            f'                    '
+                            f'  uploaded {uploaded} to wsprnet  '
+                            f'in {ship_delta_s}s '
+                            f'(total {tot_field}, batch {work_n})'
+                        )
+                        for extra in rejected_extras:
+                            print(extra, flush=True)
                 else:
                     # Standalone — no cycle is waiting (e.g. backlog
                     # drain across multiple cycles, or signal-wake
@@ -7519,6 +7572,18 @@ def cmd_wspr_watch(args) -> int:
             noise_n = int(noise_n_s) if noise_n_s else 0
             bands_n = int(bands_n_s)
             write_ms = int(write_ms_s)
+
+            # Suppress no-spot cycle commits.  These fire when late
+            # band-period batches (e.g. W5 bands finishing 3 min
+            # after a cycle whose W2 bands have already committed
+            # and flushed) report 0 spots — sometimes with a handful
+            # of noise rows from the late bands.  Both shapes (0/0/0
+            # and 0/N/M with no decodes) carry no operator-relevant
+            # information beyond what the earlier real-data commit
+            # already showed.  The underlying noise rows still reach
+            # the uploader via pending_uploads — display-only filter.
+            if spots_n == 0:
+                continue
 
             counts_part = ''
             if inline_bands_s is not None:
@@ -7658,6 +7723,7 @@ def cmd_wspr_watch(args) -> int:
             # wake_callback usually fires within milliseconds).
             pending.update({
                 'cycle_hhmm': (hh, mm),
+                'cycle_iso': cycle_iso,
                 'ts': time.monotonic(),
                 'deadline': time.monotonic() + 90.0,
             })
