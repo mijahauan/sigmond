@@ -7416,11 +7416,52 @@ def cmd_wspr_watch(args) -> int:
     # was lost and the consumer's 60 s polling tick will fire eventually,
     # but we don't want to block the UI on it).
     pending: dict = {}    # keys: 'line', 'extras', 'ts', 'deadline'
+    # Queue of cycles awaiting their delayed audit-table query for the
+    # "uploaded N to wsprnet" line.  Each entry is a dict with
+    # ``cycle_iso``, ``cycle_hhmm``, ``deadline_monotonic``, ``rejected_extras``.
+    # We append on FIRST cycle-commit for a cycle_iso and drain in FIFO
+    # order whenever the front entry's deadline has passed.  The drain
+    # check runs on every main-loop iteration (not just idle-tick) so
+    # busy hours don't block the upload line from rendering.
+    pending_uploads: list = []
+    DEADLINE_SEC = 90.0
     # Track the last cycle's HH:MM so we can emit a blank line between
     # blocks of cycle output for visual separation (two source lines
     # per cycle were getting mashed together with the prior cycle's
     # rejected-spot tail).
     last_cycle_hhmm: list = [None]
+
+    def _drain_pending_uploads() -> None:
+        """Drain any cycles whose 90 s deadline has expired.
+
+        Pump batches that ship a cycle's spots write their audit rows
+        as they post.  By DEADLINE_SEC seconds after a cycle's first
+        rx commit, every pump that touches the cycle has finished
+        and the audit table has the cycle's accurate cross-rx
+        post-dedup total.  Query at that point.
+        """
+        now = time.monotonic()
+        while pending_uploads and pending_uploads[0]['deadline'] <= now:
+            entry = pending_uploads.pop(0)
+            cycle_iso = entry['cycle_iso']
+            cy_hh, cy_mm = entry['cycle_hhmm']
+            uploaded, _verified, _dropped = (
+                _query_audit_uploaded_for_cycle(cycle_iso)
+                if cycle_iso else (0, 0, 0)
+            )
+            if uploaded > 0:
+                hms_now = _datetime.datetime.utcnow().strftime('%H:%M:%S')
+                # Align "uploaded" with the "rx=" column from the
+                # cycle commit lines above — single space after
+                # ``HH:MM`` so all four lines for a cycle stack as a
+                # block on screen.
+                print(
+                    f'[{hms_now}] cycle UTC {cy_hh}:{cy_mm} '
+                    f'uploaded {uploaded} to wsprnet',
+                    flush=True,
+                )
+                for extra in entry.get('rejected_extras', []):
+                    print(extra, flush=True)
 
     def _flush_pending(ship_line: str = '') -> None:
         """Print the upload-event line + clear pending state.
@@ -7451,33 +7492,16 @@ def cmd_wspr_watch(args) -> int:
 
     try:
         while True:
+            # Check the pending-uploads queue every iteration (not
+            # just on idle) so busy journals don't starve cycle
+            # upload lines from rendering when their deadlines pass.
+            _drain_pending_uploads()
             line = _next_line()
             if line is None:
                 rlist, _w, _x = _select.select([fd], [], [], 1.0)
-                # Idle tick — if a pending cycle has waited its full
-                # deadline window, query the audit table for its
-                # final delivered count and emit the upload line.
-                # The deadline (90 s from cycle commit) is chosen so
-                # ALL uploader pump batches for the cycle have
-                # finished posting and writing their audit rows by
-                # the time we read it.  Per-pump audit reads would
-                # see only batch #1's slice and undercount.
-                if pending and time.monotonic() > pending['deadline']:
-                    cy_hh, cy_mm = pending.get('cycle_hhmm', ('--', '--'))
-                    cycle_iso = pending.get('cycle_iso', '')
-                    hms_now = _datetime.datetime.utcnow().strftime('%H:%M:%S')
-                    uploaded, _verified, _dropped = (
-                        _query_audit_uploaded_for_cycle(cycle_iso)
-                        if cycle_iso else (0, 0, 0)
-                    )
-                    if uploaded > 0:
-                        _flush_pending(
-                            f'[{hms_now}] cycle UTC {cy_hh}:{cy_mm}'
-                            f'                    '
-                            f'  uploaded {uploaded} to wsprnet'
-                        )
-                    else:
-                        _flush_pending()
+                # Drain again after the select wait — covers the
+                # case where deadlines pass during the 1 s select.
+                _drain_pending_uploads()
                 if not rlist:
                     continue
                 try:
@@ -7535,17 +7559,19 @@ def cmd_wspr_watch(args) -> int:
                     # triggers the init branch when bookmark is None.
                     _query_rejected_since(limit=0)
 
-                if pending:
+                if pending_uploads:
                     # Don't print on pump events — the audit table
                     # only has a slice of the cycle's spots at this
                     # point (the first batch's), and reading it now
                     # gives a misleading low count.  Let the deadline
-                    # flush (idle-tick handler above) query the audit
-                    # once all pump batches have posted their rows.
-                    # We still capture this pump's rejected_extras so
-                    # they're emitted alongside the final upload line.
+                    # drain query the audit once all pump batches
+                    # have posted their rows.  Capture rejected_extras
+                    # into the MOST RECENT queued cycle so they print
+                    # with that cycle's upload line.
                     if rejected_extras:
-                        pending.setdefault('rejected_extras', []).extend(rejected_extras)
+                        pending_uploads[-1].setdefault(
+                            'rejected_extras', []
+                        ).extend(rejected_extras)
                 else:
                     # Standalone — no cycle is waiting (e.g. backlog
                     # drain across multiple cycles, or signal-wake
@@ -7724,23 +7750,33 @@ def cmd_wspr_watch(args) -> int:
             print(cycle_text, flush=True)
             for extra in extras:
                 print(extra, flush=True)
-            # ``pending`` is now just a correlation handle so the
-            # upcoming uploader-pump line knows the cycle's UTC.  The
-            # 90 s deadline is a safety net to clear stale state if
-            # the pump's wake never arrives (rare — the in-process
-            # wake_callback usually fires within milliseconds).
-            pending.update({
-                'cycle_hhmm': (hh, mm),
-                'cycle_iso': cycle_iso,
-                'ts': time.monotonic(),
-                'deadline': time.monotonic() + 90.0,
-            })
+            # Enqueue the cycle for its delayed audit-table query — but
+            # only ONCE per cycle_iso.  Subsequent rx commits for the
+            # SAME cycle UTC reuse the existing queue entry rather than
+            # resetting its deadline; otherwise the second rx commit
+            # would push the deadline forward and the query would
+            # never fire while cycle commits keep arriving.
+            already_queued = any(
+                e['cycle_iso'] == cycle_iso for e in pending_uploads
+            )
+            if not already_queued:
+                pending_uploads.append({
+                    'cycle_iso': cycle_iso,
+                    'cycle_hhmm': (hh, mm),
+                    'first_seen': time.monotonic(),
+                    'deadline': time.monotonic() + DEADLINE_SEC,
+                    'rejected_extras': [],
+                })
 
     except KeyboardInterrupt:
         return 130
     finally:
-        # If we have a buffered cycle without a matching ship, print it
-        # before exiting — otherwise that cycle silently disappears.
+        # Drain any cycles still queued — force the deadline so the
+        # remaining audit queries fire before we exit and the cycle's
+        # upload line silently disappears.
+        for entry in pending_uploads:
+            entry['deadline'] = 0.0
+        _drain_pending_uploads()
         _flush_pending()
         try:
             proc.terminate()
