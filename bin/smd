@@ -7424,7 +7424,13 @@ def cmd_wspr_watch(args) -> int:
     # check runs on every main-loop iteration (not just idle-tick) so
     # busy hours don't block the upload line from rendering.
     pending_uploads: list = []
-    DEADLINE_SEC = 90.0
+    # 180 s: observed pump pattern on B4-100 is one POST per ~30 s,
+    # and a cycle's spots can spread across 4-5 POSTs as the cycle
+    # accumulates noise/late decodes.  90 s was too short — cycle 30
+    # on 2026-05-21 had wsprnet_audit rows still landing at +1:51
+    # past first commit, so a 90 s deadline read mid-pump and showed
+    # 50 of the eventual 66 spots.  180 s catches the full window.
+    DEADLINE_SEC = 180.0
     # Track the last cycle's HH:MM so we can emit a blank line between
     # blocks of cycle output for visual separation (two source lines
     # per cycle were getting mashed together with the prior cycle's
