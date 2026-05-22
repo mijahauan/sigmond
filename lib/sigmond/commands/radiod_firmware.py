@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import tomllib
 from pathlib import Path
 from typing import List, Tuple
 
@@ -63,6 +64,7 @@ PKGDATADIR_STOCK_DISABLED = Path(
 VENDORED_DAVID = Path(
     '/opt/git/sigmond/sigmond/share/firmware/SDDC_FX3.img'
 )
+DEFAULT_TOPOLOGY_PATH = Path('/etc/sigmond/topology.toml')
 
 
 _VALID_VARIANTS = ('david', 'stock')
@@ -76,19 +78,32 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _resolve_variant(topology: dict) -> str:
+def _resolve_variant(topology_path: Path) -> str:
     """Read ``[component.radiod.firmware] variant`` from topology.toml.
 
-    Defaults to ``"david"`` when the key is absent — the test-program
-    firmware is the desired baseline on hosts that haven't been
-    explicitly pinned to stock.
+    Defaults to ``"david"`` when the file or key is absent — the
+    test-program firmware is the desired baseline on hosts that haven't
+    been explicitly pinned to stock.
+
+    Reads the raw TOML rather than going through
+    ``sigmond.topology.load_topology`` because the dataclass adapter
+    only extracts known fields per component (enabled, managed,
+    description, version, rac_id, rac_number) and silently drops
+    arbitrary subsections like ``[component.radiod.firmware]``.
     """
-    comp = topology.get('component', {}).get('radiod', {})
+    if not topology_path.exists():
+        return 'david'
+    try:
+        with open(topology_path, 'rb') as f:
+            raw = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return 'david'
+    comp = raw.get('component', {}).get('radiod', {})
     fw = comp.get('firmware', {})
     variant = str(fw.get('variant', 'david')).strip().lower()
     if variant not in _VALID_VARIANTS:
-        # Unknown variant — surface as a warning from the caller's
-        # message list; return the safe default rather than erroring.
+        # Unknown variant — return the safe default rather than erroring.
+        # Caller logs via apply_firmware's message list.
         return 'david'
     return variant
 
@@ -122,7 +137,8 @@ def detect_active_variant() -> str:
 
 
 def apply_firmware(
-    topology: dict, *, dry_run: bool = False,
+    topology_path: Path = DEFAULT_TOPOLOGY_PATH,
+    *, dry_run: bool = False,
 ) -> Tuple[List[str], bool]:
     """Reconcile firmware variant against topology config.
 
@@ -136,9 +152,8 @@ def apply_firmware(
     running.
     """
     msgs: List[str] = []
-    needs_restart = False
 
-    variant = _resolve_variant(topology)
+    variant = _resolve_variant(topology_path)
 
     if variant == 'david':
         return _apply_david(dry_run=dry_run, msgs=msgs)

@@ -2201,7 +2201,8 @@ def cmd_apply(args) -> int:
     if _HAS_SIGMOND_LIB:
         try:
             from sigmond.commands.radiod_firmware import apply_firmware
-            fw_msgs, fw_changed = apply_firmware(topology, dry_run=dry_run)
+            topo_path = Path(args.topology) if args.topology else TOPOLOGY_PATH
+            fw_msgs, fw_changed = apply_firmware(topo_path, dry_run=dry_run)
             for msg in fw_msgs:
                 if msg.lstrip().startswith('warning'):
                     _warn(msg.lstrip())
