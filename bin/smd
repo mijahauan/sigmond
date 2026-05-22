@@ -2191,6 +2191,30 @@ def cmd_apply(args) -> int:
         except Exception:
             pass  # non-fatal — fragments are best-effort
 
+    # Reconcile the RX888 FX3 firmware variant (david vs stock) per
+    # topology config.  Default is "david" — the test-program firmware
+    # with USB-error resilience.  When the active firmware changes we
+    # flag the local radiod for restart so the FX3 re-DFUs into the
+    # new image.  Failure is non-fatal (warning surfaces, apply
+    # continues).
+    radiod_firmware_changed = False
+    if _HAS_SIGMOND_LIB:
+        try:
+            from sigmond.commands.radiod_firmware import apply_firmware
+            fw_msgs, fw_changed = apply_firmware(topology, dry_run=dry_run)
+            for msg in fw_msgs:
+                if msg.lstrip().startswith('warning'):
+                    _warn(msg.lstrip())
+                elif msg.lstrip().startswith('(dry'):
+                    _info(f'firmware: {msg.lstrip()}')
+                else:
+                    _ok(msg.strip())
+            if fw_changed:
+                radiod_firmware_changed = True
+                something_changed = True
+        except Exception as exc:
+            _warn(f'firmware reconcile failed: {exc}')
+
     # Write radiod CPU affinity drop-ins and ensure radiod is running BEFORE
     # wd-ctl apply so radiod cores are reserved and streams are available
     # before decoders try to connect.
@@ -2225,7 +2249,17 @@ def cmd_apply(args) -> int:
                                 something_changed = True
                             else:
                                 _warn(f'{u.unit}: failed to start — {r_start.stderr.strip()}')
-                        # else: already running — silent
+                        elif radiod_firmware_changed:
+                            # Firmware swapped under us — restart so the
+                            # FX3 re-DFUs into the new image.  Local
+                            # units only; remote radiods manage their
+                            # own /etc/radio independently.
+                            r_restart = _run(['systemctl', 'restart', u.unit], sudo=True)
+                            if r_restart.returncode == 0:
+                                _ok(f'{u.unit}: restarted (firmware variant changed)')
+                            else:
+                                _warn(f'{u.unit}: restart failed — {r_restart.stderr.strip()}')
+                        # else: already running, no firmware change — silent
                 else:
                     _warn('radiod not started — FFT wisdom not yet ready')
                     _warn('wd-decode, wd-post, wd-upload will have no data until '
