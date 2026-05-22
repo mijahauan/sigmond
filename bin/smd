@@ -7450,7 +7450,12 @@ def cmd_wspr_watch(args) -> int:
                 if cycle_iso else (0, 0, 0)
             )
             if uploaded > 0:
-                hms_now = _datetime.datetime.utcnow().strftime('%H:%M:%S')
+                # Use local time to match the cycle commit lines'
+                # ``[HH:MM:SS]`` prefix (which comes from the journal's
+                # local-timestamp regex).  UTC here mismatched the
+                # cycle-commit prefix and looked like the upload line
+                # was from a different day.
+                hms_now = _datetime.datetime.now().strftime('%H:%M:%S')
                 # Align "uploaded" with the "rx=" column from the
                 # cycle commit lines above — single space after
                 # ``HH:MM`` so all four lines for a cycle stack as a
@@ -7760,11 +7765,38 @@ def cmd_wspr_watch(args) -> int:
                 e['cycle_iso'] == cycle_iso for e in pending_uploads
             )
             if not already_queued:
+                # Detect replay (journal-line age > 30 s = wspr-recorder
+                # logged this cycle commit before we started watching).
+                # For replayed cycles, audit rows have been written
+                # long ago; we just need to query and emit — but spread
+                # the queries across iterations so they appear in cycle
+                # order rather than as a single burst.  For LIVE cycles
+                # (just-committed), use the canonical 90 s deadline so
+                # all pump batches finish writing audit rows first.
+                age_sec = 0.0
+                try:
+                    cycle_dt = _datetime.datetime.combine(
+                        _datetime.date.today(),
+                        _datetime.datetime.strptime(hms, '%H:%M:%S').time(),
+                    )
+                    age_sec = max(
+                        0.0,
+                        (_datetime.datetime.now() - cycle_dt).total_seconds(),
+                    )
+                except Exception:
+                    pass
+                if age_sec > 30.0:
+                    # Replayed cycle — spread the queries 0.5 s apart
+                    # in queue order so they emit chronologically.
+                    spread = 0.5 * (len(pending_uploads) + 1)
+                    deadline = time.monotonic() + spread
+                else:
+                    deadline = time.monotonic() + DEADLINE_SEC
                 pending_uploads.append({
                     'cycle_iso': cycle_iso,
                     'cycle_hhmm': (hh, mm),
                     'first_seen': time.monotonic(),
-                    'deadline': time.monotonic() + DEADLINE_SEC,
+                    'deadline': deadline,
                     'rejected_extras': [],
                 })
 
