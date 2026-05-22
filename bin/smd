@@ -7577,26 +7577,19 @@ def cmd_wspr_watch(args) -> int:
                         pending_uploads[-1].setdefault(
                             'rejected_extras', []
                         ).extend(rejected_extras)
-                else:
-                    # Standalone — no cycle is waiting (e.g. backlog
-                    # drain across multiple cycles, or signal-wake
-                    # arrived before the cycle log line did).
-                    #
-                    # Suppress the line when the pump did nothing
-                    # (posted == 0 AND added == 0): it carries no
-                    # information beyond the previously-emitted cycle
-                    # line and just clutters the watch.  When
-                    # posted > 0 but added == 0 (server rejected every
-                    # spot) we still print — that's a real signal.
-                    if pump_posted or pump_added:
-                        print(
-                            f'[{hms}] uploaded            '
-                            f'{pump_field:>7} to wsprnet  '
-                            f'(total {tot_field}, batch {work_n})',
-                            flush=True,
-                        )
-                        for extra in rejected_extras:
-                            print(extra, flush=True)
+                # Pump events with no matching queued cycle (backlog
+                # drain across multiple cycles, or signal-wake arrived
+                # before the cycle log line did) used to print a
+                # standalone "uploaded +N to wsprnet" line here.
+                # Operators found those noisy + confusing because the
+                # count is per-pump-batch, NOT per-cycle, and there's
+                # no cycle context.  Suppressed — the per-cycle upload
+                # line above (driven by the deadline drain + audit
+                # query) is the authoritative source.  ``rejected_extras``
+                # still print as standalone tail lines for visibility.
+                if not pending_uploads:
+                    for extra in rejected_extras:
+                        print(extra, flush=True)
                 continue
 
             cm = cycle_re.search(line)
