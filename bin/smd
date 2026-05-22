@@ -7423,56 +7423,99 @@ def cmd_wspr_watch(args) -> int:
     # order whenever the front entry's deadline has passed.  The drain
     # check runs on every main-loop iteration (not just idle-tick) so
     # busy hours don't block the upload line from rendering.
-    pending_uploads: list = []
-    # 180 s: observed pump pattern on B4-100 is one POST per ~30 s,
-    # and a cycle's spots can spread across 4-5 POSTs as the cycle
-    # accumulates noise/late decodes.  90 s was too short — cycle 30
-    # on 2026-05-21 had wsprnet_audit rows still landing at +1:51
-    # past first commit, so a 90 s deadline read mid-pump and showed
-    # 50 of the eventual 66 spots.  180 s catches the full window.
-    DEADLINE_SEC = 180.0
+    # ── Per-cycle upload-line trigger ─────────────────────────────────
+    # The audit-table-after-deadline approach was the wrong architecture:
+    # it queried AFTER the pump completed uploading, requiring a multi-
+    # minute wait for the audit rows to land.  What we actually want is
+    # to print "uploading N to wsprnet" at the MOMENT the last expected
+    # rx commits a cycle — because that's when the cross-rx-sync wake
+    # fires the pump.  At that moment, ``pending_uploads`` has all the
+    # raw rows for the cycle, and counting unique (band, callsign)
+    # tuples gives the EXACT number wsprnet will accept after the
+    # client-side dedup.
+    #
+    # ``known_rx_sources``: accumulates over time as we observe new rx
+    #   commit; this is the inferred "configured set" we wait for.
+    # ``cycle_rx_seen``: maps cycle_iso → set of rx_sources committed.
+    # When seen == known, fire the query + emit the line, exactly once
+    # per cycle.
+    known_rx_sources: set = set()
+    cycle_rx_seen: dict = {}    # cycle_iso -> set of rx_source strings
+    cycle_rx_uploaded: set = set()  # cycle_iso strings we've already emitted for
     # Track the last cycle's HH:MM so we can emit a blank line between
     # blocks of cycle output for visual separation (two source lines
     # per cycle were getting mashed together with the prior cycle's
     # rejected-spot tail).
     last_cycle_hhmm: list = [None]
 
-    def _drain_pending_uploads() -> None:
-        """Drain any cycles whose 90 s deadline has expired.
+    def _query_pending_upload_count(cycle_iso: str) -> int:
+        """Count unique (band, callsign) tuples in ``pending_uploads``
+        for a cycle — this is what wsprnet will accept after the
+        client-side cross-rx dedup.
 
-        Pump batches that ship a cycle's spots write their audit rows
-        as they post.  By DEADLINE_SEC seconds after a cycle's first
-        rx commit, every pump that touches the cycle has finished
-        and the audit table has the cycle's accurate cross-rx
-        post-dedup total.  Query at that point.
+        Read-only query.  Fires at the moment of the last-rx commit
+        when the pump is about to start; the rows are still in the
+        queue (not yet shipped), so the answer is deterministic.
         """
-        now = time.monotonic()
-        while pending_uploads and pending_uploads[0]['deadline'] <= now:
-            entry = pending_uploads.pop(0)
-            cycle_iso = entry['cycle_iso']
-            cy_hh, cy_mm = entry['cycle_hhmm']
-            uploaded, _verified, _dropped = (
-                _query_audit_uploaded_for_cycle(cycle_iso)
-                if cycle_iso else (0, 0, 0)
-            )
-            if uploaded > 0:
-                # Use local time to match the cycle commit lines'
-                # ``[HH:MM:SS]`` prefix (which comes from the journal's
-                # local-timestamp regex).  UTC here mismatched the
-                # cycle-commit prefix and looked like the upload line
-                # was from a different day.
-                hms_now = _datetime.datetime.now().strftime('%H:%M:%S')
-                # Align "uploaded" with the "rx=" column from the
-                # cycle commit lines above — single space after
-                # ``HH:MM`` so all four lines for a cycle stack as a
-                # block on screen.
-                print(
-                    f'[{hms_now}] cycle UTC {cy_hh}:{cy_mm} '
-                    f'uploaded {uploaded} to wsprnet',
-                    flush=True,
+        if not _SINK_DB.exists():
+            return 0
+        try:
+            import sqlite3 as _sqlite3
+            uri = f'file:{_SINK_DB}?mode=ro'
+            con = _sqlite3.connect(uri, uri=True, timeout=2.0)
+            try:
+                cur = con.execute(
+                    "SELECT COUNT(DISTINCT "
+                    "json_extract(payload_json,'$.band')||'|'||"
+                    "json_extract(payload_json,'$.callsign'))"
+                    " FROM pending_uploads"
+                    " WHERE target_db='wspr' AND target_table='spots'"
+                    "   AND json_extract(payload_json,'$.time') = ?",
+                    (cycle_iso,),
                 )
-                for extra in entry.get('rejected_extras', []):
-                    print(extra, flush=True)
+                row = cur.fetchone()
+            finally:
+                con.close()
+            return int(row[0]) if row and row[0] else 0
+        except Exception:
+            return 0
+
+    def _maybe_emit_upload_line(cycle_iso: str, hh: str, mm: str,
+                                 rx_source: str) -> None:
+        """Track per-cycle rx commits and emit ``uploading N to wsprnet``
+        the moment the last expected rx commits a cycle.
+
+        Idempotent — once a cycle has emitted, further rx commits for
+        it are silently ignored.  Cleans up the per-cycle seen set
+        after emit so memory doesn't grow.
+        """
+        known_rx_sources.add(rx_source)
+        if cycle_iso in cycle_rx_uploaded:
+            return
+        seen = cycle_rx_seen.setdefault(cycle_iso, set())
+        seen.add(rx_source)
+        # Fire when seen set covers all known rx (cross-rx sync just
+        # fired the upload pump — pending_uploads has the answer NOW).
+        if not seen >= known_rx_sources:
+            return
+        count = _query_pending_upload_count(cycle_iso)
+        hms_now = _datetime.datetime.now().strftime('%H:%M:%S')
+        if count > 0:
+            print(
+                f'[{hms_now}] cycle UTC {hh}:{mm} '
+                f'uploading {count} to wsprnet',
+                flush=True,
+            )
+        cycle_rx_uploaded.add(cycle_iso)
+        cycle_rx_seen.pop(cycle_iso, None)
+        # Prune the uploaded-set so it doesn't grow unbounded — keep
+        # last 50 cycle_isos (covers > 1.5 h of cycles, enough that a
+        # late-arriving rx commit for an already-emitted cycle still
+        # gets correctly suppressed).
+        if len(cycle_rx_uploaded) > 50:
+            stale = sorted(cycle_rx_uploaded)[: len(cycle_rx_uploaded) - 50]
+            for k in stale:
+                cycle_rx_uploaded.discard(k)
 
     def _flush_pending(ship_line: str = '') -> None:
         """Print the upload-event line + clear pending state.
@@ -7503,16 +7546,9 @@ def cmd_wspr_watch(args) -> int:
 
     try:
         while True:
-            # Check the pending-uploads queue every iteration (not
-            # just on idle) so busy journals don't starve cycle
-            # upload lines from rendering when their deadlines pass.
-            _drain_pending_uploads()
             line = _next_line()
             if line is None:
                 rlist, _w, _x = _select.select([fd], [], [], 1.0)
-                # Drain again after the select wait — covers the
-                # case where deadlines pass during the 1 s select.
-                _drain_pending_uploads()
                 if not rlist:
                     continue
                 try:
@@ -7570,32 +7606,18 @@ def cmd_wspr_watch(args) -> int:
                     # triggers the init branch when bookmark is None.
                     _query_rejected_since(limit=0)
 
-                if pending_uploads:
-                    # Don't print on pump events — the audit table
-                    # only has a slice of the cycle's spots at this
-                    # point (the first batch's), and reading it now
-                    # gives a misleading low count.  Let the deadline
-                    # drain query the audit once all pump batches
-                    # have posted their rows.  Capture rejected_extras
-                    # into the MOST RECENT queued cycle so they print
-                    # with that cycle's upload line.
-                    if rejected_extras:
-                        pending_uploads[-1].setdefault(
-                            'rejected_extras', []
-                        ).extend(rejected_extras)
-                # Pump events with no matching queued cycle (backlog
-                # drain across multiple cycles, or signal-wake arrived
-                # before the cycle log line did) used to print a
-                # standalone "uploaded +N to wsprnet" line here.
-                # Operators found those noisy + confusing because the
-                # count is per-pump-batch, NOT per-cycle, and there's
-                # no cycle context.  Suppressed — the per-cycle upload
-                # line above (driven by the deadline drain + audit
-                # query) is the authoritative source.  ``rejected_extras``
-                # still print as standalone tail lines for visibility.
-                if not pending_uploads:
-                    for extra in rejected_extras:
-                        print(extra, flush=True)
+                # Pump events ("shipped wsprdaemon=X wsprnet=M") used
+                # to drive the per-cycle upload line via an audit-table
+                # query at a 90/180 s deadline.  Replaced — the upload
+                # line now fires at LAST-rx-commit time from
+                # ``_maybe_emit_upload_line``.  Pump events here are
+                # informational only; we just emit any
+                # ``rejected_extras`` for operator visibility and move
+                # on.  Per-pump aggregate counts aren't shown because
+                # they don't align with cycles (a single pump batch
+                # can span multiple cycles).
+                for extra in rejected_extras:
+                    print(extra, flush=True)
                 continue
 
             cm = cycle_re.search(line)
@@ -7754,61 +7776,22 @@ def cmd_wspr_watch(args) -> int:
             print(cycle_text, flush=True)
             for extra in extras:
                 print(extra, flush=True)
-            # Enqueue the cycle for its delayed audit-table query — but
-            # only ONCE per cycle_iso.  Subsequent rx commits for the
-            # SAME cycle UTC reuse the existing queue entry rather than
-            # resetting its deadline; otherwise the second rx commit
-            # would push the deadline forward and the query would
-            # never fire while cycle commits keep arriving.
-            already_queued = any(
-                e['cycle_iso'] == cycle_iso for e in pending_uploads
-            )
-            if not already_queued:
-                # Replay vs live detection: journalctl is invoked with
-                # ``-o cat`` so per-line timestamps are STRIPPED — the
-                # ``[HH:MM:SS]`` prefix smd emits is always current
-                # local time, not when the line was actually written.
-                # Use the cycle's UTC value instead: parse
-                # ``cycle_iso`` back to a datetime and compare to now.
-                # First-rx commit for a LIVE cycle arrives ~2 min after
-                # cycle UTC start (cycle period + decode time), so any
-                # cycle older than ~5 min is replayed.
-                age_sec = 0.0
-                try:
-                    cycle_dt = _datetime.datetime.strptime(
-                        cycle_iso, '%Y-%m-%dT%H:%M:%SZ',
-                    ).replace(tzinfo=_datetime.timezone.utc)
-                    now_utc = _datetime.datetime.now(
-                        _datetime.timezone.utc,
-                    )
-                    age_sec = (now_utc - cycle_dt).total_seconds()
-                except Exception:
-                    pass
-                if age_sec > 300.0:
-                    # Replayed cycle — spread the queries 0.5 s apart
-                    # in queue order so they emit chronologically
-                    # rather than as a single burst on first iteration.
-                    spread = 0.5 * (len(pending_uploads) + 1)
-                    deadline = time.monotonic() + spread
-                else:
-                    deadline = time.monotonic() + DEADLINE_SEC
-                pending_uploads.append({
-                    'cycle_iso': cycle_iso,
-                    'cycle_hhmm': (hh, mm),
-                    'first_seen': time.monotonic(),
-                    'deadline': deadline,
-                    'rejected_extras': [],
-                })
+            # Trigger the per-cycle upload line at LAST-rx-commit time.
+            # ``rx`` here is the rx_source ("radiod:..."); the helper
+            # accumulates known rx and per-cycle commit sets, and emits
+            # ``uploading N to wsprnet`` (read from pending_uploads, the
+            # raw source-of-truth) the moment the last expected rx
+            # finishes.  Replaces the prior audit-table-after-deadline
+            # approach which gave inconsistent counts because pumps
+            # finish asynchronously over ~2 min.
+            _maybe_emit_upload_line(cycle_iso, hh, mm, rx)
 
     except KeyboardInterrupt:
         return 130
     finally:
-        # Drain any cycles still queued — force the deadline so the
-        # remaining audit queries fire before we exit and the cycle's
-        # upload line silently disappears.
-        for entry in pending_uploads:
-            entry['deadline'] = 0.0
-        _drain_pending_uploads()
+        # Upload lines now fire at last-rx-commit time, not on a
+        # deadline — nothing to drain on shutdown.  Just flush any
+        # pending rejected-extras stash.
         _flush_pending()
         try:
             proc.terminate()
