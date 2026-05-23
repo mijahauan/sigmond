@@ -490,7 +490,7 @@ ok "Venv ready at $VENV_DIR"
 
 # ─── smd symlink ──────────────────────────────────────────────────────────────
 info "Installing smd → $INSTALL_SMD"
-chmod a+x "$SMD_BIN"
+$SUDO chmod a+x "$SMD_BIN"
 $SUDO ln -sf "$SMD_BIN" "$INSTALL_SMD"
 ok "smd installed at $INSTALL_SMD"
 
