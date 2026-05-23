@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import io
+import time
 from unittest import mock
 
 import pytest
 
 from sigmond import preflight
-from sigmond.environment import Observation
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +35,36 @@ def _entry(name, **kwargs):
     return _FakeEntry(name, **kwargs)
 
 
+def _cache(observations=None, probed_at=None):
+    return {
+        "probed_at":     probed_at if probed_at is not None else time.time(),
+        "observations":  observations or [],
+        "deltas":        [],
+    }
+
+
+def _radiod_obs(name="bee1", endpoint="bee1-status.local:5006"):
+    return {
+        "source": "mdns", "kind": "radiod", "id": None,
+        "endpoint": endpoint, "fields": {"name": name},
+        "observed_at": time.time(), "ok": True, "error": "",
+    }
+
+
+def _sdr_obs(sdr_type="RX-888 DFU", bus="003", device="008"):
+    return {
+        "source": "usb_sdr", "kind": "sdr", "id": "usb:04b4:00f3:0",
+        "endpoint": f"bus {bus} dev {device}",
+        "fields": {"sdr_type": sdr_type, "bus": bus, "device": device,
+                   "vid": "04b4", "pid": "00f3", "index": 0, "serial": ""},
+        "observed_at": time.time(), "ok": True, "error": "",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
 @pytest.fixture
 def catalog_with_unmet_ka9q():
     """wspr-recorder requires ka9q-radio; ka9q-radio is NOT installed."""
@@ -49,7 +79,6 @@ def catalog_with_unmet_ka9q():
 
 @pytest.fixture
 def catalog_all_met():
-    """All deps installed — pre-flight should pass without prompting."""
     return {
         "wspr-recorder": _entry("wspr-recorder",
                                  requires=["ka9q-python", "ka9q-radio"]),
@@ -58,153 +87,275 @@ def catalog_all_met():
     }
 
 
+@pytest.fixture
+def cache_radiods_only():
+    """Remote radiods on the LAN, no local SDR."""
+    return _cache(observations=[_radiod_obs("bee1"),
+                                 _radiod_obs("bee2", "bee2-status.local:5006")])
+
+
+@pytest.fixture
+def cache_radiods_and_sdr():
+    """Remote radiods AND a local SDR."""
+    return _cache(observations=[_radiod_obs("bee1"), _sdr_obs()])
+
+
+@pytest.fixture
+def cache_sdr_only():
+    """Local SDR but no remote radiod."""
+    return _cache(observations=[_sdr_obs()])
+
+
+@pytest.fixture
+def cache_empty():
+    """Cache populated (probed_at > 0) but no relevant observations."""
+    return _cache(observations=[])
+
+
+@pytest.fixture
+def no_cache():
+    return {"probed_at": 0.0, "observations": [], "deltas": []}
+
+
+def _make_tty_stdin(monkeypatch, response="\n"):
+    fake = io.StringIO(response)
+    fake.isatty = lambda: True
+    monkeypatch.setattr("sys.stdin", fake)
+    monkeypatch.setattr("builtins.input", lambda prompt="": response.rstrip("\n"))
+
+
 # ---------------------------------------------------------------------------
-# _unmet_requires
+# Happy path — nothing missing
 # ---------------------------------------------------------------------------
 
-class TestUnmetRequires:
-    def test_returns_empty_when_all_satisfied(self, catalog_all_met):
-        assert preflight._unmet_requires("wspr-recorder", catalog_all_met) == []
+class TestHappyPath:
+    def test_nothing_missing_proceeds(self, catalog_all_met):
+        with mock.patch.object(preflight, "load_cache") as m_load:
+            assert preflight.check_requires("wspr-recorder",
+                                             catalog_all_met,
+                                             yes=False) is True
+            assert not m_load.called
 
-    def test_returns_missing_dep(self, catalog_with_unmet_ka9q):
-        missing = preflight._unmet_requires("wspr-recorder",
-                                             catalog_with_unmet_ka9q)
-        names = [name for name, _ in missing]
-        assert names == ["ka9q-radio"]
-
-    def test_unknown_client_returns_empty(self, catalog_all_met):
-        assert preflight._unmet_requires("nonesuch", catalog_all_met) == []
-
-
-# ---------------------------------------------------------------------------
-# check_requires — happy path
-# ---------------------------------------------------------------------------
-
-class TestCheckRequiresHappyPath:
-    def test_returns_true_when_nothing_missing(self, catalog_all_met):
-        assert preflight.check_requires("wspr-recorder",
-                                         catalog_all_met,
-                                         yes=False) is True
-
-    def test_unknown_client_returns_true(self, catalog_all_met):
-        # Unknown clients should fall through so the install path can
-        # surface its own clearer error.
+    def test_unknown_client_proceeds(self, catalog_all_met):
         assert preflight.check_requires("nonesuch",
                                          catalog_all_met,
                                          yes=True) is True
 
 
 # ---------------------------------------------------------------------------
-# check_requires — unmet deps
+# No cache yet → must direct operator to probe
 # ---------------------------------------------------------------------------
 
-class TestCheckRequiresUnmet:
-    def test_yes_bypass_returns_true(self, catalog_with_unmet_ka9q):
-        with mock.patch.object(preflight.mdns, "probe", return_value=[]), \
-             mock.patch.object(preflight.usb_sdr, "probe", return_value=[]):
-            assert preflight.check_requires("wspr-recorder",
-                                             catalog_with_unmet_ka9q,
-                                             yes=True) is True
-
-    def test_non_tty_no_yes_aborts(self, catalog_with_unmet_ka9q,
-                                    monkeypatch):
-        monkeypatch.setattr("sys.stdin", io.StringIO(""))
-        # io.StringIO has isatty()==False by default.
-        with mock.patch.object(preflight.mdns, "probe", return_value=[]), \
-             mock.patch.object(preflight.usb_sdr, "probe", return_value=[]):
+class TestNoCache:
+    def test_aborts_without_yes(self, catalog_with_unmet_ka9q, no_cache):
+        with mock.patch.object(preflight, "load_cache", return_value=no_cache):
             assert preflight.check_requires("wspr-recorder",
                                              catalog_with_unmet_ka9q,
                                              yes=False) is False
 
-    def test_tty_user_confirms(self, catalog_with_unmet_ka9q, monkeypatch):
-        fake_stdin = io.StringIO("y\n")
-        fake_stdin.isatty = lambda: True
-        monkeypatch.setattr("sys.stdin", fake_stdin)
-        monkeypatch.setattr("builtins.input", lambda prompt="": "y")
-        with mock.patch.object(preflight.mdns, "probe", return_value=[]), \
-             mock.patch.object(preflight.usb_sdr, "probe", return_value=[]):
+    def test_proceeds_with_yes(self, catalog_with_unmet_ka9q, no_cache):
+        with mock.patch.object(preflight, "load_cache", return_value=no_cache):
+            assert preflight.check_requires("wspr-recorder",
+                                             catalog_with_unmet_ka9q,
+                                             yes=True) is True
+
+    def test_message_mentions_probe(self, catalog_with_unmet_ka9q,
+                                     no_cache, capsys):
+        with mock.patch.object(preflight, "load_cache", return_value=no_cache):
+            preflight.check_requires("wspr-recorder",
+                                      catalog_with_unmet_ka9q,
+                                      yes=True)
+        assert "smd environment probe" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Remote radiod on LAN → satisfies ka9q-radio dep
+# ---------------------------------------------------------------------------
+
+class TestLanSatisfies:
+    def test_remote_radiod_satisfies(self, catalog_with_unmet_ka9q,
+                                       cache_radiods_only):
+        with mock.patch.object(preflight, "load_cache",
+                                return_value=cache_radiods_only):
+            # No SDR present — should proceed silently (no prompt).
             assert preflight.check_requires("wspr-recorder",
                                              catalog_with_unmet_ka9q,
                                              yes=False) is True
 
-    def test_tty_user_declines(self, catalog_with_unmet_ka9q, monkeypatch):
-        fake_stdin = io.StringIO("n\n")
-        fake_stdin.isatty = lambda: True
-        monkeypatch.setattr("sys.stdin", fake_stdin)
-        monkeypatch.setattr("builtins.input", lambda prompt="": "n")
-        with mock.patch.object(preflight.mdns, "probe", return_value=[]), \
-             mock.patch.object(preflight.usb_sdr, "probe", return_value=[]):
-            assert preflight.check_requires("wspr-recorder",
-                                             catalog_with_unmet_ka9q,
-                                             yes=False) is False
-
-
-# ---------------------------------------------------------------------------
-# Context probes (mDNS / USB) are only run when ka9q-radio is the unmet dep
-# ---------------------------------------------------------------------------
-
-class TestContextProbes:
-    def test_ka9q_unmet_runs_probes(self, catalog_with_unmet_ka9q):
-        with mock.patch.object(preflight.mdns, "probe",
-                                return_value=[]) as m_mdns, \
-             mock.patch.object(preflight.usb_sdr, "probe",
-                                return_value=[]) as m_usb:
+    def test_satisfied_message_shows_radiods(self, catalog_with_unmet_ka9q,
+                                               cache_radiods_only, capsys):
+        with mock.patch.object(preflight, "load_cache",
+                                return_value=cache_radiods_only):
             preflight.check_requires("wspr-recorder",
                                       catalog_with_unmet_ka9q,
-                                      yes=True)
-            assert m_mdns.called
-            assert m_usb.called
+                                      yes=False)
+        captured = capsys.readouterr().err
+        assert "satisfied" in captured.lower()
+        assert "bee1" in captured
 
-    def test_non_ka9q_unmet_skips_probes(self):
-        # Build a catalog where the missing dep is NOT ka9q-radio.
-        catalog = {
-            "foo": _entry("foo", requires=["bar"], installed=False),
-            "bar": _entry("bar", kind="server", installed=False),
-        }
-        with mock.patch.object(preflight.mdns, "probe",
-                                return_value=[]) as m_mdns, \
-             mock.patch.object(preflight.usb_sdr, "probe",
-                                return_value=[]) as m_usb:
-            preflight.check_requires("foo", catalog, yes=True)
-            assert not m_mdns.called
-            assert not m_usb.called
+    def test_no_warn_emoji_when_satisfied(self, catalog_with_unmet_ka9q,
+                                            cache_radiods_only, capsys):
+        # The satisfied path should use ok(), not warn() — no `dependencies
+        # that aren't all satisfied:` text.
+        with mock.patch.object(preflight, "load_cache",
+                                return_value=cache_radiods_only):
+            preflight.check_requires("wspr-recorder",
+                                      catalog_with_unmet_ka9q,
+                                      yes=False)
+        captured = capsys.readouterr().err
+        assert "aren't all satisfied" not in captured
 
-    def test_probe_exceptions_dont_abort(self, catalog_with_unmet_ka9q):
-        # If avahi-browse blows up, the pre-flight should still complete.
-        with mock.patch.object(preflight.mdns, "probe",
-                                side_effect=RuntimeError("avahi crashed")), \
-             mock.patch.object(preflight.usb_sdr, "probe",
-                                side_effect=RuntimeError("lsusb crashed")):
+
+# ---------------------------------------------------------------------------
+# Remote radiod + local SDR → optional install prompt
+# ---------------------------------------------------------------------------
+
+class TestLocalSdrPrompt:
+    def test_yes_bypasses_prompt(self, catalog_with_unmet_ka9q,
+                                   cache_radiods_and_sdr):
+        with mock.patch.object(preflight, "load_cache",
+                                return_value=cache_radiods_and_sdr):
             assert preflight.check_requires("wspr-recorder",
                                              catalog_with_unmet_ka9q,
                                              yes=True) is True
 
+    def test_non_tty_proceeds(self, catalog_with_unmet_ka9q,
+                                cache_radiods_and_sdr, monkeypatch):
+        monkeypatch.setattr("sys.stdin", io.StringIO(""))
+        with mock.patch.object(preflight, "load_cache",
+                                return_value=cache_radiods_and_sdr):
+            # Non-TTY: no prompt, just proceed with the original install
+            # (since the LAN satisfies the dep).
+            assert preflight.check_requires("wspr-recorder",
+                                             catalog_with_unmet_ka9q,
+                                             yes=False) is True
 
-# ---------------------------------------------------------------------------
-# _explain_radiod_gap message branches (smoke test — output goes to stderr)
-# ---------------------------------------------------------------------------
+    def test_tty_user_declines_local_install_proceeds(self,
+            catalog_with_unmet_ka9q, cache_radiods_and_sdr, monkeypatch):
+        _make_tty_stdin(monkeypatch, "n\n")
+        with mock.patch.object(preflight, "load_cache",
+                                return_value=cache_radiods_and_sdr):
+            assert preflight.check_requires("wspr-recorder",
+                                             catalog_with_unmet_ka9q,
+                                             yes=False) is True
 
-class TestExplainRadiod:
-    def test_remote_radiod_path(self, capsys):
-        obs = [Observation(source="mdns", kind="radiod", id=None,
-                           endpoint="bee5.local:5006",
-                           fields={"name": "bee5"})]
-        preflight._explain_radiod_gap(obs, [])
-        captured = capsys.readouterr().err
-        assert "bee5" in captured
-        assert "no local radiod install needed" in captured
+    def test_tty_user_wants_local_install_aborts(self,
+            catalog_with_unmet_ka9q, cache_radiods_and_sdr, monkeypatch):
+        _make_tty_stdin(monkeypatch, "y\n")
+        with mock.patch.object(preflight, "load_cache",
+                                return_value=cache_radiods_and_sdr):
+            # User chose to install ka9q-radio first; abort current install.
+            assert preflight.check_requires("wspr-recorder",
+                                             catalog_with_unmet_ka9q,
+                                             yes=False) is False
 
-    def test_local_sdr_no_remote_path(self, capsys):
-        obs = [Observation(source="usb_sdr", kind="sdr", id=None,
-                           endpoint="bus 3 dev 8",
-                           fields={"sdr_type": "RX-888 DFU",
-                                   "bus": "003", "device": "008"})]
-        preflight._explain_radiod_gap([], obs)
+    def test_prompt_mentions_sdr_and_followups(self,
+            catalog_with_unmet_ka9q, cache_radiods_and_sdr, monkeypatch,
+            capsys):
+        _make_tty_stdin(monkeypatch, "y\n")
+        with mock.patch.object(preflight, "load_cache",
+                                return_value=cache_radiods_and_sdr):
+            preflight.check_requires("wspr-recorder",
+                                      catalog_with_unmet_ka9q,
+                                      yes=False)
         captured = capsys.readouterr().err
         assert "RX-888" in captured
         assert "smd install ka9q-radio" in captured
 
-    def test_nothing_path(self, capsys):
-        preflight._explain_radiod_gap([], [])
+
+# ---------------------------------------------------------------------------
+# No remote radiod, no local SDR → full warning + prompt
+# ---------------------------------------------------------------------------
+
+class TestNoUpstream:
+    def test_no_upstream_aborts_without_yes(self, catalog_with_unmet_ka9q,
+                                              cache_empty, monkeypatch):
+        monkeypatch.setattr("sys.stdin", io.StringIO(""))
+        with mock.patch.object(preflight, "load_cache",
+                                return_value=cache_empty):
+            assert preflight.check_requires("wspr-recorder",
+                                             catalog_with_unmet_ka9q,
+                                             yes=False) is False
+
+    def test_no_upstream_proceeds_with_yes(self, catalog_with_unmet_ka9q,
+                                             cache_empty):
+        with mock.patch.object(preflight, "load_cache",
+                                return_value=cache_empty):
+            assert preflight.check_requires("wspr-recorder",
+                                             catalog_with_unmet_ka9q,
+                                             yes=True) is True
+
+    def test_no_upstream_message_says_no_data_source(self,
+            catalog_with_unmet_ka9q, cache_empty, capsys):
+        with mock.patch.object(preflight, "load_cache",
+                                return_value=cache_empty):
+            preflight.check_requires("wspr-recorder",
+                                      catalog_with_unmet_ka9q,
+                                      yes=True)
+        captured = capsys.readouterr().err.lower()
+        assert "no data source" in captured or "no local sdr" in captured
+
+
+# ---------------------------------------------------------------------------
+# Local SDR present, no remote radiod → recommend local install + warn
+# ---------------------------------------------------------------------------
+
+class TestLocalSdrNoRemote:
+    def test_recommends_local_install(self, catalog_with_unmet_ka9q,
+                                        cache_sdr_only, capsys):
+        with mock.patch.object(preflight, "load_cache",
+                                return_value=cache_sdr_only):
+            preflight.check_requires("wspr-recorder",
+                                      catalog_with_unmet_ka9q,
+                                      yes=True)
         captured = capsys.readouterr().err
-        assert "no SDR" in captured.lower() or "no local sdr" in captured.lower()
+        assert "RX-888" in captured
+        assert "smd install ka9q-radio" in captured
+
+
+# ---------------------------------------------------------------------------
+# Stale cache: still consumed, but operator is warned
+# ---------------------------------------------------------------------------
+
+class TestStaleCache:
+    def test_stale_cache_warns(self, catalog_with_unmet_ka9q, capsys):
+        old = time.time() - (2 * 3600)
+        cache = _cache(observations=[_radiod_obs("bee1")], probed_at=old)
+        with mock.patch.object(preflight, "load_cache", return_value=cache):
+            preflight.check_requires("wspr-recorder",
+                                      catalog_with_unmet_ka9q,
+                                      yes=True)
+        captured = capsys.readouterr().err
+        assert "min old" in captured
+
+
+# ---------------------------------------------------------------------------
+# Cache only consulted when ka9q-radio is in the missing set
+# ---------------------------------------------------------------------------
+
+class TestCacheScope:
+    def test_non_ka9q_skips_cache(self):
+        catalog = {
+            "foo": _entry("foo", requires=["bar"], installed=False),
+            "bar": _entry("bar", kind="server", installed=False),
+        }
+        with mock.patch.object(preflight, "load_cache") as m_load:
+            preflight.check_requires("foo", catalog, yes=True)
+            assert not m_load.called
+
+
+# ---------------------------------------------------------------------------
+# _unmet_requires
+# ---------------------------------------------------------------------------
+
+class TestUnmetRequires:
+    def test_empty_when_satisfied(self, catalog_all_met):
+        assert preflight._unmet_requires("wspr-recorder", catalog_all_met) == []
+
+    def test_returns_missing(self, catalog_with_unmet_ka9q):
+        names = [n for n, _ in preflight._unmet_requires(
+            "wspr-recorder", catalog_with_unmet_ka9q)]
+        assert names == ["ka9q-radio"]
+
+    def test_unknown_client_empty(self, catalog_all_met):
+        assert preflight._unmet_requires("nonesuch", catalog_all_met) == []

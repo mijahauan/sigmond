@@ -381,6 +381,14 @@ fi
 ok "Python: $($PYTHON3 --version)"
 
 # ─── FHS system directories ───────────────────────────────────────────────────
+# /var/lib/sigmond holds the environment cache, lifecycle locks, and net-diag
+# JSON.  `smd environment probe` and other discovery operations run as the
+# operator (smd self-elevates per-operation, but discovery probes don't need
+# root), so the directory must be writable to anyone in the sigmond group.
+# Mode 2770 + sigmond:sigmond + setgid: humans in the group can read/write,
+# new files inherit the group automatically, the world sees nothing.  Without
+# this, save_cache() silently swallows PermissionError and the operator's
+# probes never persist — which then mis-informs every preflight check.
 info "Creating system directories…"
 $SUDO mkdir -p \
     /etc/sigmond \
@@ -388,7 +396,8 @@ $SUDO mkdir -p \
     /var/log/sigmond \
     /opt/sigmond
 $SUDO chmod 755 /etc/sigmond /opt/sigmond
-$SUDO chmod 750 /var/lib/sigmond /var/log/sigmond
+$SUDO chown sigmond:sigmond /var/lib/sigmond /var/log/sigmond
+$SUDO chmod 2770 /var/lib/sigmond /var/log/sigmond
 ok "System directories ready"
 
 # ─── catalog.toml ─────────────────────────────────────────────────────────────
