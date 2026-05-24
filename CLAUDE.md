@@ -203,28 +203,50 @@ warnings.  The canonical names match `etc/catalog.toml`.
 ## Fleet upgrade pattern
 
 Sigmond consumers (`mag-recorder`, `psk-recorder`, `wspr-recorder`,
-`hf-timestd`, `codar-sounder`, `hfdl-recorder`, etc.) all install their
-sibling libraries (`ka9q-python`, `callhash`, `hs-uploader`, `sigmond`)
-**editable** into `/opt/<consumer>/venv` via `pip install -e
-/opt/git/sigmond/<lib>` at install time.  Each per-consumer `install.sh`
-does this explicitly; sigmond's own `install.sh` enforces that
-`/opt/git/sigmond/ka9q-python` exists (clones from upstream if not),
-because its own `pyproject.toml` pins `ka9q-python = { path =
-"../ka9q-python" }`.
+`hf-timestd`, `codar-sounder`, `hfdl-recorder`, plus the
+`hs-uploader` + `gpsdo-monitor` non-Python clients-with-CLIs) all use
+**uv** ([astral.sh/uv](https://astral.sh/uv)) as both their development
+and production installer.  Each per-consumer `install.sh`:
 
-The consequence is that **a `git pull` of any sigmond-suite library
-flows to every consumer for free** — every venv sees the new code on
-disk and every venv's `importlib.metadata.version()` reflects the bumped
-`pyproject.toml` immediately, with no per-venv `pip install --upgrade`
-needed.  This is the deliberate design payoff and what `smd list
---update` exploits.
+1. Sources `scripts/install/ensure_uv.sh` from this repo (with an
+   inline fallback when sigmond isn't yet cloned), which guarantees
+   `uv` is on `$PATH` (installing it system-wide to `/usr/local/bin`
+   via the Astral installer if needed).
+2. Runs `uv venv $INSTALL_DIR/venv --python 3.11 --seed --quiet` once
+   (creates the per-consumer venv at `/opt/<consumer>/venv`).
+3. Runs
+   `UV_PROJECT_ENVIRONMENT=$INSTALL_DIR/venv uv sync --project $REPO_ROOT --frozen --no-dev --quiet`
+   which reads the project's `pyproject.toml` + committed `uv.lock`,
+   resolves `[tool.uv.sources]` entries to local sibling paths
+   (declared as `path = "../<repo>", editable = true`), and produces
+   the venv in one shot.  Editable installs of every sibling
+   (`ka9q-python`, `callhash`, `hs-uploader`, the consumer itself)
+   land automatically; the `editable = true` flag is what keeps the
+   "single source tree, many consumers" convention from degrading to
+   "many wheel snapshots, independent of upstream changes."
+4. Optionally adds `sigmond` (the orchestrator, not declared in each
+   consumer's pyproject because it's lazy-imported with a fallback)
+   via `uv pip install --quiet --python $INSTALL_DIR/venv/bin/python3 -e /opt/git/sigmond/sigmond`.
+   **Note:** `uv pip install` honors `--python`, NOT
+   `UV_PROJECT_ENVIRONMENT` — the latter applies only to project-level
+   commands like `uv sync` / `uv lock`.  Confusing them silently
+   installs into the wrong place.
+
+The consequence — and the deliberate design payoff — is that **a
+`git pull` of any sigmond-suite library propagates to every consumer's
+venv with zero further action**.  Every venv sees the new source on
+disk; every venv's `importlib.metadata.version()` reflects the bumped
+`pyproject.toml` immediately; no per-venv `pip install --upgrade` or
+re-run of `install.sh` is needed.  `smd list --update` exploits this
+to drive fleet upgrades.
 
 ### The two layers to consider
 
 1. **Source on disk.**  `git pull` (or `smd list --update`).  Editable
-   installs auto-track; non-editable PyPI installs need
-   `pip install --upgrade <pkg>` per venv (rare in this fleet — only
-   matters if a consumer was installed without the sibling checkout).
+   installs auto-track.  If a consumer ever ends up with a wheel-style
+   install of a sibling (e.g. someone hand-ran `uv pip install ka9q-python`
+   from PyPI rather than `uv sync`), it stops auto-tracking until the
+   next `uv sync` cycle re-resolves through `[tool.uv.sources]`.
 2. **Code loaded in memory.**  Python imports modules once at process
    start.  A long-running service still holds its start-time bytecode
    until restarted.  Identify stale services by `systemctl show
@@ -242,7 +264,36 @@ sudo smd restart                # restarts every enabled component
 # Surgical (only what's stale; less disruption to already-fresh services):
 sudo -u sigmond git -C /opt/git/sigmond/<lib> pull --ff-only
 sudo systemctl restart <unit1> <unit2> ...
+
+# After pyproject / uv.lock changes for a consumer (rare; e.g. dep added):
+sudo /opt/git/sigmond/<consumer>/install.sh   # idempotent; re-runs uv sync
+sudo systemctl restart <consumer>             # to load new in-memory code
 ```
+
+### The shared install helper
+
+The seven consumer `install.sh` files (`hs-uploader`, `gpsdo-monitor`,
+`mag-recorder`, `psk-recorder`, `wspr-recorder`, `codar-sounder`,
+`hfdl-recorder`) each source `scripts/install/ensure_uv.sh` from this
+repo via:
+
+```bash
+_ENSURE_UV_SH="/opt/git/sigmond/sigmond/scripts/install/ensure_uv.sh"
+if [[ -r "$_ENSURE_UV_SH" ]]; then
+    source "$_ENSURE_UV_SH"
+else
+    _ensure_uv() { ...inline fallback... }   # keep in sync with the canonical file
+fi
+_ensure_uv || { ...error...; exit 1; }
+```
+
+When sigmond is present (almost always, on any host running consumers),
+the helper is the single source of truth.  The inline fallback covers
+the bootstrap case where an operator clones one client standalone
+without sigmond — relevant for `gpsdo-monitor` and `hs-uploader` which
+don't otherwise require sigmond.  If you change `ensure_uv.sh`, also
+update the inline fallbacks (the changes are normally small enough
+that drift isn't a practical concern).
 
 ### Identifying stale services
 
