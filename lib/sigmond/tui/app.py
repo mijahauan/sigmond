@@ -110,7 +110,7 @@ def _discover_radiod_from_config() -> tuple[str, str]:
 class SigmondApp(App):
     """Dr. SigMonD TUI configurator."""
 
-    TITLE = "Dr. SigMonD"
+    TITLE = "SigMonD"
     SUB_TITLE = "Signal Monitor Daemon — Monitor / Maintain / Debug / Install"
 
     CSS = """
