@@ -200,6 +200,100 @@ enabled = false
 Old topology names (`grape`, `wspr`) are accepted as aliases with deprecation
 warnings.  The canonical names match `etc/catalog.toml`.
 
+## Fleet upgrade pattern
+
+Sigmond consumers (`mag-recorder`, `psk-recorder`, `wspr-recorder`,
+`hf-timestd`, `codar-sounder`, `hfdl-recorder`, etc.) all install their
+sibling libraries (`ka9q-python`, `callhash`, `hs-uploader`, `sigmond`)
+**editable** into `/opt/<consumer>/venv` via `pip install -e
+/opt/git/sigmond/<lib>` at install time.  Each per-consumer `install.sh`
+does this explicitly; sigmond's own `install.sh` enforces that
+`/opt/git/sigmond/ka9q-python` exists (clones from upstream if not),
+because its own `pyproject.toml` pins `ka9q-python = { path =
+"../ka9q-python" }`.
+
+The consequence is that **a `git pull` of any sigmond-suite library
+flows to every consumer for free** — every venv sees the new code on
+disk and every venv's `importlib.metadata.version()` reflects the bumped
+`pyproject.toml` immediately, with no per-venv `pip install --upgrade`
+needed.  This is the deliberate design payoff and what `smd list
+--update` exploits.
+
+### The two layers to consider
+
+1. **Source on disk.**  `git pull` (or `smd list --update`).  Editable
+   installs auto-track; non-editable PyPI installs need
+   `pip install --upgrade <pkg>` per venv (rare in this fleet — only
+   matters if a consumer was installed without the sibling checkout).
+2. **Code loaded in memory.**  Python imports modules once at process
+   start.  A long-running service still holds its start-time bytecode
+   until restarted.  Identify stale services by `systemctl show
+   -p ActiveEnterTimestamp <unit>` and compare against the library's
+   change timestamps.  Restart only the stale ones to minimize
+   disruption.
+
+### Per-host commands
+
+```bash
+# Canonical, restarts everything enabled:
+sudo smd list --update          # pulls all repos per topology version policy
+sudo smd restart                # restarts every enabled component
+
+# Surgical (only what's stale; less disruption to already-fresh services):
+sudo -u sigmond git -C /opt/git/sigmond/<lib> pull --ff-only
+sudo systemctl restart <unit1> <unit2> ...
+```
+
+### Identifying stale services
+
+Editable installs make the "what version is on disk" trivial (always
+HEAD of the local repo).  The harder question is "which running
+processes have stale code in memory?"  The rule of thumb: a service
+whose `ActiveEnterTimestamp` predates the library commit you care
+about needs restart.  Concretely:
+
+```bash
+# Library commit time (UTC):
+git -C /opt/git/sigmond/<lib> log -1 --format=%ci <commit>
+
+# Each candidate service's start time:
+for u in <units...>; do
+  printf "  %-45s %s\n" "$u" "$(systemctl show -p ActiveEnterTimestamp --value "$u")"
+done
+```
+
+### Verifying the loaded code
+
+Python source files aren't memory-mapped (`lsof` and `/proc/PID/maps`
+won't show them), so the conclusive proof is `__pycache__` mtime:
+
+```bash
+ls -la /opt/git/sigmond/<lib>/<pkg>/__pycache__/<module>.cpython-*.pyc
+```
+
+The `.pyc` is regenerated on first import after the `.py` changes.
+If its mtime is at or after the library commit time, any process
+started after that mtime imported the new bytecode.
+
+### Restart-order considerations
+
+For interdependent service groups (notably `hf-timestd`: `core-recorder`
+→ `metrology@*` → `fusion` → `physics`), restart independent observers
+first (`radiod-monitor`, `vtec`, `web-api`, `l2-calibration`), then
+`physics`, then `fusion` last among that group.  Systemd handles
+dependencies on each individual `systemctl restart`, but staggering
+order reduces the size of the transient inconsistent state.
+
+### Cross-site / cross-operator note
+
+Each operator runs their own sigmond install on their own hardware
+(AC0G's bee1, Rob Robinett's B4-100, etc.).  Topology files at
+`/etc/sigmond/environment.toml` are per-site and don't reference other
+operators' hosts — coordination happens via PSWS / HamSCI upstream
+endpoints, not direct fleet orchestration.  When a commit message
+mentions a remote host (e.g. `3a6cf26` cited B4-100), that's
+contextual; cross-operator upgrades are out of scope for `smd`.
+
 ## Key constraints
 
 - **Primary language:** Python 3.11, stdlib only for the core (`smd`).
