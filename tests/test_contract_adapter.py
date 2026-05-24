@@ -148,17 +148,34 @@ class ReadViewTests(unittest.TestCase):
             f"expected mismatch issue for v0.4 client, got {view.issues}",
         )
 
-    def test_v05_client_on_v06_sigmond_warns(self):
-        """A v0.5 client on a v0.6 sigmond stays operational but emits a
-        warn-level mismatch issue — CLIENT-CONTRACT.md §changelog: minor-
-        version skew is compatible, never a hard fail."""
+    def test_v05_client_on_current_sigmond_warns(self):
+        """A v0.5 client on the current sigmond stays operational but
+        emits a warn-level mismatch issue — CLIENT-CONTRACT.md
+        §changelog: minor-version skew is compatible, never a hard fail.
+        The exact warning text just names the two versions; the
+        assertion checks only that a mismatch issue surfaces."""
         raw = json.loads(self.inventory_json)
         raw['contract_version'] = '0.5'
         view = self._run(stdout=json.dumps(raw))
         self.assertEqual(view.contract_version, '0.5')
         self.assertTrue(
             any('contract_version mismatch' in i for i in view.issues),
-            f"expected mismatch issue for v0.5 client on v0.6 sigmond, got {view.issues}",
+            f"expected mismatch issue for v0.5 client, got {view.issues}",
+        )
+
+    def test_v06_client_on_v07_sigmond_warns(self):
+        """v0.6 → v0.7 minor-version skew is the latest forward-compat
+        path the contract supports.  A v0.6 client (full data_sinks
+        per §17, no §18 timing_authority_applied) on a v0.7 sigmond
+        stays operational with a warn-level mismatch — the v0.7
+        migration entry promises this explicitly."""
+        raw = json.loads(self.inventory_json)
+        raw['contract_version'] = '0.6'
+        view = self._run(stdout=json.dumps(raw))
+        self.assertEqual(view.contract_version, '0.6')
+        self.assertTrue(
+            any('contract_version mismatch' in i for i in view.issues),
+            f"expected mismatch issue for v0.6 client on v0.7 sigmond, got {view.issues}",
         )
 
     def test_current_version_client_no_mismatch(self):
@@ -264,6 +281,89 @@ class V03FieldTests(unittest.TestCase):
     def test_log_level_absent_stays_none(self):
         view = self._run(self.inventory_json)
         self.assertIsNone(view.log_level)
+
+
+class V07TimingAuthorityFieldTests(unittest.TestCase):
+    """v0.7 §3/§18 — `timing_authority_applied` per instance.
+
+    The contract leaves the field's internal shape to the consumer;
+    sigmond's job is only to preserve whatever the client publishes
+    (so downstream surfaces — `smd status`, TUI widgets — can show
+    `tier`, `sigma_ns`, `snapshot_age_s`, etc., without sigmond
+    re-validating field names).  These tests pin the round-trip and
+    the absent-=-default contract."""
+
+    def setUp(self):
+        self.raw = _load('hf-timestd-inventory.json')['instances'][0]
+
+    def test_absent_field_stays_none(self):
+        """v0.6 fixture has no timing_authority_applied — the field
+        must remain None (= §18 default mode, always conformant)."""
+        iv = _instance_from_contract(self.raw)
+        self.assertIsNone(iv.timing_authority_applied)
+
+    def test_radiod_subscriber_shape_preserved(self):
+        """Per §18.5 radiod-substrate subscriber — the full snapshot
+        including radiod_id round-trips intact."""
+        raw = dict(self.raw)
+        raw['timing_authority_applied'] = {
+            'source': 'hf-timestd@bee3',
+            'tier': 'T5',
+            'sigma_ns': 1200,
+            'snapshot_age_s': 4.2,
+            'radiod_id': 'bee3-rx888',
+        }
+        iv = _instance_from_contract(raw)
+        self.assertIsNotNone(iv.timing_authority_applied)
+        self.assertEqual(iv.timing_authority_applied['source'],
+                         'hf-timestd@bee3')
+        self.assertEqual(iv.timing_authority_applied['tier'], 'T5')
+        self.assertEqual(iv.timing_authority_applied['sigma_ns'], 1200)
+        self.assertEqual(iv.timing_authority_applied['snapshot_age_s'], 4.2)
+        self.assertEqual(iv.timing_authority_applied['radiod_id'],
+                         'bee3-rx888')
+
+    def test_non_radiod_subscriber_shape_preserved(self):
+        """Per §16.5 amendment — non-radiod clients (mag-recorder,
+        KiwiSDR-based recorders) report timing_authority_applied with
+        radiod_id omitted/null.  Sigmond accepts the shape unchanged."""
+        raw = dict(self.raw)
+        raw['timing_authority_applied'] = {
+            'source': 'hf-timestd@bee3',
+            'tier': 'T6',
+            'sigma_ns': 50,
+            'snapshot_age_s': 1.0,
+            # No radiod_id — non-radiod subscriber per §16.5.
+        }
+        iv = _instance_from_contract(raw)
+        self.assertIsNotNone(iv.timing_authority_applied)
+        self.assertNotIn('radiod_id', iv.timing_authority_applied)
+        self.assertEqual(iv.timing_authority_applied['tier'], 'T6')
+
+    def test_non_dict_value_ignored(self):
+        """Defensive: a client emitting a non-dict (string, list,
+        scalar) for this field must not crash the adapter.  Falls
+        back to None silently — the schema mismatch is itself a
+        contract violation, but sigmond's job is to keep going."""
+        for bad in ("hf-timestd@bee3", ["a", "b"], 42, True):
+            raw = dict(self.raw)
+            raw['timing_authority_applied'] = bad
+            iv = _instance_from_contract(raw)
+            self.assertIsNone(iv.timing_authority_applied,
+                              f"non-dict value {bad!r} should yield None")
+
+    def test_field_independent_of_uses_timing_calibration(self):
+        """`uses_timing_calibration` is a capability boolean; the
+        applied-authority dict is the current runtime state.  A
+        client may have `uses_timing_calibration=true` and
+        `timing_authority_applied=null` (capable but currently in
+        default mode) or vice versa — these are orthogonal."""
+        raw = dict(self.raw)
+        raw['uses_timing_calibration'] = True
+        # timing_authority_applied stays absent → None
+        iv = _instance_from_contract(raw)
+        self.assertTrue(iv.uses_timing_calibration)
+        self.assertIsNone(iv.timing_authority_applied)
 
 
 class ValidateNativeTests(unittest.TestCase):

@@ -34,6 +34,7 @@ class InstanceView:
     chain_delay_ns_applied:     Optional[int] = None                  # v0.2 §8
     control_socket:             Optional[str] = None                  # v0.5 §3 amendment
     data_path:                  Optional[dict] = None                 # v0.5 §16.3
+    timing_authority_applied:   Optional[dict] = None                 # v0.7 §3/§18 — null = default mode
     # radiod-only metadata: populated by RadiodAdapter, ignored elsewhere.
     radiod_samprate_hz:         int = 0
     radiod_status_dns:          str = ""

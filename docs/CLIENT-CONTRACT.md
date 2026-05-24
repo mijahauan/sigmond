@@ -1,6 +1,6 @@
 # HamSCI Client Contract
 
-**Version:** 0.6
+**Version:** 0.7
 **Status:** Adopted. First full v0.2 implementation is `hf-timestd`
 v7.0.0 — see §9.  First greenfield v0.3 implementation is
 `psk-recorder` v0.1.0, which also surfaced the v0.4 hardening items in
@@ -8,6 +8,40 @@ v7.0.0 — see §9.  First greenfield v0.3 implementation is
 wspr-recorder) retrofitted to v0.5 on 2026-05-04.
 §17 (output sinks) drafted 2026-05-07 and revised to keep the sink
 `kind` taxonomy engine-agnostic.
+§18 (timing authority and the RTP-default fallback) added 2026-05-24,
+giving the latent v0.2 booleans (`uses_timing_calibration`,
+`provides_timing_calibration`) their contract semantics for the first
+time.
+
+v0.7 adds:
+
+- **§18 (new) — timing authority and the default fallback.**
+  Defines two operating modes (default and authority-corrected),
+  two subscriber substrates (radiod RTP and non-radiod), the
+  discovery mechanism (per-radiod keys via `coordination.env`
+  parallel to §8, plus station-wide keys for non-radiod clients
+  like `mag-recorder` and KiwiSDR-based recorders), the snapshot
+  fields a subscribing client may rely on (`utc_anchor_ns`,
+  `tier`, `sigma_ns`, `snapshot_age_s` for all subscribers;
+  `rtp_anchor_sample`, `rate_samples_per_utc_sec`, `radiod_id` for
+  radiod subscribers; `host_monotonic_at_anchor` for non-radiod
+  subscribers), client obligations for sample labelling vs.
+  hard-deadline start/stop, and the §18/§8 composition rule
+  (§8 chain-delay is radiod-specific and does not apply to
+  non-radiod clients).  The producer-side reference is
+  `hf-timestd/docs/ARCHITECTURE-FIRST-PRINCIPLES.md`; the contract
+  names what clients may rely on without specifying the wire
+  protocol.  Default mode (RTP-default for radiod clients,
+  host-clock-default for non-radiod clients) remains conformant;
+  no client is required to be hf-timestd-aware.
+- **§3 amendment.**  Adds `timing_authority_applied` per instance
+  (null = §18 RTP-default mode, populated = authority-corrected
+  with source/tier/σ/age).  Defines the v0.2 booleans
+  `uses_timing_calibration` and `provides_timing_calibration` that
+  previously appeared in inventory without contract semantics.
+- **§8 amendment.**  Clarifying sentence: §8 is the *static*
+  hardware-pipeline correction; §18 is the *dynamic* timeline-anchor
+  correction; they compose, do not replace each other.
 
 v0.6 adds:
 
@@ -241,6 +275,43 @@ shelling into the client.
   symmetric to §16's `data_path` (input).  See §17 for the entry
   shape and the `disk_writes` auto-promotion path that keeps v0.5
   clients conformant unchanged.
+
+**Per-instance v0.7 fields:**
+
+- **`timing_authority_applied`** (v0.7) — `null` or missing if the
+  instance operates in §18 RTP-default mode (the safe default).
+  Otherwise, an object naming the authority source and the snapshot
+  currently in use:
+
+  ```json
+  {
+    "timing_authority_applied": {
+      "source": "hf-timestd@bee3",
+      "tier": "T5",
+      "sigma_ns": 1200,
+      "snapshot_age_s": 4.2,
+      "radiod_id": "bee3-rx888"
+    }
+  }
+  ```
+
+  See §18.5 for the obligations behind this field.
+
+**Per-instance v0.2 booleans (semantics defined in v0.7):**
+
+These two fields have appeared in `inventory --json` since v0.2
+without the contract ever defining their meaning.  §18 (v0.7)
+gives them their semantics:
+
+- **`uses_timing_calibration`** — `true` if the instance ever
+  subscribes to a §18 timing authority (i.e. ever operates in
+  authority-corrected mode), regardless of the mode currently
+  active.  `false` for clients that always operate in §18
+  RTP-default mode and never consult an authority.  The current
+  mode is reported by `timing_authority_applied`.
+- **`provides_timing_calibration`** — `true` if the instance is
+  itself a §18 timing authority that other clients may subscribe
+  to.  Currently only `hf-timestd`; reserved for future producers.
 
 **`<client> validate --json`** — self-validate every instance's config.
 Shape:
@@ -729,6 +800,20 @@ it via sigmond, and have psk-recorder + wsprdaemon + any other client
 pick it up automatically.  The calibration is hf-timestd's
 responsibility; the *distribution* is sigmond's; the *application* is
 every peer client's.
+
+**Relationship to §18 (v0.7).**  §8 is the *static* hardware-pipeline
+correction (fixed ns offset per radiod analog/ADC path).  §18 is the
+*dynamic* timeline-anchor correction (epoch + rate, refreshed per
+authority cycle).  The two compose and address different errors;
+applied together:
+
+```
+utc_final_ns = utc_via_§18(rtp_sample_n) − chain_delay_ns_§8
+```
+
+§18 corrects the radiod host clock's contribution to RTP→UTC; §8
+corrects the analog-front-end → ADC pipeline delay.  Neither replaces
+the other.  See §18.6.
 
 **Dependency note.**  §8 depends on sigmond Phase 4 (sigmond takes
 over cross-client write paths into coordination.env).  Until Phase 4
@@ -1736,10 +1821,22 @@ A non-radiod client (`kind` ∈ `kiwisdr`, `file`, `other`):
   an operator to understand the data source (e.g. KiwiSDR
   hostname, file glob, source description).
 - MAY participate in §10 (log paths), §11 (runtime log level),
-  §13 (control surface), and §14 (configuration interview) on
-  equal footing with radiod clients — none of those surfaces
-  depend on radiod.
+  §13 (control surface), §14 (configuration interview), and §18
+  (timing authority, via station-wide discovery and the host-clock
+  bridging formula in §18.5) on equal footing with radiod clients
+  — none of those surfaces depend on radiod.
 - §2, §6, §7, §8 do not apply.
+
+Non-radiod clients in §18 authority-corrected mode MUST report
+`timing_authority_applied` (§3) like any other subscriber.  The
+field's `radiod_id` MUST be omitted (or set to `null`); the
+`source`, `tier`, `sigma_ns`, and `snapshot_age_s` fields are
+reported as usual.  This is not in tension with the "MUST omit
+radiod fields" rule above: `timing_authority_applied` describes
+the *authority subscription*, not a radiod relationship — the
+authority happens to also annotate radiod streams for other
+subscribers, but a non-radiod client is using its station-wide
+service.
 
 #### 16.6 What independent clients give up
 
@@ -1945,6 +2042,300 @@ Sigmond MUST NOT enforce that any particular client opt into
 `service` sinks; the file path is always sufficient for v0.6
 conformance.
 
+### 18. Timing authority and the RTP-default fallback (v0.7)
+
+#### 18.1 Scope
+
+Two orthogonal axes motivate this section.
+
+**Axis 1 — what the client needs from UTC:**
+
+- **Sample-labeling clients** — want a UTC label for each sample
+  they record (post-hoc analysis, archival, spot timestamps).
+  Tolerant of latency; benefits from authority correction but does
+  not need it at decision time.
+- **Hard-deadline clients** — must *act* at a target UTC moment
+  (start a recording at chirp launch, stop at a scheduled boundary,
+  trigger an instrument cycle).  Need a current best estimate of
+  UTC to convert their target into a target sample on their own
+  substrate; the quality of that estimate sets the timing budget
+  for the captured phenomenon.
+
+**Axis 2 — what substrate the client operates on:**
+
+- **Radiod-substrate clients** (`data_path.kind ∈ {radiod-ka9q-python,
+  radiod-direct}`) — receive RTP samples from a radiod.  Their
+  "ruler" is the RTP sample counter of the radiod stream they
+  consume.  The authority annotates *that* substrate.
+- **Non-radiod clients** (`data_path.kind ∈ {kiwisdr, file, other}`,
+  including data-source clients like `mag-recorder` and the
+  KiwiSDR-based recorder migrating from `wsprdaemon` v3) — have
+  their own native substrate (a magnetometer's sample clock, a
+  KiwiSDR's time-tag, a file's recorded wall-clock).  They still
+  want the best available UTC, both for sample-labeling and for
+  hard-deadline scheduling against their own substrate.  The
+  authority annotates *time itself* for them, not any radiod
+  stream — typically via the host's monotonic clock as a bridge.
+
+Both axes compose to four cases, all addressed below.  Per
+[`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/mijahauan/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md)
+the *substrate* (radiod RTP, magnetometer sample-clock, KiwiSDR
+time-tag, host monotonic) is whatever the client's data plane
+provides; the *annotation* is the UTC mapping a timing authority
+publishes onto that substrate.
+
+This section names what a *consuming client* may rely on without
+specifying the wire protocol.  The producer-side reference for what
+a timing authority *is* lives in
+[`hf-timestd/docs/ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/mijahauan/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md).
+
+#### 18.2 Two modes
+
+- **RTP-default mode.**  The client uses the RTP-to-UTC mapping as
+  published by radiod (its anchor and the nominal sample rate).
+  No dependency on a timing-authority peer.  Quality is bounded by
+  whatever governs the radiod machine's clock (wall, WAN NTP,
+  chrony, GPSDO).  Standalone-safe and always the fallback.
+- **Authority-corrected mode.**  The client subscribes to a timing
+  authority (hf-timestd is the reference implementation) and uses
+  the authority's published snapshot for its sample↔UTC math.
+  Optional.  Per
+  [`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/mijahauan/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md)
+  §2, the tier system ranks authority quality (T0 worst, T5 best,
+  T6 cross-check).
+
+The two modes are not mutually exclusive across a station: one
+client may operate in RTP-default while a peer operates in
+authority-corrected.  Sigmond reports the choice; it does not
+enforce it.
+
+#### 18.3 Discovery
+
+A timing authority is a property of the *substrate* a subscriber
+operates on, not of any particular host.  hf-timestd may be
+co-located with the radiod, with the consumer client, or on a
+third host — the published annotation is correct for any
+subscriber of the same substrate.
+
+Two scopes of authority pointer exist.  Both are published in
+`coordination.env`; a client reads whichever applies to its data
+plane.
+
+**Per-radiod scope (for radiod-substrate clients).**  Parallel to
+§8.  Names the authority that annotates a specific radiod's RTP
+stream:
+
+```
+RADIOD_BEE3_RX888_TIMING_AUTHORITY=hf-timestd@bee3
+RADIOD_BEE3_RX888_TIMING_AUTHORITY_ENDPOINT=unix:///run/hf-timestd/authority.sock
+RADIOD_BEE3_RX888_TIMING_AUTHORITY_TIER_MIN=T4
+```
+
+A radiod-substrate client MAY read these on startup and on SIGHUP
+and subscribe.  Absence of `RADIOD_<id>_TIMING_AUTHORITY*` keys =
+RTP-default mode for streams from that radiod.
+
+**Station-wide scope (for non-radiod clients, and as a fallback
+for radiod clients).**  Names the station's best available timing
+authority, independent of any radiod stream:
+
+```
+TIMING_AUTHORITY=hf-timestd@bee3
+TIMING_AUTHORITY_ENDPOINT=unix:///run/hf-timestd/authority.sock
+TIMING_AUTHORITY_TIER_MIN=T4
+```
+
+A non-radiod client (`data_path.kind ∈ {kiwisdr, file, other}`)
+MAY read these on startup and on SIGHUP and subscribe.  Absence of
+station-wide `TIMING_AUTHORITY*` keys = host-clock-default mode
+(the non-radiod analogue of RTP-default: the client uses whatever
+native UTC its data source or host clock provides, with no
+authority correction).
+
+**Precedence for radiod-substrate clients.**  A radiod-substrate
+client MAY also use the station-wide keys as a fallback when its
+per-radiod keys are absent.  Per-radiod takes precedence when both
+are present.  Sigmond MAY populate both pointing at the same
+authority — the per-radiod variant just identifies which RTP
+stream the authority is annotating.
+
+**Standalone discovery.**  Any client MAY accept an authority
+endpoint in its own config (TOML).  A client MUST fall back to its
+mode-appropriate default (RTP-default for radiod clients,
+host-clock-default for non-radiod clients) if no endpoint is
+configured *or* the configured endpoint is unreachable.
+Reachability is checked at startup and on SIGHUP; transient
+unreachability during steady-state operation is handled per §18.5
+hard-deadline gating.
+
+**Key format.**  Per-radiod keys: `RADIOD_<id>_TIMING_AUTHORITY`,
+`RADIOD_<id>_TIMING_AUTHORITY_ENDPOINT`,
+`RADIOD_<id>_TIMING_AUTHORITY_TIER_MIN`.  Station-wide keys:
+`TIMING_AUTHORITY`, `TIMING_AUTHORITY_ENDPOINT`,
+`TIMING_AUTHORITY_TIER_MIN`.  Endpoints are URIs (`unix://`,
+`tcp://`, etc.).  `TIER_MIN` is the operator's floor for authority
+acceptance; the client's own threshold under §18.5 MAY be stricter
+but MUST NOT be looser.  Sigmond owns the `coordination.env`
+write path; clients read only.
+
+#### 18.4 What the authority publishes
+
+A subscribing client gets a periodic snapshot containing at
+minimum:
+
+| Field                       | Meaning                                                                 | Used by                       |
+|-----------------------------|-------------------------------------------------------------------------|-------------------------------|
+| `utc_anchor_ns`             | The UTC time corresponding to the anchor moment, in ns since the epoch. | All subscribers.              |
+| `tier`                      | Authority tier from [`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/mijahauan/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md) §2. | All subscribers.              |
+| `sigma_ns`                  | 1-σ uncertainty of `utc_anchor_ns` at the time of measurement.          | All subscribers.              |
+| `snapshot_age_s`            | Wall time since the last successful authority observation.              | All subscribers.              |
+| `host_monotonic_at_anchor`  | Authority host's `CLOCK_MONOTONIC_RAW` (ns) at the anchor moment.       | Non-radiod subscribers.       |
+| `rtp_anchor_sample`         | An RTP sample number on the named stream.                               | Radiod-substrate subscribers. |
+| `rate_samples_per_utc_sec`  | Measured sample rate (not nominal); used for forward projection.        | Radiod-substrate subscribers. |
+| `radiod_id`                 | Which RTP stream this snapshot is the offset for.                       | Radiod-substrate subscribers. |
+
+The radiod-specific fields (`rtp_anchor_sample`,
+`rate_samples_per_utc_sec`, `radiod_id`) are present when the
+subscriber requested a per-radiod authority via §18.3 per-radiod
+keys.  The non-radiod field (`host_monotonic_at_anchor`) is present
+when the subscriber requested a station-wide authority via §18.3
+station-wide keys.  A subscriber MUST use only the fields
+appropriate to its subscription type; the producer MAY include
+both sets in a single snapshot (e.g. when serving co-located
+radiod and non-radiod clients from the same authority instance).
+
+Wire format and transport are out of scope here; the contract
+names the fields a client may rely on.
+
+#### 18.5 Client obligations
+
+Two operating modes; for the authority-corrected mode the
+substrate-conversion formula differs by subscriber type
+(radiod-substrate vs. non-radiod).
+
+**Default mode (RTP-default for radiod clients; host-clock-default
+for non-radiod clients).**  A client operating in default mode MUST:
+
+- Convert its native samples to UTC using whatever its data source
+  provides natively (radiod's published anchor + nominal rate for
+  radiod clients; the data source's own time-tag or the host
+  clock for non-radiod clients).
+- Report `timing_authority_applied: null` in `inventory --json`
+  (§3).
+- Report `uses_timing_calibration` accurately: `false` if the
+  client never subscribes to an authority; `true` if it would
+  subscribe were one available (the value describes capability,
+  not the currently-active mode — the current mode is reported by
+  `timing_authority_applied`).
+
+**Authority-corrected mode — common obligations.**  Any client
+operating in authority-corrected mode MUST:
+
+- Re-fetch the authority snapshot at a cadence appropriate to its
+  tolerance.  Recommended: at least once per scheduled action.
+  Minimum: at startup and on SIGHUP.
+- Report the currently applied authority in `inventory --json` via
+  the `timing_authority_applied` field (§3 amendment).
+
+**Authority-corrected mode — radiod-substrate subscribers.**
+Compute UTC as:
+
+```
+utc(rtp_n) = utc_anchor_ns
+           + (rtp_n − rtp_anchor_sample) × 1e9 / rate_samples_per_utc_sec
+```
+
+Then apply the §8 chain-delay correction (if any) *after* the §18
+conversion.  See §18.6.
+
+**Authority-corrected mode — non-radiod subscribers.**  Compute
+UTC by bridging through the host's monotonic clock:
+
+```
+utc(t_local) = utc_anchor_ns
+             + (host_monotonic_now − host_monotonic_at_anchor)
+```
+
+`host_monotonic_now` is the subscribing client's own
+`CLOCK_MONOTONIC_RAW` reading at the moment it wants UTC.  This
+formulation is exact when subscriber and authority are co-located
+(shared kernel monotonic clock).  When they are on different
+hosts, the wire protocol layer (hf-timestd's own
+interface concern) is responsible for bridging the two hosts'
+monotonic clocks; the additional uncertainty added by that bridge
+is reflected in the snapshot's `sigma_ns` field.
+
+§8 chain-delay does not apply to non-radiod clients (it is a
+property of the radiod analog/ADC pipeline).
+
+**Hard-deadline start/stop decisions.**  A client that makes hard
+start/stop decisions in authority-corrected mode MUST additionally:
+
+- Gate the decision on
+  (`tier ≥ configured_min_tier`) AND
+  (`snapshot_age_s ≤ configured_max_age`) AND
+  (`sigma_ns ≤ configured_max_sigma`).
+- When the gate fails, the client MUST NOT silently fall back to a
+  worse estimate.  It MUST either (a) refuse the action and log
+  the refusal as a first-class event with the failing budget, or
+  (b) downgrade to its default mode with the downgrade also logged
+  as a first-class event.  Silent degradation is a contract
+  violation.
+- Report the configured thresholds and the most recent gate result
+  in `/status` per §13.4 so sigmond's TUI can surface "timing
+  budget OK / breached" without polling the client.
+
+**Annotation propagation.**  A client MUST NOT propagate
+authority-corrected timestamps to downstream consumers (sinks,
+spots, archives, peer clients) without also recording the tier and
+σ that produced them.  This preserves
+[`ARCHITECTURE-FIRST-PRINCIPLES.md`](https://github.com/mijahauan/hf-timestd/blob/main/docs/ARCHITECTURE-FIRST-PRINCIPLES.md)
+§3: the annotation travels with the sample, regardless of
+substrate.
+
+#### 18.6 Relationship to §8
+
+§8 (chain-delay) and §18 (timing-authority) compose.  §8 is a
+*static* hardware-level correction (fixed ns offset per radiod
+analog/ADC path); §18 is a *dynamic* timeline-anchor correction
+(epoch + rate refreshed per authority cycle).  Applied together:
+
+```
+utc_final_ns = utc_via_§18(rtp_sample_n) − chain_delay_ns_§8
+```
+
+§18 corrects the radiod host clock's contribution to RTP→UTC; §8
+corrects the analog-front-end → ADC pipeline delay.  They address
+different errors and never replace each other.  A client may use
+both, neither, or just one — the four combinations are all legal
+(and all reported honestly in inventory).
+
+#### 18.7 Sigmond's view
+
+Sigmond:
+
+- Surfaces `timing_authority_applied` per client in `smd status`
+  and `smd diag`.
+- Cross-references peer clients of the same radiod: if one peer is
+  authority-corrected and another is RTP-default, that's a
+  degraded but legal state; sigmond reports it for operator
+  awareness rather than failing validation.
+- Flags clients reporting `tier ≤ T1` or `snapshot_age_s` above
+  their configured threshold.
+- Does not require any client to operate in any particular mode.
+  RTP-default is always conformant.
+
+#### 18.8 What this section does NOT do
+
+- It does not define the wire protocol between hf-timestd and a
+  subscriber — that is hf-timestd's interface concern, owned by
+  its own `INTERFACE.md` (or equivalent) rather than this
+  contract.
+- It does not require any client to be hf-timestd-aware.
+  RTP-default mode is always available and always conformant.
+- It does not deprecate §8.  Chain-delay remains a distinct,
+  necessary correction.
+
 ## What sigmond promises in return
 
 - Never writes inside a client's native config file.
@@ -2025,3 +2416,42 @@ conformance.
   subsequently revised in place to make the `kind` enum
   engine-agnostic: a sink is either a local `file` or an external
   `service`, with no database product named in the contract.
+- **v0.6 → v0.7** adds §18 (timing authority and the default
+  fallback), gives the previously-undefined v0.2 booleans
+  `uses_timing_calibration` and `provides_timing_calibration`
+  their contract semantics, adds `timing_authority_applied` per
+  instance (§3), and amends §16.5 so non-radiod clients (e.g.
+  `mag-recorder`, KiwiSDR-based recorders) can also subscribe to
+  a timing authority via the station-wide discovery path.  v0.6
+  clients pass validation on a v0.7 sigmond unchanged; sigmond
+  treats a missing `timing_authority_applied` as `null` (§18
+  default mode, always conformant) and treats missing or unset
+  `uses_timing_calibration` / `provides_timing_calibration` as
+  `false`.  No client is required to subscribe to a timing
+  authority; the §18 retrofit is opt-in per client.  Inventory
+  mismatch (v0.6 client on v0.7 sigmond) emits an informational
+  note, not a warn-level issue.
+- **Clients requiring v0.7 retrofit (opt-in):**
+  - `hf-timestd` — already `provides_timing_calibration: true`;
+    needs to publish both per-radiod (§18.3 per-radiod keys) and
+    station-wide (§18.3 station-wide keys) entries via sigmond's
+    write path, expose the §18.4 snapshot fields to both
+    radiod-substrate and non-radiod subscribers (including
+    `host_monotonic_at_anchor` for the latter), and document its
+    endpoint URI.  No behaviour change for clients that don't
+    subscribe.
+  - Any radiod-substrate client that wants to subscribe
+    (start/stop scheduling, sub-ms labelling on a poorly-disciplined
+    radiod host) — reads the §18.3 per-radiod keys, fetches
+    snapshots per §18.4, reports `timing_authority_applied` per
+    §3, and (if hard-deadline) implements §18.5 gating.
+  - Any non-radiod client that wants to subscribe (e.g.
+    `mag-recorder` for hardware-timed magnetometer samples,
+    KiwiSDR-based recorders for audio capture from an external
+    SDR) — reads the §18.3 station-wide keys, fetches snapshots
+    per §18.4, bridges via `host_monotonic_at_anchor` per §18.5,
+    and reports `timing_authority_applied` per §16.5 (omitting
+    `radiod_id`).
+  - All other clients remain in default mode (RTP-default for
+    radiod, host-clock-default for non-radiod) and are conformant
+    unchanged.

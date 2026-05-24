@@ -177,6 +177,85 @@ def test_exec_wizard_parse_none_returns_no_fields(tmp_path: Path) -> None:
     assert result.fields is None
 
 
+def test_exec_wizard_parse_none_defaults_to_interactive_stdio(tmp_path: Path) -> None:
+    """REGRESSION: when parse=None, the wizard's stdio must NOT be
+    captured -- the operator needs to see whiptail's UI rendering on
+    their terminal.  Earlier version unconditionally used
+    capture_output=True, which made mag-recorder's `config edit` exit
+    silently with no UI visible (the operator saw nothing).
+
+    Verify by spawning a child that prints a unique sentinel to its
+    stdout and a different one to stderr, then asserting that both
+    appear in this process's captured stdout/stderr (because they
+    were inherited).  Run via subprocess so pytest's own capture
+    fixture catches them deterministically."""
+    wiz = _make_wizard_script(
+        tmp_path,
+        '#!/bin/bash\n'
+        'echo "WIZARD_STDOUT_SENTINEL"\n'
+        'echo "WIZARD_STDERR_SENTINEL" >&2\n'
+        'exit 0\n',
+    )
+    # Run the assertion in a child Python so pytest's capsys doesn't
+    # interfere with the test of subprocess stdio inheritance.
+    sub = subprocess.run(
+        ["python3", "-c", f"""
+import sys
+sys.path.insert(0, '{Path(__file__).resolve().parent.parent / "lib"}')
+from sigmond.wizard_dispatch import exec_wizard
+r = exec_wizard('{wiz}', parse=None)
+print(f'fields={{r.fields!r}} stderr={{r.stderr!r}} returncode={{r.returncode}}')
+"""],
+        capture_output=True, text=True, check=True,
+    )
+    # The sentinels must have appeared on the OUTER process's stdio
+    # (because the wizard inherited it), not in the WizardResult.
+    assert "WIZARD_STDOUT_SENTINEL" in sub.stdout
+    assert "WIZARD_STDERR_SENTINEL" in sub.stderr
+    # The WizardResult itself reports no captured stderr / fields,
+    # since the operator already saw them on their terminal.
+    assert "stderr=''" in sub.stdout
+    assert "fields=None" in sub.stdout
+
+
+def test_exec_wizard_interactive_explicit_overrides_default(tmp_path: Path) -> None:
+    """interactive=False with parse=None: caller wants neither
+    parsing NOR stdio inheritance (rare; for wizards that write
+    their UI to /dev/tty directly).  Just verify no exception."""
+    wiz = _make_wizard_script(tmp_path, '#!/bin/bash\necho out\nexit 0\n')
+    result = exec_wizard(wiz, parse=None, interactive=False)
+    assert result.ok
+    assert result.fields is None
+    # stderr is captured (because interactive=False), but the wizard
+    # only printed stdout, so .stderr should be empty.
+    assert result.stderr == ""
+
+
+def test_exec_wizard_kv_explicit_interactive_true_skips_parse(tmp_path: Path) -> None:
+    """interactive=True short-circuits parse: stdout went to the
+    operator's terminal, so .fields is None regardless of parse=.
+    Documented behaviour for the niche case where a caller explicitly
+    asks for both interactive stdio and a parse mode."""
+    wiz = _make_wizard_script(
+        tmp_path,
+        '#!/bin/bash\necho "KEY=value"\nexit 0\n',
+    )
+    # Run via subprocess so the wizard's stdout is observable on
+    # outer stdout (because it was inherited, not captured).
+    sub = subprocess.run(
+        ["python3", "-c", f"""
+import sys
+sys.path.insert(0, '{Path(__file__).resolve().parent.parent / "lib"}')
+from sigmond.wizard_dispatch import exec_wizard
+r = exec_wizard('{wiz}', parse='kv', interactive=True)
+print(f'fields={{r.fields!r}}')
+"""],
+        capture_output=True, text=True, check=True,
+    )
+    assert "KEY=value" in sub.stdout         # wizard's echo inherited
+    assert "fields=None" in sub.stdout       # parse skipped because interactive
+
+
 def test_exec_wizard_returncode_passed_through(tmp_path: Path) -> None:
     wiz = _make_wizard_script(tmp_path, '#!/bin/bash\nexit 7\n')
     result = exec_wizard(wiz, parse="kv")

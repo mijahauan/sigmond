@@ -8,7 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'lib'))
 
 from sigmond.coordination import (
-    Coordination, load_coordination, parse_coordination, render_env, _env_key,
+    Coordination, TimingAuthority, load_coordination, parse_coordination,
+    render_env, _env_key,
 )
 
 
@@ -205,6 +206,174 @@ class TestPassthroughExtras(unittest.TestCase):
                                               if ctype == "ka9q-web" else [],
         )
         self.assertEqual(env.count("KA9Q_WEB_K3LR_RX888_PORT=8081"), 1)
+
+
+class TestTimingAuthority(unittest.TestCase):
+    """CLIENT-CONTRACT.md §18.3 — operator-declared timing-authority
+    pointers, station-wide plus optional per-radiod overrides."""
+
+    STATION_TOML = """\
+[timing_authority]
+source   = "hf-timestd@bee3"
+endpoint = "unix:///run/hf-timestd/authority.sock"
+tier_min = "T4"
+"""
+
+    PER_RADIOD_TOML = """\
+[radiod."bee3-rx888"]
+host        = "localhost"
+status_dns  = "bee3-status.local"
+
+[timing_authority]
+source   = "hf-timestd@bee3"
+endpoint = "unix:///run/hf-timestd/authority.sock"
+
+[timing_authority.per_radiod."bee3-rx888"]
+source   = "hf-timestd@bee3-special"
+endpoint = "unix:///run/hf-timestd/special-authority.sock"
+tier_min = "T5"
+"""
+
+    # Operator opened the [timing_authority] block but only filled in
+    # `source` — endpoint missing.  The parsed object exists but
+    # `is_declared` is False, so render_env emits nothing.  This is the
+    # "half-configured" state a future validate-time warning would
+    # surface; for now sigmond just silently skips emission rather
+    # than emitting half a contract.
+    INCOMPLETE_TOML = """\
+[timing_authority]
+source = "hf-timestd@bee3"
+"""
+
+    def test_dataclass_default_is_undeclared(self):
+        ta = TimingAuthority()
+        self.assertFalse(ta.is_declared)
+
+    def test_dataclass_requires_both_source_and_endpoint(self):
+        self.assertFalse(TimingAuthority(source="x").is_declared)
+        self.assertFalse(TimingAuthority(endpoint="x").is_declared)
+        self.assertTrue(TimingAuthority(source="x", endpoint="y").is_declared)
+
+    def test_parse_station_wide(self):
+        import tomllib
+        coord = parse_coordination(tomllib.loads(self.STATION_TOML))
+        self.assertEqual(coord.timing_authority.source, "hf-timestd@bee3")
+        self.assertEqual(coord.timing_authority.endpoint,
+                         "unix:///run/hf-timestd/authority.sock")
+        self.assertEqual(coord.timing_authority.tier_min, "T4")
+        self.assertTrue(coord.timing_authority.is_declared)
+        self.assertEqual(coord.per_radiod_timing_authority, {})
+
+    def test_parse_per_radiod(self):
+        import tomllib
+        coord = parse_coordination(tomllib.loads(self.PER_RADIOD_TOML))
+        self.assertIn("bee3-rx888", coord.per_radiod_timing_authority)
+        ta = coord.per_radiod_timing_authority["bee3-rx888"]
+        self.assertEqual(ta.source, "hf-timestd@bee3-special")
+        self.assertEqual(ta.endpoint,
+                         "unix:///run/hf-timestd/special-authority.sock")
+        self.assertEqual(ta.tier_min, "T5")
+        self.assertTrue(ta.is_declared)
+
+    def test_parse_absent_block_is_undeclared(self):
+        """No [timing_authority] in coordination.toml → empty dataclass
+        with is_declared False.  Backward-compat: any v0.6 coordination
+        config loads cleanly on a v0.7 sigmond."""
+        import tomllib
+        coord = parse_coordination(tomllib.loads(SAMPLE_TOML))
+        self.assertFalse(coord.timing_authority.is_declared)
+        self.assertEqual(coord.per_radiod_timing_authority, {})
+
+    def test_parse_incomplete_block_is_undeclared(self):
+        """Operator declared the block but only filled in `source` →
+        the dataclass exists but is_declared is False, so render_env
+        will skip emission rather than emit half a contract."""
+        import tomllib
+        coord = parse_coordination(tomllib.loads(self.INCOMPLETE_TOML))
+        self.assertEqual(coord.timing_authority.source, "hf-timestd@bee3")
+        self.assertEqual(coord.timing_authority.endpoint, "")
+        self.assertFalse(coord.timing_authority.is_declared)
+
+    def test_render_emits_station_wide_keys(self):
+        import tomllib
+        coord = parse_coordination(tomllib.loads(self.STATION_TOML))
+        env = render_env(coord)
+        self.assertIn("TIMING_AUTHORITY=hf-timestd@bee3", env)
+        self.assertIn(
+            "TIMING_AUTHORITY_ENDPOINT=unix:///run/hf-timestd/authority.sock",
+            env,
+        )
+        self.assertIn("TIMING_AUTHORITY_TIER_MIN=T4", env)
+
+    def test_render_emits_per_radiod_keys(self):
+        import tomllib
+        coord = parse_coordination(tomllib.loads(self.PER_RADIOD_TOML))
+        env = render_env(coord)
+        self.assertIn(
+            "RADIOD_BEE3_RX888_TIMING_AUTHORITY=hf-timestd@bee3-special",
+            env,
+        )
+        self.assertIn(
+            "RADIOD_BEE3_RX888_TIMING_AUTHORITY_ENDPOINT="
+            "unix:///run/hf-timestd/special-authority.sock",
+            env,
+        )
+        self.assertIn("RADIOD_BEE3_RX888_TIMING_AUTHORITY_TIER_MIN=T5", env)
+        # Station-wide pointer also emitted alongside per-radiod, since
+        # both scopes coexist in PER_RADIOD_TOML.
+        self.assertIn("TIMING_AUTHORITY=hf-timestd@bee3", env)
+
+    def test_render_omits_tier_min_when_unset(self):
+        """tier_min is optional per §18.3 — when unset, the env key
+        is not emitted, letting the client apply its own threshold."""
+        import tomllib
+        toml = self.STATION_TOML.replace('tier_min = "T4"\n', '')
+        coord = parse_coordination(tomllib.loads(toml))
+        env = render_env(coord)
+        self.assertIn("TIMING_AUTHORITY=hf-timestd@bee3", env)
+        self.assertNotIn("TIMING_AUTHORITY_TIER_MIN", env)
+
+    def test_render_skips_undeclared_block(self):
+        """No [timing_authority] in coordination.toml → no
+        TIMING_AUTHORITY* keys in the rendered env.  Default mode."""
+        import tomllib
+        coord = parse_coordination(tomllib.loads(SAMPLE_TOML))
+        env = render_env(coord)
+        self.assertNotIn("TIMING_AUTHORITY=", env)
+        self.assertNotIn("TIMING_AUTHORITY_ENDPOINT", env)
+        self.assertNotIn("TIMING_AUTHORITY_TIER_MIN", env)
+
+    def test_render_skips_incomplete_block(self):
+        """Half-filled [timing_authority] (source but no endpoint) →
+        no env keys.  No half-contracts."""
+        import tomllib
+        coord = parse_coordination(tomllib.loads(self.INCOMPLETE_TOML))
+        env = render_env(coord)
+        self.assertNotIn("TIMING_AUTHORITY=", env)
+        self.assertNotIn("TIMING_AUTHORITY_ENDPOINT", env)
+
+    def test_per_radiod_for_unknown_radiod_is_orphan(self):
+        """If [timing_authority.per_radiod.<id>] names a radiod that
+        isn't declared in [radiod.*], the per-radiod entry is parsed
+        but its env keys never emit — render_env iterates radiods,
+        not per_radiod_timing_authority keys, so an orphan entry is
+        silently inert.  A future validate-time check could surface
+        this as a warn-level issue."""
+        toml = """\
+[timing_authority]
+source = "hf-timestd@bee3"
+endpoint = "unix:///run/hf-timestd/authority.sock"
+
+[timing_authority.per_radiod."nonexistent-radiod"]
+source = "hf-timestd@phantom"
+endpoint = "unix:///run/phantom.sock"
+"""
+        import tomllib
+        coord = parse_coordination(tomllib.loads(toml))
+        self.assertIn("nonexistent-radiod", coord.per_radiod_timing_authority)
+        env = render_env(coord)
+        self.assertNotIn("NONEXISTENT_RADIOD", env)
+        self.assertNotIn("phantom", env)
 
 
 if __name__ == "__main__":

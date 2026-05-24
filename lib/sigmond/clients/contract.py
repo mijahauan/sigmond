@@ -28,7 +28,7 @@ from .base import ClientAdapter, ClientView, DiskWrite, InstanceView
 # inventory reports a different version stays operational: minor-version
 # skew is reported as a warn-level issue, never a hard fail — the
 # contract is designed for minor-version forward/backward compatibility.
-SUPPORTED_CONTRACT_VERSION = "0.6"
+SUPPORTED_CONTRACT_VERSION = "0.7"
 
 # Threshold above which a quality-snapshot's age is reported as a
 # warn-level validate issue.  6× the snapshot writer's 5 s cadence —
@@ -236,4 +236,12 @@ def _instance_from_contract(raw: dict) -> InstanceView:
         # as `radiod-ka9q-python` upstream; here we just preserve what
         # the client reports, including the `kind` and any `details`.
         iv.data_path = dict(dp)
+    # v0.7 §3/§18 — null/missing = §18 RTP-default mode (or host-clock-
+    # default for non-radiod clients); a populated object names the
+    # authority source + tier + σ + age + radiod_id currently in use.
+    # The adapter preserves whatever shape the client reports without
+    # validating field names — that's the consumer's job.
+    ta = raw.get('timing_authority_applied')
+    if isinstance(ta, dict):
+        iv.timing_authority_applied = dict(ta)
     return iv

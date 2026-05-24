@@ -100,6 +100,7 @@ def exec_wizard(
     extra_env: Optional[dict] = None,
     parse: Optional[str] = "kv",
     extra_args: Optional[list] = None,
+    interactive: Optional[bool] = None,
 ) -> WizardResult:
     """Spawn the wizard, forward args, parse stdout per `parse=`.
 
@@ -108,8 +109,38 @@ def exec_wizard(
                    future caller; not used by any existing client today).
     `parse=None`   don't parse; .fields will be None.  Use this when
                    the wizard writes its own side effects (e.g.
-                   psk-recorder's wizard which pipes JSON to
-                   `<client> config apply` itself).
+                   mag-recorder / psk-recorder wizards that pipe JSON
+                   to `<client> config apply` themselves).
+
+    `interactive`  when True, the child INHERITS the parent's stdio so
+                   whiptail can render dialogs to the operator's
+                   terminal -- AND parse is short-circuited (fields
+                   will always be None, stderr will always be empty),
+                   because the operator saw both directly.  When
+                   False, stdout/stderr are captured into pipes so
+                   the caller can parse stdout per `parse=` and read
+                   stderr for logging.
+
+                   Default:
+                     parse=None         -> interactive=True
+                     parse="kv"/"json"  -> interactive=False
+
+                   The default exists because a wizard that doesn't
+                   echo data on stdout (parse=None) is almost
+                   certainly one whose only stdout traffic IS the
+                   whiptail UI -- which has to reach the terminal,
+                   else the operator sees nothing and the wizard
+                   exits silently.
+
+                   For parse="kv"/"json" the wizard's UI rendering
+                   happens via fd-swapping like `3>&1 1>&2 2>&3`
+                   inside the script -- captured stdout is the
+                   structured result, not the UI.
+
+                   Explicit interactive=True with parse="kv"/"json"
+                   is allowed (rare: a wizard that writes its UI
+                   AND its structured result to stdout, no fd swap)
+                   but the parse step is skipped -- fields=None.
 
     Any OSError from `subprocess.run` is caught and surfaced as
     `WizardResult.error`; the caller is then expected to fall back
@@ -131,18 +162,37 @@ def exec_wizard(
     if parse not in (None, "kv", "json"):
         raise ValueError(f"parse must be None, 'kv', or 'json'; got {parse!r}")
 
+    if interactive is None:
+        interactive = (parse is None)
+
     env = {**os.environ, **(extra_env or {})}
     cmd: list = [str(wizard_path)]
     if extra_args:
         cmd.extend(str(a) for a in extra_args)
 
+    # Stdio strategy: interactive -> child inherits parent's stdio so
+    # whiptail can render to the terminal.  Non-interactive -> capture
+    # both so the caller can parse stdout and log stderr.
     try:
-        proc = subprocess.run(
-            cmd, env=env, capture_output=True, text=True, check=False,
-        )
+        if interactive:
+            proc = subprocess.run(cmd, env=env, check=False)
+        else:
+            proc = subprocess.run(
+                cmd, env=env, capture_output=True, text=True, check=False,
+            )
     except OSError as exc:
         return WizardResult(returncode=1, fields=None,
                             stderr="", error=f"exec failed: {exc}")
+
+    # Interactive runs have nothing to parse and no captured stderr to
+    # forward; the operator already saw both directly on the terminal.
+    if interactive:
+        return WizardResult(
+            returncode=proc.returncode,
+            fields=None,
+            stderr="",
+            error=None,
+        )
 
     fields: Optional[dict]
     if parse is None:

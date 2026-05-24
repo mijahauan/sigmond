@@ -77,12 +77,48 @@ class DiskBudget:
 
 
 @dataclass
+class TimingAuthority:
+    """CLIENT-CONTRACT.md §18 — pointer to the timing-authority service
+    a client may subscribe to for authority-corrected UTC labelling.
+
+    The contract publishes two scopes:
+
+    - **station-wide** (`TIMING_AUTHORITY*` env keys, used by non-radiod
+      clients per §18.3 and as a fallback by radiod-substrate clients);
+    - **per-radiod** (`RADIOD_<id>_TIMING_AUTHORITY*`, parallel to §8
+      chain-delay distribution, used by radiod-substrate clients).
+
+    Both are operator-declared in ``coordination.toml``.  A later phase
+    may auto-populate from any client's inventory that reports
+    ``provides_timing_calibration: true``; today's adapter just emits
+    what the operator declared.  Empty fields → no env key emitted.
+
+    The dataclass treats ``source`` and ``endpoint`` as the required
+    pair: a TimingAuthority with one but not the other is incomplete
+    and emits nothing (an operator declared the block but didn't
+    finish filling it in — surfacing that as a validate-time warning
+    is a future enhancement).  ``tier_min`` is optional — its absence
+    means "the client decides" per §18.3.
+    """
+    source:   str = ""    # e.g. "hf-timestd@bee3"
+    endpoint: str = ""    # URI: unix://, tcp://, etc.
+    tier_min: str = ""    # operator's floor: "T4", "T5", "T6", ...
+
+    @property
+    def is_declared(self) -> bool:
+        """True when the pair sigmond needs to emit env keys is present."""
+        return bool(self.source and self.endpoint)
+
+
+@dataclass
 class Coordination:
     host:    Host                  = field(default_factory=Host)
     radiods: dict                  = field(default_factory=dict)   # id -> Radiod
     cpu:     Cpu                   = field(default_factory=Cpu)
     clients: list                  = field(default_factory=list)   # list[ClientInstance]
     disk_budget: DiskBudget        = field(default_factory=DiskBudget)
+    timing_authority: TimingAuthority = field(default_factory=TimingAuthority)
+    per_radiod_timing_authority: dict = field(default_factory=dict)  # radiod_id -> TimingAuthority
     source_path: Optional[Path]    = None
 
     def instances_of(self, client_type: str) -> list:
@@ -168,12 +204,34 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
         warn_percent=int(disk_raw.get('warn_percent', 80) or 80),
     )
 
+    # [timing_authority] — station-wide pointer (CLIENT-CONTRACT §18.3).
+    # [timing_authority.per_radiod.<id>] — per-radiod overrides.  Both
+    # default to empty TimingAuthority instances (is_declared = False),
+    # which render_env treats as "do not emit."
+    ta_raw = raw.get('timing_authority', {}) or {}
+    station_wide = TimingAuthority(
+        source=str(ta_raw.get('source', '') or ''),
+        endpoint=str(ta_raw.get('endpoint', '') or ''),
+        tier_min=str(ta_raw.get('tier_min', '') or ''),
+    )
+    per_radiod_raw = ta_raw.get('per_radiod', {}) or {}
+    per_radiod: dict = {}
+    for rid, entry in per_radiod_raw.items():
+        entry = entry or {}
+        per_radiod[rid] = TimingAuthority(
+            source=str(entry.get('source', '') or ''),
+            endpoint=str(entry.get('endpoint', '') or ''),
+            tier_min=str(entry.get('tier_min', '') or ''),
+        )
+
     return Coordination(
         host=host,
         radiods=radiods,
         cpu=cpu,
         clients=clients,
         disk_budget=disk,
+        timing_authority=station_wide,
+        per_radiod_timing_authority=per_radiod,
         source_path=source_path,
     )
 
@@ -263,6 +321,28 @@ def render_env(coord: Coordination,
             lines.append(f'{prefix}_STATUS={r.status_dns}')
         if r.samprate_hz:
             lines.append(f'{prefix}_SAMPRATE={r.samprate_hz}')
+        # CLIENT-CONTRACT §18.3 per-radiod scope.  Per-radiod overrides
+        # are independent of the station-wide pointer below; if an
+        # operator declares both, a radiod-substrate client takes the
+        # per-radiod variant.  Emitted alongside RADIOD_<id>_STATUS /
+        # RADIOD_<id>_SAMPRATE so all per-radiod facts cluster together
+        # in the rendered env file.
+        ta = coord.per_radiod_timing_authority.get(rid)
+        if ta and ta.is_declared:
+            lines.append(f'{prefix}_TIMING_AUTHORITY={ta.source}')
+            lines.append(f'{prefix}_TIMING_AUTHORITY_ENDPOINT={ta.endpoint}')
+            if ta.tier_min:
+                lines.append(f'{prefix}_TIMING_AUTHORITY_TIER_MIN={ta.tier_min}')
+        lines.append('')
+
+    # CLIENT-CONTRACT §18.3 station-wide scope.  Non-radiod clients
+    # (mag-recorder, KiwiSDR-based recorders) consume these.  Radiod
+    # clients fall back here when no per-radiod entry is declared.
+    if coord.timing_authority.is_declared:
+        lines.append(f'TIMING_AUTHORITY={coord.timing_authority.source}')
+        lines.append(f'TIMING_AUTHORITY_ENDPOINT={coord.timing_authority.endpoint}')
+        if coord.timing_authority.tier_min:
+            lines.append(f'TIMING_AUTHORITY_TIER_MIN={coord.timing_authority.tier_min}')
         lines.append('')
 
     # Cross-radiod summary for clients (CLIENT-CONTRACT v0.5 §14.2):
