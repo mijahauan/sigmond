@@ -1,17 +1,28 @@
-"""Timing screen — live chrony-source comparison with TSL3 as reference.
+"""Timing screen — live chrony-source comparison with HPPS as reference.
 
 The default ``chronyc sources`` view shows every offset relative to the
 *system clock*, which forces mental subtraction to compare two sources.
-On bee1 the natural reference is TSL3 (BPSK PPS, sigma ~55 µs at 96 kHz
-matched-filter), so this screen pivots: TSL3 = 0, every other source
-shows Δ-from-TSL3 with a 60-sample Unicode sparkline so transient
-events (e.g. Costas-loop excursions) are visible at a glance instead of
-having to grep journals.
+On bee1 the natural reference is HPPS (the T6 path: TS-1 HF-injected
+BPSK-PPS via the RX-888 ADC, sample-precise from the IQ stream;
+ns-class once the §8 chain delay is calibrated — historically ±1 ns
+σ=1 ns).  This screen pivots so HPPS = 0 and every other source
+shows Δ-from-HPPS, with a 60-sample Unicode sparkline so transient
+events (e.g. Costas-loop excursions, chrony slews) are visible at a
+glance instead of having to grep journals.
 
 Header shows ``chronyc tracking`` output framed for the question that
 actually matters when reasoning about timestamp confidence: where does
 chrony think the kernel clock currently sits relative to UTC, and what
 is the conservative bound (root dispersion) on that estimate?
+
+NOTE: this screen reflects chrony's *facade* view of timing
+(per ARCHITECTURE-FIRST-PRINCIPLES.md §5: chrony is a downstream
+consumer, not the architectural design center).  An operator who
+needs to gate a hard-deadline capture on §18 authority budget
+should consult the per-client `timing_authority_applied` field on
+the Overview screen — that reads from authority.json directly and
+reports tier + σ + snapshot-age without the chrony-shape
+intermediation.
 
 Refresh: ``set_interval(1.0)`` — light enough that the running cost is
 negligible, fast enough to track the ~13-s Costas excursions visible in
@@ -202,11 +213,11 @@ def sparkline(values: List[float], width: int = HISTORY) -> str:
 
 
 def _row_color(name: str, delta_sec: float) -> str:
-    """Colour-code a row's name by how close it is to TSL3.  TSL3
+    """Colour-code a row's name by how close it is to HPPS.  HPPS
     itself is bold (it's the reference); everything else gets graded
     green/yellow/red against thresholds chosen for stratum-1 NTP
     quality vs. publicly-routed ms-jitter sources."""
-    if name == 'TSL3':
+    if name == 'HPPS':
         return f"[bold]{name}[/]"
     abs_s = abs(delta_sec)
     if abs_s < 10e-6:           # <10 µs — chrony-quality
@@ -217,7 +228,7 @@ def _row_color(name: str, delta_sec: float) -> str:
 
 
 class TimingScreen(Vertical):
-    """Live chrony source comparison with TSL3 as the reference."""
+    """Live chrony source comparison with HPPS as the reference."""
 
     DEFAULT_CSS = """
     TimingScreen { padding: 1; }
@@ -238,18 +249,18 @@ class TimingScreen(Vertical):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # Per-source ring of (Δ-from-TSL3 in seconds) values.
+        # Per-source ring of (Δ-from-HPPS in seconds) values.
         self._history: Dict[str, deque] = {}
 
     def compose(self):
-        yield Static("Timing — chrony sources (TSL3 reference)",
+        yield Static("Timing — chrony sources (HPPS reference)",
                      classes="section-title")
         yield Static("", id="timing-utc")
 
         table = DataTable(id="timing-table", zebra_stripes=True,
                           cursor_type="row")
         table.add_columns(
-            "Source", "Δ from TSL3", "Reach", "Age",
+            "Source", "Δ from HPPS", "Reach", "Age",
             "σ (sample)", f"trace ({HISTORY}s)",
         )
         yield table
@@ -282,17 +293,18 @@ class TimingScreen(Vertical):
         sources = parse_sources(sources_csv)
         tracking = parse_tracking(tracking_csv or "")
 
-        tsl3 = next((s for s in sources if s.name == 'TSL3'), None)
-        if not tsl3:
+        hpps = next((s for s in sources if s.name == 'HPPS'), None)
+        if not hpps:
             status.update(
-                "[yellow]No TSL3 source in chronyc output — "
-                "is the BPSK refclock configured?[/]"
+                "[yellow]No HPPS source in chronyc output — "
+                "is the TS-1 BPSK refclock (T6 path) configured "
+                "and its SHM segment fed to chrony?[/]"
             )
             return
 
         # Update history per source.
         for s in sources:
-            delta = s.last_offset_sec - tsl3.last_offset_sec
+            delta = s.last_offset_sec - hpps.last_offset_sec
             hist = self._history.setdefault(
                 s.name, deque(maxlen=HISTORY)
             )
@@ -314,8 +326,8 @@ class TimingScreen(Vertical):
         # Body table.
         table.clear()
         for s in sources:
-            delta = s.last_offset_sec - tsl3.last_offset_sec
-            delta_str = "[bold]ref[/]" if s.name == 'TSL3' else format_offset(delta)
+            delta = s.last_offset_sec - hpps.last_offset_sec
+            delta_str = "[bold]ref[/]" if s.name == 'HPPS' else format_offset(delta)
             spark = sparkline(list(self._history.get(s.name, [])))
             table.add_row(
                 _row_color(s.name, delta),

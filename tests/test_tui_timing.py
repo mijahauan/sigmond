@@ -26,38 +26,41 @@ except ImportError:
 class ParserTests(unittest.TestCase):
     """Parsers are pure functions — no Textual needed."""
 
-    def test_parse_sources_three_refclocks_two_servers(self):
+    def test_parse_sources_two_refclocks_two_servers(self):
+        """Current bee1 chronyc layout per project_hf_pps_t5_direct_2026-05-23
+        (commit 4c14712): TSL1 dropped entirely, TSL2 renamed FUSE,
+        TSL3 renamed HPPS. SHM unit 0 unused; SHM unit 1 = FUSE;
+        SHM unit 2 = HPPS."""
         from sigmond.tui.screens.timing import parse_sources
         sample = (
-            "#,?,TSL1,0,4,111,23,0.001398117,0.001398117,0.002000000\n"
-            "#,?,TSL2,0,4,111,29,-0.000378765,-0.000378765,0.000600000\n"
-            "#,?,TSL3,0,0,0,20,-0.000001919,-0.000006823,0.000055000\n"
+            "#,?,FUSE,0,4,111,29,-0.000378765,-0.000378765,0.000600000\n"
+            "#,?,HPPS,0,0,0,20,-0.000001919,-0.000006823,0.000055000\n"
             "^,*,192.168.1.80,1,4,377,7,0.000007242,0.000005859,0.000102877\n"
             "^,?,132.163.96.3,1,8,377,84,-0.000826960,-0.000831875,0.013113145\n"
         )
         rows = parse_sources(sample)
-        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(rows), 4)
         names = [r.name for r in rows]
-        self.assertEqual(names, ['TSL1', 'TSL2', 'TSL3', '192.168.1.80',
+        self.assertEqual(names, ['FUSE', 'HPPS', '192.168.1.80',
                                  '132.163.96.3'])
         # Spot-check a few fields.
         self.assertEqual(rows[0].mode, '#')
-        self.assertEqual(rows[2].name, 'TSL3')
-        self.assertAlmostEqual(rows[2].sample_error_sec, 5.5e-5)
-        self.assertEqual(rows[3].state, '*')
-        self.assertEqual(format_round(rows[3].last_offset_sec), '7.242e-06')
+        self.assertEqual(rows[1].name, 'HPPS')
+        self.assertAlmostEqual(rows[1].sample_error_sec, 5.5e-5)
+        self.assertEqual(rows[2].state, '*')
+        self.assertEqual(format_round(rows[2].last_offset_sec), '7.242e-06')
 
     def test_parse_sources_skips_malformed_rows(self):
         from sigmond.tui.screens.timing import parse_sources
         sample = (
-            "#,?,TSL1,0,4,111,23,0.001,0.001,0.002\n"
+            "#,?,FUSE,0,4,111,23,0.001,0.001,0.002\n"
             "trash row\n"
-            "#,?,TSL2,not_a_number,4,111,29,-0.0003,-0.0003,0.0006\n"
+            "#,?,HPPS,not_a_number,4,111,29,-0.0003,-0.0003,0.0006\n"
             "^,*,server,1,4,377,7,0.000007,0.000005,0.000102\n"
         )
         rows = parse_sources(sample)
         # Only the well-formed rows survive.
-        self.assertEqual([r.name for r in rows], ['TSL1', 'server'])
+        self.assertEqual([r.name for r in rows], ['FUSE', 'server'])
 
     def test_parse_sources_empty_input(self):
         from sigmond.tui.screens.timing import parse_sources
@@ -164,8 +167,8 @@ class ScreenMountTests(unittest.IsolatedAsyncioTestCase):
         from textual.widgets import DataTable
 
         sources_csv = (
-            "#,?,TSL1,0,4,111,5,0.001,0.001,0.002\n"
-            "#,?,TSL3,0,0,0,1,-0.000002,-0.000002,0.000055\n"
+            "#,?,FUSE,0,4,111,5,0.001,0.001,0.002\n"
+            "#,?,HPPS,0,0,0,1,-0.000002,-0.000002,0.000055\n"
             "^,*,192.168.1.80,1,4,377,3,0.000005,0.000005,0.000100\n"
         )
         tracking_csv = (

@@ -18,6 +18,8 @@ from textual.containers import Vertical
 from textual.widgets import Button, DataTable, Static
 from textual.worker import Worker, WorkerState
 
+from ..format import format_timing_line
+
 
 @dataclass
 class _OverviewData:
@@ -371,6 +373,9 @@ class OverviewScreen(Vertical):
                     parts.append(f"{len(inst.frequencies_hz)} freqs")
                 meta = f'  ({", ".join(parts)})' if parts else ""
                 lines.append(f"    • {inst.instance}{meta}")
+                timing = format_timing_line(inst)
+                if timing is not None:
+                    lines.append(f"        timing: {timing}")
             for issue in cv.issues:
                 lines.append(f"    [yellow]⚠ {issue}[/]")
             lines.append("")
