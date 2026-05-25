@@ -152,6 +152,34 @@ class TestSparseOverlay:
         assert entries['new-dep'].repo == 'https://github.com/example/new-dep'
         assert 'unrelated' in entries     # operator entry still present
 
+    def test_deprecated_excludes_entry_from_catalog(
+            self, monkeypatch, tmp_path):
+        """An entry listed under ``[deprecated.<name>]`` must not show
+        up in the live catalog even if discovery or a higher layer
+        defines it.  Otherwise a stale ``deploy.toml`` on disk would
+        silently revive a removed client."""
+        # Discovery synthesizes an entry — simulating a leftover
+        # /opt/git/sigmond/wsprdaemon-client/deploy.toml.
+        ghost = CatalogEntry(
+            name='wsprdaemon-client', kind='client',
+            description='legacy', repo='https://example/wd',
+        )
+        repo = (
+            '[client.wsprdaemon-client]\n'
+            'kind = "client"\n'
+            'description = "still listed somehow"\n'
+            'repo = ""\n'
+            '\n'
+            '[deprecated.wsprdaemon-client]\n'
+            'removed_in = "0eb8914"\n'
+            'reason = "Superseded by the ka9q-python decoders."\n'
+            'replaced_by = ["wspr-recorder"]\n'
+        )
+        entries = self._install_layers(monkeypatch, tmp_path,
+                                       repo_toml=repo,
+                                       discovery={'wsprdaemon-client': ghost})
+        assert 'wsprdaemon-client' not in entries
+
     def test_discovery_field_overridden_by_repo(
             self, monkeypatch, tmp_path):
         """A field set by discovery (from deploy.toml) is overridden

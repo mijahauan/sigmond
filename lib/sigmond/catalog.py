@@ -48,6 +48,29 @@ DEFAULT_CATALOG_PATHS: tuple[Path, ...] = (
 
 
 @dataclass(frozen=True)
+class DeprecatedEntry:
+    """A client that used to ship with sigmond but no longer does.
+
+    Listed via ``[deprecated.<name>]`` blocks in catalog files.  Names
+    that appear here are *excluded* from the live catalog returned by
+    ``load_catalog()`` so a stale ``/opt/git/sigmond/<name>/deploy.toml``
+    cannot revive a removed client by discovery.  ``smd list`` reports
+    deprecated entries separately when their repo dir still exists on
+    disk so the operator can run ``smd remove <name> --purge``.
+    """
+    name: str
+    removed_in: str = ''            # commit ref / version
+    reason: str = ''
+    replaced_by: tuple[str, ...] = ()
+    # Absolute paths to also rm -rf during ``smd remove``.  The default
+    # plan removes /opt/git/sigmond/<name>, /opt/<name>, and /etc/<name>;
+    # use this when the legacy install used differently-named dirs
+    # (e.g. wsprdaemon-client laid its config at /etc/wsprdaemon, not
+    # /etc/wsprdaemon-client).
+    extra_paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class CatalogEntry:
     """A known client or server in the HamSCI suite."""
     name: str                                 # "psk-recorder"
@@ -196,6 +219,37 @@ def _load_raw_blocks(path: Path) -> dict[str, dict]:
     return dict((data.get('client') or {}).items())
 
 
+def _load_deprecated_blocks(path: Path) -> dict[str, dict]:
+    """Read a catalog file and return its ``[deprecated.<name>]`` blocks
+    as raw dicts.  Same sparse-overlay shape as ``_load_raw_blocks``."""
+    with open(path, 'rb') as f:
+        data = tomllib.load(f)
+    return dict((data.get('deprecated') or {}).items())
+
+
+def load_deprecated() -> dict[str, DeprecatedEntry]:
+    """Sparse-overlay every layer's ``[deprecated.*]`` blocks and return
+    the result.  Operators can add host-specific deprecations in
+    ``/etc/sigmond/catalog.toml`` the same way they can override client
+    fields — partial blocks add to the repo-default list rather than
+    replacing it."""
+    merged: dict[str, dict] = {}
+    for layer_path in _layer_paths_in_application_order():
+        for name, block in _load_deprecated_blocks(layer_path).items():
+            existing = merged.get(name) or {}
+            merged[name] = {**existing, **block}
+    return {
+        name: DeprecatedEntry(
+            name=name,
+            removed_in=block.get('removed_in', ''),
+            reason=block.get('reason', ''),
+            replaced_by=tuple(block.get('replaced_by', ())),
+            extra_paths=tuple(block.get('extra_paths', ())),
+        )
+        for name, block in merged.items()
+    }
+
+
 def _load_catalog_file(path: Path) -> dict[str, CatalogEntry]:
     """Single-file load (used by the explicit-path branch of
     ``load_catalog`` and by tests).  No layering."""
@@ -280,14 +334,22 @@ def load_catalog(path: Optional[Path] = None) -> dict[str, CatalogEntry]:
             existing = merged.get(name) or {}
             merged[name] = {**existing, **block}
 
+    # Drop anything the deprecation list declares.  A stale deploy.toml
+    # on disk (e.g. /opt/git/sigmond/wsprdaemon-client) is no longer
+    # silently revived through discovery — ``smd remove --purge`` is
+    # the operator-facing escape hatch instead.
+    deprecated_names = set(load_deprecated().keys())
     entries: dict[str, CatalogEntry] = {
         name: _entry_from_toml_block(name, block)
         for name, block in merged.items()
+        if name not in deprecated_names
     }
 
     # Synthesized library entries — only added if not already declared
-    # by discovery or any layer.
+    # by discovery or any layer, and not deprecated.
     for name, entry in _synthesized_library_entries().items():
+        if name in deprecated_names:
+            continue
         entries.setdefault(name, entry)
 
     return entries

@@ -1661,32 +1661,98 @@ def cmd_disable(args) -> int:
 
 
 def cmd_remove(args) -> int:
-    """Delete the [component.<name>] section from topology AND stop units.
+    """Remove a component.
 
-    Does NOT delete the cloned source — that stays under /opt/git/sigmond/
-    so the operator can `smd enable <name>` again later without re-cloning.
+    Default behaviour: delete the [component.<name>] section from
+    topology.toml and stop the component's units.  Source under
+    /opt/git/sigmond/ is preserved so the operator can re-enable later
+    without re-cloning.
+
+    Full purge (``--purge``, or implied for names in the deprecation
+    list): stop+disable units, remove the deploy.toml ``link`` symlinks,
+    rm the source dir, the /opt/<name>/ venv, and /etc/<name>/ config.
+    For a non-deprecated name, ``--purge`` requires ``--force`` to guard
+    against accidental nuking of a still-supported client.
     """
+    names = getattr(args, 'names', []) or []
+    if not names:
+        _err('smd remove: name required')
+        return 1
     if _need_root('remove'):
         return 1
     if not _HAS_SIGMOND_LIB:
         _err('remove: sigmond library not importable')
         return 1
 
+    from sigmond.catalog import load_deprecated
+    from sigmond.purge import plan_purge, execute_purge, render_plan
     from sigmond.topology import remove_component
 
-    names = getattr(args, 'names', []) or []
-    if not names:
-        _err('smd remove: name required')
-        return 1
+    deprecated = load_deprecated()
+    purge_flag = getattr(args, 'purge', False)
+    force = getattr(args, 'force', False)
+    yes = getattr(args, 'yes', False)
+    dry_run = getattr(args, 'dry_run', False)
 
+    exit_code = 0
     for name in names:
+        is_deprecated = name in deprecated
+        do_purge = purge_flag or is_deprecated
+
+        if do_purge and not is_deprecated and not force:
+            _err(f"{name}: --purge against a non-deprecated client requires --force")
+            exit_code = 1
+            continue
+
+        if do_purge:
+            extras = (deprecated[name].extra_paths
+                      if is_deprecated else ())
+            plan = plan_purge(name, extra_paths=extras)
+            _heading(f'purge {name}')
+            if is_deprecated:
+                dep = deprecated[name]
+                if dep.removed_in:
+                    _info(f'deprecated: removed in {dep.removed_in}')
+                if dep.reason:
+                    _info(f'reason:     {dep.reason}')
+                if dep.replaced_by:
+                    _info(f'replaced by: {", ".join(dep.replaced_by)}')
+            for line in render_plan(plan):
+                print(line)
+            if dry_run:
+                _info('(dry-run — no changes made)')
+                continue
+            if (plan['repo_dir'] is None and plan['venv_dir'] is None
+                    and plan['config_dir'] is None
+                    and not plan['expanded_units']
+                    and not plan['extra_dirs']):
+                _info(f'{name}: nothing on disk to purge')
+                continue
+            if not yes:
+                try:
+                    resp = input('\nProceed? [y/N]: ').strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    resp = ''
+                if not resp.startswith('y'):
+                    _info(f'{name}: skipped')
+                    continue
+            rc = execute_purge(plan)
+            if rc == 0:
+                _ok(f'{name}: purged')
+            else:
+                _err(f'{name}: purge encountered errors')
+                exit_code = rc
+            continue
+
+        # Default (non-purge) path: original topology+stop behaviour.
         _stop_component_units(name)
         removed = remove_component(name, TOPOLOGY_PATH)
         if removed:
             _ok(f'{name}: removed from topology + units stopped')
         else:
             _info(f'{name}: not in topology (units stopped if any were running)')
-    return 0
+    return exit_code
 
 
 # ---------------------------------------------------------------------------
@@ -4100,6 +4166,37 @@ def _print_action_hint(rows: list[dict]) -> None:
         _info('run: sudo smd list --update  (preview: sudo smd list --update --dry-run)')
 
 
+def _print_deprecated_hint() -> None:
+    """Surface any deprecated clients whose checkout still lives under
+    /opt/git/sigmond/.  Loud enough that the operator can't miss it,
+    quiet when there's nothing to report."""
+    if not _HAS_SIGMOND_LIB:
+        return
+    try:
+        from sigmond.catalog import load_deprecated
+        from sigmond.purge import deprecated_on_disk
+    except Exception:
+        return
+    deprecated = load_deprecated()
+    stale = deprecated_on_disk(deprecated)
+    if not stale:
+        return
+    print()
+    _warn(f'Deprecated client(s) still present on disk: {", ".join(stale)}')
+    for name in stale:
+        dep = deprecated[name]
+        bits = []
+        if dep.removed_in:
+            bits.append(f'removed in {dep.removed_in}')
+        if dep.replaced_by:
+            bits.append(f'replaced by {", ".join(dep.replaced_by)}')
+        suffix = f' ({"; ".join(bits)})' if bits else ''
+        _info(f'  {name}{suffix}')
+        if dep.reason:
+            _info(f'    {dep.reason}')
+        _info(f'    purge: sudo smd remove {name}')
+
+
 def _emit_status_json(rows: list[dict]) -> int:
     import json as _json
     print(_json.dumps(rows, indent=2))
@@ -4327,10 +4424,13 @@ def cmd_list(args) -> int:
 
     if not getattr(args, 'update', False):
         _print_action_hint(rows)
+        _print_deprecated_hint()
         return 0
 
     print()
-    return _apply_updates(args, rows)
+    rc = _apply_updates(args, rows)
+    _print_deprecated_hint()
+    return rc
 
 
 # ---------------------------------------------------------------------------
@@ -9185,9 +9285,23 @@ def main() -> int:
     p = sub.add_parser('disable', help='disable component(s) and stop their units')
     p.add_argument('names', nargs='+', help='one or more component names')
 
-    # remove — delete the [component.<name>] section AND stop units
-    p = sub.add_parser('remove', help='remove component section from topology and stop its units')
+    # remove — delete the [component.<name>] section AND stop units;
+    # `--purge` (or any deprecated name) escalates to a full clean
+    p = sub.add_parser(
+        'remove',
+        help='remove component (default: topology section + stop units; '
+             '--purge or deprecated names: full clean)',
+    )
     p.add_argument('names', nargs='+', help='one or more component names')
+    p.add_argument('--purge', action='store_true',
+                   help='full clean: stop+disable units, rm source / venv / '
+                        '/etc/<name>/.  Implied for names in the deprecation list.')
+    p.add_argument('--force', '-f', action='store_true',
+                   help='allow --purge against a name not in the deprecation list')
+    p.add_argument('--yes', '-y', action='store_true',
+                   help='skip the interactive confirmation prompt')
+    p.add_argument('--dry-run', action='store_true',
+                   help='with --purge: show the plan without making changes')
 
     # install + apply share their option set between the top-level form
     # (`smd install`, `smd apply` — kept for muscle memory) and the

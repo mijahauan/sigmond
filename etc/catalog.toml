@@ -85,3 +85,21 @@ repo            = "https://github.com/mijahauan/hs-uploader"
 # ../hs-uploader as an editable install — only the source tree needs to exist.
 # `smd install hs-uploader` still works thanks to find_install_script's post-clone
 # discovery (the cloned repo carries its own install.sh).
+
+# ---------------------------------------------------------------------------
+# Deprecations
+#
+# Names listed here are excluded from discovery so a stale checkout cannot
+# silently re-appear as a normal client.  `smd list` surfaces them in a
+# separate "Deprecated (on disk)" section when /opt/git/sigmond/<name>/
+# still exists, and `smd remove <name>` becomes a full purge for these
+# names (stop+disable units, rm repo, venv, /etc/<name>/).
+# ---------------------------------------------------------------------------
+
+[deprecated.wsprdaemon-client]
+removed_in  = "0eb8914"
+reason      = "Superseded by the ka9q-python-based decoders (wspr-recorder, hf-timestd, psk-recorder)."
+replaced_by = ["wspr-recorder"]
+# Legacy config lived at /etc/wsprdaemon/ (not /etc/wsprdaemon-client/);
+# add it explicitly so the purge gets everything.
+extra_paths = ["/etc/wsprdaemon"]
