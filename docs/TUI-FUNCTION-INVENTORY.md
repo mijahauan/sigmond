@@ -65,13 +65,14 @@ Notes / leftovers:
 
 ## 2. TUI screen surface (`lib/sigmond/tui/screens/`)
 
-27 screen modules. Each maps to exactly one `action_show_*` in
+28 screen modules. Each maps to exactly one `action_show_*` in
 `lib/sigmond/tui/app.py`. `action_show_update` is a kept-for-back-compat
 alias that re-dispatches to `action_show_components`, so it doesn't
 warrant a separate row.
 
 | Screen module | Action | One-line role |
 |---|---|---|
+| `activity` | `action_show_activity` | Live tail of `smd watch <target>` for wspr / psk / hfdl / codar / ka9q / uploads / verifier; one subprocess per screen, Stop/Clear, Start re-targets |
 | `annotation_quality` | `action_show_annotation_quality` | Per-consumer science verdict: each running recorder + the global σ/tier attached + green/yellow/red threshold + substrate explanation |
 | `apply` | `action_show_apply` | Reconcile services with topology/coordination (`sudo smd apply`) |
 | `authority` | `action_show_authority` | Substrate view: live `authority.json` (active tier, σ, witnesses) |
@@ -126,9 +127,9 @@ warrant a separate row.
 | FFTW wisdom (plan / status) | `wisdom plan / status` | `fft_wisdom` | one screen serves both verbs |
 | Per-client SDR source selection (radiod / KiwiSDR feeds) | `sources list/add/remove/apply` | `sources` | list + apply paths surfaced; add/remove still CLI-only |
 | ka9q-radio pin / compat watch | `ka9q-watch`, `watch ka9q` | `ka9q_watch` | — |
-| Activity watch (wspr/psk/hfdl/codar) | `wspr-watch`, `psk-watch`, `hfdl-watch`, `codar-watch`, `watch <t>` | — | **Gap** — no TUI surface; CLI-only despite five verbs |
-| Uploads activity watch | `watch uploads` | — | **Gap** — CLI-only |
-| Verifier watch | `watch verifier` | — | **Gap** — CLI-only |
+| Activity watch (wspr/psk/hfdl/codar) | `wspr-watch`, `psk-watch`, `hfdl-watch`, `codar-watch`, `watch <t>` | `activity` | live-tail screen with target selector covers all four |
+| Uploads activity watch | `watch uploads` | `activity` | reachable via the same screen's target selector |
+| Verifier watch | `watch verifier` | `activity` | reachable via the same screen's target selector |
 | Verifier report / rehabilitate | `verifier report / rehabilitate` | — | **Gap** — CLI-only |
 | Storage migration (CH → SQLite) | `storage migrate-to-sqlite` | — | one-shot; CLI-fine |
 | Storage trim (daily janitor) | `storage trim`, `timestd-tune-storage` | — | runs via systemd timers per `project_ch_to_sqlite_migration`; CLI-fine |
@@ -148,29 +149,25 @@ warrant a separate row.
 
 ### Gap summary
 
-Four real surface gaps where CLI exposes a routine-monitoring or
+Three real surface gaps where CLI exposes a routine-monitoring or
 maintenance capability with no TUI representation (originally five;
-the **sources** gap closed in the `sources` screen — list + apply
-buttons are wired, though per-selection add/remove still routes to
-the CLI):
+the **sources** gap closed in the `sources` screen, and the
+**activity watches** gap closed in the `activity` screen — one
+screen with a target selector covers all seven `smd watch` targets):
 
-1. **Activity watches** — `wspr-watch / psk-watch / hfdl-watch /
-   codar-watch / watch uploads / watch verifier`. The richest gap;
-   five+ verbs and no live surface in the TUI.
-2. **Verifier report / rehabilitate** — `verifier report / rehabilitate`.
+1. **Verifier report / rehabilitate** — `verifier report / rehabilitate`.
    Reporting is monitoring; rehabilitation is maintenance.
-3. **Coordination identity / refresh** — `config identity`,
+2. **Coordination identity / refresh** — `config identity`,
    `config refresh`. Installation-adjacent (identity is first-run)
    and maintenance-adjacent (refresh after coordination changes).
-4. **CPU affinity / cpu-freq apply** — read views exist, but the
+3. **CPU affinity / cpu-freq apply** — read views exist, but the
    `--apply` mutation still requires dropping to the CLI.
 
 These map cleanly to the four-category proposal:
 
-- Gap 1 → **Debugging** (live activity surfaces)
-- Gap 2 → **Debugging** (report) + **Maintenance** (rehabilitate)
-- Gap 3 → **Installation** (identity) + **Maintenance** (refresh)
-- Gap 4 → **Maintenance** (mutation buttons on existing screens)
+- Gap 1 → **Debugging** (report) + **Maintenance** (rehabilitate)
+- Gap 2 → **Installation** (identity) + **Maintenance** (refresh)
+- Gap 3 → **Maintenance** (mutation buttons on existing screens)
 
 Closing the gaps is *not* in scope for the reorganization commit
 itself — the reorganization places empty slots where they belong, and
@@ -209,12 +206,15 @@ Maintenance / Updating         [routine operator actions]
 
 Debugging                      [diagnose + watch when something looks wrong]
     Logs                       (journal / log_paths follow)
+    Activity                   (live tail of `smd watch <target>` —
+                                wspr / psk / hfdl / codar / ka9q /
+                                uploads / verifier; one screen, target
+                                selector)
     Validate                   (cross-client harmonization rules)
     Environment                (declared vs observed peers)
     Diag: net                  (IGMP + multicast)
     ka9q-watch                 (pin vs upstream compat)
     RAC tunnel                 (remote-access for vendor debug)
-    Activity watches           [planned — wspr / psk / hfdl / codar / uploads / verifier]
 
 Routine monitoring             [day-to-day "is it working" surfaces]
     Overview                   (landing)

@@ -692,6 +692,26 @@ class SigmondApp(App):
             "Then return here and press Apply.",
         )
 
+    def action_show_activity(self) -> None:
+        from .screens.activity import ActivityScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(ActivityScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Activity",
+            "Live tail of per-target recorder, uploader, and verifier "
+            "activity — equivalent to `smd watch <target>` in a terminal.\n\n"
+            "Pick a target (wspr, psk, hfdl, codar, ka9q, uploads, "
+            "verifier), press Start to stream the watcher's stdout into "
+            "the output pane.  Switching targets while one is running "
+            "implicitly replaces it.\n\n"
+            "Stop terminates the subprocess (SIGTERM, then SIGKILL after "
+            "2 s).  Clear empties the output without stopping the stream. "
+            "Leaving the screen also stops the stream — no orphaned "
+            "subprocesses.",
+        )
+
     def action_show_fft_wisdom(self) -> None:
         from .screens.fft_wisdom import FFTWisdomScreen
         center = self.query_one("#center")

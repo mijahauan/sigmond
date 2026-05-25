@@ -62,6 +62,7 @@ class ComponentTree(Tree):
 
         debugging = self.root.add("Debugging", expand=True)
         debugging.add_leaf("\u2261 Logs",               data={"screen": "logs"})
+        debugging.add_leaf("\u26a1 Activity",          data={"screen": "activity"})
         debugging.add_leaf("\u2714 Validate",           data={"screen": "validate"})
         debugging.add_leaf("\u2316 Environment",        data={"screen": "environment"})
         debugging.add_leaf("\u2726 Diag: net",          data={"screen": "diag_net"})
@@ -122,6 +123,8 @@ class ComponentTree(Tree):
             self.app.action_show_apply()
         elif screen == "sources":
             self.app.action_show_sources()
+        elif screen == "activity":
+            self.app.action_show_activity()
         elif screen == "fft_wisdom":
             self.app.action_show_fft_wisdom()
         elif screen == "config_show":
