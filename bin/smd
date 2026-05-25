@@ -263,6 +263,18 @@ def _err(msg):  print(f'  \033[31m✗\033[0m  {msg}', file=sys.stderr)
 def _info(msg): print(f'     {msg}')
 
 
+def _deprecated(verb: str, replacement: str) -> None:
+    """Emit a one-line CLI-v2 deprecation warning to stderr.
+
+    Used at the entry of each verb scheduled for removal in the next
+    release (see CLI-V2-SPEC.md §5).  The handler still runs; this
+    just teaches the operator the new spelling.
+    """
+    print(f'smd: `{verb}` is deprecated; use `{replacement}` instead '
+          f'(CLI-V2-SPEC.md §5)',
+          file=sys.stderr)
+
+
 def _heading(title: str):
     print(f'\n\033[1m━━━ {title} ━━━\033[0m')
 
@@ -4767,7 +4779,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage sources public-ip completion"
+    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage sources public-ip completion component"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -4813,7 +4825,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "--update --apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
                     ;;
                 log)
-                    COMPREPLY=($(compgen -W "$log_clients --files --level --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "$log_clients set-level --files --level --topology" -- "$cur"))
                     ;;
                 diag)
                     COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
@@ -4828,7 +4840,10 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "show migrate backup restore init edit" -- "$cur"))
                     ;;
                 storage)
-                    COMPREPLY=($(compgen -W "migrate-to-sqlite trim" -- "$cur"))
+                    COMPREPLY=($(compgen -W "migrate-to-sqlite trim tune-timestd" -- "$cur"))
+                    ;;
+                component)
+                    COMPREPLY=($(compgen -W "list install update add remove enable disable" -- "$cur"))
                     ;;
                 software)
                     COMPREPLY=($(compgen -W "install apply" -- "$cur"))
@@ -4913,7 +4928,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "--update --apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
                     ;;
                 log)
-                    COMPREPLY=($(compgen -W "$log_clients --files --level --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "$log_clients set-level --files --level --topology" -- "$cur"))
                     ;;
                 diag)
                     case "${words[2]}" in
@@ -4976,6 +4991,40 @@ _smd_complete() {
                             ;;
                         *)
                             COMPREPLY=($(compgen -W "report rehabilitate" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
+                component)
+                    case "${words[2]}" in
+                        list)
+                            COMPREPLY=($(compgen -W "--components --catalog --fetch --json --topology" -- "$cur"))
+                            ;;
+                        install)
+                            COMPREPLY=($(compgen -W "$components --components --client-dir --dry-run --yes --force --topology" -- "$cur"))
+                            ;;
+                        update)
+                            COMPREPLY=($(compgen -W "$components --components --fetch --ref --dry-run --json --topology" -- "$cur"))
+                            ;;
+                        remove)
+                            COMPREPLY=($(compgen -W "$components --purge --force --yes --dry-run" -- "$cur"))
+                            ;;
+                        enable|disable)
+                            COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "list install update add remove enable disable" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
+                log)
+                    case "${words[2]}" in
+                        set-level)
+                            # Position 3 = client; position 4 = level.
+                            if [[ $cword -eq 3 ]]; then
+                                COMPREPLY=($(compgen -W "$log_clients" -- "$cur"))
+                            elif [[ $cword -eq 4 ]]; then
+                                COMPREPLY=($(compgen -W "DEBUG INFO WARNING ERROR CRITICAL" -- "$cur"))
+                            fi
                             ;;
                     esac
                     ;;
@@ -9256,6 +9305,28 @@ def _add_ka9q_watch_args(p) -> None:
 
 
 def main() -> int:
+    # v2 canonical `smd log set-level <client> <level>` — pre-argparse
+    # intercept because argparse can't cleanly mix a sub-verb with the
+    # legacy positional-client shape (`smd log [<client>]`), which must
+    # keep working.  Routes the same write semantics as the legacy
+    # `smd log <client> --level <level>` path.
+    # Narrow intercept: only matches when `log` is the FIRST positional
+    # (no `--topology` etc. before it).  Operators needing a topology
+    # override should use the legacy `log <client> --level X` shape
+    # during the deprecation window.
+    if len(sys.argv) >= 3 and sys.argv[1] == 'log' and sys.argv[2] == 'set-level':
+        if len(sys.argv) < 5:
+            print('smd log set-level: requires <client> <level>',
+                  file=sys.stderr)
+            return 2
+        return cmd_log(argparse.Namespace(
+            command='log',
+            client=sys.argv[3],
+            level=sys.argv[4],
+            files=False,
+            topology=None,
+        ))
+
     # Hide argparse's auto-generated subparser listing — the grouped
     # epilog covers the same verbs categorised by intent (Configure /
     # Observe / Operate, mirroring the TUI tree), and the alphabetical
@@ -9272,37 +9343,40 @@ def main() -> int:
         description='Sigmond — HamSCI suite installer and lifecycle manager',
         formatter_class=_GroupedHelpFormatter,
         epilog=textwrap.dedent('''\
-            verbs (grouped by intent — same as the TUI tree):
+            verbs (grouped by who uses them — see docs/CLI-V2-SPEC.md):
 
-              Configure (what should exist):
-                add        clone a component repo
-                install    install + configure components (--force to rebuild)
-                enable     enable in topology.toml
-                disable    disable + stop its units
-                remove     remove from topology
-                config     show / migrate / init / edit per-client config
-                validate   cross-client harmonization checks
-
-              Observe (what is — read-only):
-                list       per-component status table  (also: --apply to pull)
-                status     service health
+              Operator (daily, read-mostly):
+                status     service health snapshot
+                watch      live tail (wspr | psk | hfdl | codar | ka9q | uploads | verifier)
                 log        tail journal or file logs
-                diag       diagnostics  (net | cpu-affinity | cpu-freq)
-                environment   discover network peers
-                watch      unified live-tail interface
-                           (wspr | psk | ka9q)
-
-              Operate (run things now — may need sudo):
-                start / stop / restart / reload    systemd verbs
-                apply      reconcile running services with current config
-                storage    manage local sink backend (SQLite default;
-                           migrate-to-sqlite removes leftover ClickHouse)
+                           (`log set-level <client> <lvl>` to mutate)
+                validate   cross-client harmonization checks
+                public-ip  external IP probe
                 tui        launch interactive TUI
 
-              Other:
+              Operator (mutating — needs sudo):
+                start / stop / restart / reload   systemd-aligned lifecycle
+                apply      reconcile running services with current config
+                enable / disable                  toggle component in topology
+
+              Installer / maintenance:
+                component  catalog (list | install | update | add | remove | enable | disable)
+                config     show / migrate / init / edit per-client config
+                sources    per-client sensor feed selection (radiod / KiwiSDR / mag / vlf)
+                environment    declared vs observed network peers (list | probe | describe)
+                wisdom     FFTW3 wisdom planner (plan | status)
+                storage    sink backend (migrate-to-sqlite | trim | tune-timestd)
+
+              Diagnostics / debug:
+                diag       cpu-affinity | cpu-freq | net
+                verifier   wsprnet upload audit (report | rehabilitate)
+
+              Meta:
                 completion bash    emit bash tab-completion script
 
             Run  smd <verb> --help  for verb-specific options.
+            Verbs deprecated in v2 still work but emit a warning naming
+            their replacement; see CLI-V2-SPEC.md §5 for the full list.
         '''),
     )
     parser.add_argument('--topology', metavar='FILE',
@@ -9379,6 +9453,78 @@ def main() -> int:
         'install', help='install and configure components'))
     _add_apply_args(software_sub.add_parser(
         'apply', help='reconcile services with current config'))
+
+    # component — v2 canonical namespace for catalog operations.
+    # Bare list/install/enable/disable kept as aliases (CLI-V2-SPEC.md §4).
+    # Bare add/remove are REMOVED in v2 — the namespaced forms are the
+    # only canonical reach.
+    p_component = sub.add_parser(
+        'component',
+        help='catalog operations (v2 canonical namespace; '
+             'list / install / update / add / remove / enable / disable)')
+    component_sub = p_component.add_subparsers(dest='component_command')
+
+    p_c_list = component_sub.add_parser(
+        'list',
+        help='show component status (canonical form of bare `list`; '
+             'use `component update` for the mutating path)')
+    p_c_list.add_argument('--components', metavar='C1,C2',
+                          help='comma-separated subset of components')
+    p_c_list.add_argument('--catalog', action='store_true',
+                          help='show catalog of known clients')
+    p_c_list.add_argument('--fetch', action='store_true',
+                          help='run `git fetch` per repo before computing divergence')
+    p_c_list.add_argument('--json', action='store_true',
+                          help='emit machine-readable JSON')
+
+    _add_install_args(component_sub.add_parser(
+        'install',
+        help='install and configure components (canonical form of bare `install`)'))
+
+    p_c_update = component_sub.add_parser(
+        'update',
+        help='pull latest code per topology version policy and reapply '
+             '(replaces `list --update` / `list --apply`; requires root)')
+    p_c_update.add_argument('name', nargs='?', default=None,
+                            help='single component to update (default: all enabled)')
+    p_c_update.add_argument('--components', metavar='C1,C2',
+                            help='comma-separated subset (alternative to positional name)')
+    p_c_update.add_argument('--fetch', action='store_true',
+                            help='run `git fetch` per repo before computing divergence')
+    p_c_update.add_argument('--ref', metavar='COMMIT_OR_BRANCH',
+                            help='force a specific git ref instead of topology policy')
+    p_c_update.add_argument('--dry-run', action='store_true',
+                            help='preview what would be pulled without making changes')
+    p_c_update.add_argument('--json', action='store_true',
+                            help='emit machine-readable JSON')
+
+    p_c_add = component_sub.add_parser(
+        'add',
+        help='clone a component repo (canonical; bare `add` removed in v2)')
+    p_c_add.add_argument('url', help='git URL of the component repo')
+
+    p_c_remove = component_sub.add_parser(
+        'remove',
+        help='remove component (canonical; bare `remove` removed in v2)')
+    p_c_remove.add_argument('names', nargs='+', help='one or more component names')
+    p_c_remove.add_argument('--purge', action='store_true',
+                            help='full clean: stop+disable units, rm source / venv / /etc/<name>/')
+    p_c_remove.add_argument('--force', '-f', action='store_true',
+                            help='allow --purge against a name not in the deprecation list')
+    p_c_remove.add_argument('--yes', '-y', action='store_true',
+                            help='skip the interactive confirmation prompt')
+    p_c_remove.add_argument('--dry-run', action='store_true',
+                            help='with --purge: show the plan without making changes')
+
+    p_c_enable = component_sub.add_parser(
+        'enable',
+        help='enable component(s) in /etc/sigmond/topology.toml')
+    p_c_enable.add_argument('names', nargs='+', help='one or more component names')
+
+    p_c_disable = component_sub.add_parser(
+        'disable',
+        help='disable component(s) and stop their units')
+    p_c_disable.add_argument('names', nargs='+', help='one or more component names')
 
     # start
     # All four lifecycle verbs accept positional component names (systemctl
@@ -9821,6 +9967,15 @@ def main() -> int:
              'when set. Min 30 min floor enforced.',
     )
 
+    # storage tune-timestd — v2 canonical for the old top-level
+    # `timestd-tune-storage` (CLI-V2-SPEC.md §3 Installation-time tuning).
+    p_storage_tune = storage_sub.add_parser(
+        'tune-timestd',
+        help='size hf-timestd retention policy to local disk '
+             '(canonical; replaces top-level `timestd-tune-storage`)')
+    p_storage_tune.add_argument('--apply', action='store_true',
+                                help='write the drop-ins (default: print recommendation only)')
+
     p_psk = sub.add_parser('psk-watch',
                            help='live tail of PSK Reporter upload events '
                                 '(alias: smd watch psk)')
@@ -10070,6 +10225,7 @@ def main() -> int:
     if args.command == 'cpu':
         # Shortcut: `smd cpu` → cmd_diag_cpu_freq with the same topology
         # override pipeline as `smd diag cpu-freq`.
+        _deprecated('cpu', 'diag cpu-freq')
         topo = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
         if getattr(args, 'radiod_max_mhz', None):
             topo['cpu_freq']['radiod_max_mhz'] = args.radiod_max_mhz
@@ -10095,15 +10251,19 @@ def main() -> int:
         return cmd_diag(args)
 
     if args.command == 'psk-watch':
+        _deprecated('psk-watch', 'watch psk')
         return cmd_psk_watch(args)
 
     if args.command == 'wspr-watch':
+        _deprecated('wspr-watch', 'watch wspr')
         return cmd_wspr_watch(args)
 
     if args.command == 'hfdl-watch':
+        _deprecated('hfdl-watch', 'watch hfdl')
         return cmd_hfdl_watch(args)
 
     if args.command == 'codar-watch':
+        _deprecated('codar-watch', 'watch codar')
         return cmd_codar_watch(args)
 
     if args.command == 'watch':
@@ -10135,6 +10295,8 @@ def main() -> int:
             return cmd_storage_migrate_to_sqlite(args)
         if storage_cmd == 'trim':
             return cmd_storage_trim(args)
+        if storage_cmd == 'tune-timestd':
+            return cmd_timestd_tune_storage(args)
         p_storage.print_help()
         return 0
 
@@ -10177,6 +10339,7 @@ def main() -> int:
         return 0
 
     if args.command == 'timestd-tune-storage':
+        _deprecated('timestd-tune-storage', 'storage tune-timestd')
         return cmd_timestd_tune_storage(args)
 
     if args.command in ('validate', 'config', 'environment', 'ka9q-watch'):
@@ -10187,6 +10350,7 @@ def main() -> int:
         if args.command == 'validate':
             return cmd_validate(args)
         if args.command == 'ka9q-watch':
+            _deprecated('ka9q-watch', 'watch ka9q')
             return cmd_ka9q_watch(args)
         if args.command == 'environment':
             env_cmd = getattr(args, 'env_command', None)
@@ -10242,6 +10406,46 @@ def main() -> int:
         p_config.print_help()
         return 0
 
+    # `smd component <verb>` — v2 canonical catalog namespace
+    # (CLI-V2-SPEC.md §3.3).  Uses the same rewrite trick as `software`
+    # below for the install path so the _MUTATING boilerplate handles
+    # root+lock; other sub-verbs route directly because their handlers
+    # do their own root checks.
+    if args.command == 'component':
+        cc = getattr(args, 'component_command', None)
+        if cc == 'list':
+            # Read-only catalog view — synthesize the flags cmd_list
+            # expects but that aren't on the `component list` parser.
+            args.update = False
+            if not hasattr(args, 'ref'):
+                args.ref = None
+            if not hasattr(args, 'dry_run'):
+                args.dry_run = False
+            return cmd_list(args)
+        if cc == 'update':
+            # Replaces `list --update` / `list --apply`.  Positional
+            # `name` is a single-component shortcut (§7 item 4).
+            if getattr(args, 'name', None) and not getattr(args, 'components', None):
+                args.components = args.name
+            args.update = True
+            if not hasattr(args, 'ref'):
+                args.ref = None
+            return cmd_list(args)
+        if cc == 'install':
+            # Fall through to top-level 'install' dispatch (root + lock).
+            args.command = 'install'
+        elif cc == 'add':
+            return cmd_add(args)
+        elif cc == 'remove':
+            return cmd_remove(args)
+        elif cc == 'enable':
+            return cmd_enable(args)
+        elif cc == 'disable':
+            return cmd_disable(args)
+        elif cc is None:
+            p_component.print_help()
+            return 0
+
     # `smd software <install|apply>` — rewrite into the corresponding
     # top-level command so the rest of the dispatch (mutating-lock,
     # root check, sigmond-lib gate) and the cmd_install/cmd_apply
@@ -10251,13 +10455,32 @@ def main() -> int:
     if args.command == 'software':
         sub_cmd = getattr(args, 'software_command', None)
         if sub_cmd in ('install', 'apply'):
+            _deprecated(f'software {sub_cmd}', sub_cmd)
             args.command = sub_cmd  # fall through to dispatch below
         else:
             p_software.print_help()
             return 0
 
+    # v2 deprecations for bare verbs and mutating-flag-on-read.
+    # Component-namespace forms (`component add`, etc.) bypass this
+    # check because their dispatch returns earlier — these only fire
+    # on the bare top-level path being phased out.
+    if args.command == 'add':
+        _deprecated('add', 'component add')
+    elif args.command == 'remove':
+        _deprecated('remove', 'component remove')
+    elif args.command == 'list' and getattr(args, 'update', False):
+        _deprecated('list --update / --apply', 'component update')
+    elif args.command == 'log' and getattr(args, 'level', None):
+        _deprecated('log --level', 'log set-level <client> <level>')
+
     # Mutating verbs require root and acquire the lifecycle lock (CONTRACT §5.5).
-    _MUTATING = {'install', 'apply', 'start', 'stop', 'restart', 'reload', 'update'}
+    # `component update` reaches cmd_list with args.update=True via the
+    # component dispatch branch (which handles its own root/lock per
+    # cmd_list's internal elevation), so it's not enumerated here.
+    # `log set-level` likewise bypasses this via the pre-parse intercept
+    # at the top of main().
+    _MUTATING = {'install', 'apply', 'start', 'stop', 'restart', 'reload'}
     if args.command in _MUTATING:
         if _need_root(args.command):
             return 1

@@ -123,7 +123,7 @@ warrant a separate row.
 | CPU frequency plan | `diag cpu-freq [--apply]`, `cpu` | `cpu_freq` | apply still CLI-only |
 | Network / IGMP diagnostics | `diag net [--listen]` | `diag_net` | — |
 | FFTW wisdom (plan / status) | `wisdom plan / status` | `fft_wisdom` | one screen serves both verbs |
-| apt + pip source management | `sources list/add/remove/apply` | — | **Gap** — CLI-only |
+| Per-client SDR source selection (radiod / KiwiSDR feeds) | `sources list/add/remove/apply` | — | **Gap** — CLI-only |
 | ka9q-radio pin / compat watch | `ka9q-watch`, `watch ka9q` | `ka9q_watch` | — |
 | Activity watch (wspr/psk/hfdl/codar) | `wspr-watch`, `psk-watch`, `hfdl-watch`, `codar-watch`, `watch <t>` | — | **Gap** — no TUI surface; CLI-only despite five verbs |
 | Uploads activity watch | `watch uploads` | — | **Gap** — CLI-only |
@@ -153,8 +153,11 @@ maintenance capability with no TUI representation:
 1. **Activity watches** — `wspr-watch / psk-watch / hfdl-watch /
    codar-watch / watch uploads / watch verifier`. The richest gap;
    five+ verbs and no live surface in the TUI.
-2. **apt / pip sources** — `sources` four-verb group; routine on a
-   fresh host or after an upstream change. No TUI.
+2. **Per-client SDR source selection** — `sources` four-verb group;
+   wires each recorder to its RF feed (radiod control plane or
+   KiwiSDR). Touched any time an SDR moves on the LAN, a new
+   RX-888 is added, or a recorder needs repointing. Not an
+   apt/pip mirror manager despite the verb name. No TUI.
 3. **Verifier report / rehabilitate** — `verifier report / rehabilitate`.
    Reporting is monitoring; rehabilitation is maintenance.
 4. **Coordination identity / refresh** — `config identity`,
@@ -166,7 +169,8 @@ maintenance capability with no TUI representation:
 These map cleanly to the four-category proposal:
 
 - Gap 1 → **Debugging** (live activity surfaces)
-- Gap 2 → **Installation** (sources are usually first-run / mirror swaps)
+- Gap 2 → **Maintenance** (operator re-wires feeds whenever LAN
+  topology changes; first-run wire-up is also installer-touched)
 - Gap 3 → **Debugging** (report) + **Maintenance** (rehabilitate)
 - Gap 4 → **Installation** (identity) + **Maintenance** (refresh)
 - Gap 5 → **Maintenance** (mutation buttons on existing screens)
@@ -192,13 +196,14 @@ Installation                   [first-time setup, infrequent]
     Install                    (catalog walk / per-entry installer)
     SDR inventory              (USB enumeration + labelling)
     FFT Wisdom                 (one-time per host; hours on first run)
-    Sources                    [planned — apt+pip mirror management]
     Identity                   [planned — config identity bootstrap]
 
 Maintenance / Updating         [routine operator actions]
     Lifecycle                  (start / stop / restart / reload)
     Apply                      (reconcile services with config)
     Client config              (edit / re-run wizard)
+    Sources                    [planned — per-client SDR feed selection
+                                (radiod / KiwiSDR), touched on LAN changes]
     CPU affinity               (apply plan)
     CPU frequency              (apply plan)
     Backup                     (snapshot config)
