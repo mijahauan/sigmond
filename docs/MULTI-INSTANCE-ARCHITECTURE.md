@@ -477,12 +477,34 @@ commit, 2026-05-25):**
 
 Inventory updated: `instance` row added in §2, screen count 30 → 31.
 
-**Phase 7 — Spot-schema bump to v0.8 + uploader awareness.** Add
-`reporter_id` to the canonical JSON payload; teach the hs-uploader
-and wsprdaemon transport to map `reporter_id → reporter_id` (and
-to render the WSPRnet form `AC0G/B1` at the wsprnet boundary).
-Verifier and `wsprnet_audit`/`wsprnet_reject_cache` schema bumps
-land here.
+**Phase 7 — Spot-schema bump to v0.8 + uploader awareness.
+PARTIAL (sigmond pending commit, 2026-05-25):**
+
+- **Phase 7a (DONE)** — CLIENT-CONTRACT.md bumped to v0.8 with a
+  new §19 formalising the per-reporter-instance shape and the
+  `reporter_id` row tag.  §19.1 locks the regex; §19.2 the
+  per-instance config preference + soft cutover; §19.3 the
+  row-tag MUST + the daemon-level "do NOT fall back to
+  args.instance" rule; §19.4 the WSPRnet slash-form rendering
+  rule + `to_wsprnet_form()` helper; §19.5 the sources file
+  shape; §19.6 the migration path pointer.  Sources CLI silently
+  accepts the per-instance form `<client>@<reporter-id>` (new
+  helper `_is_valid_per_instance_client` in bin/smd validates
+  the prefix against KNOWN_CLIENTS and the suffix against the
+  reporter-id regex).
+- **Phase 7b (DEFERRED)** — hs-uploader per-reporter pipelines.
+  The WSPRnet transport's `_post()` uses one `identity.call` per
+  pipeline; per-reporter operation needs one pipeline per
+  reporter (each with `identity.call = to_wsprnet_form(reporter_id)`).
+  This is architectural — the pipeline configuration shape
+  changes, the dispatcher may need to fan out by reporter_id,
+  and the per-cycle dedup logic in `dedup_records_for_wsprnet`
+  may need to scope by reporter.  Multi-week.
+- **Phase 7c (DEFERRED)** — `wsprnet_audit` /
+  `wsprnet_reject_cache` schema bumps (wspr-recorder side).
+  Each table gains a `reporter_id` column; existing rows
+  backfill to `<rx_call>` (no suffix) as the legacy form.
+  Operating-host DB migration plus verifier-side query updates.
 
 **Phase 8 — Migration tool. DONE (sigmond pending commit, 2026-05-25).**
 `smd instance migrate` per §6 — replaces the Phase-2 detect-only

@@ -1,6 +1,6 @@
 # HamSCI Client Contract
 
-**Version:** 0.7
+**Version:** 0.8
 **Status:** Adopted. First full v0.2 implementation is `hf-timestd`
 v7.0.0 — see §9.  First greenfield v0.3 implementation is
 `psk-recorder` v0.1.0, which also surfaced the v0.4 hardening items in
@@ -12,6 +12,31 @@ wspr-recorder) retrofitted to v0.5 on 2026-05-04.
 giving the latent v0.2 booleans (`uses_timing_calibration`,
 `provides_timing_calibration`) their contract semantics for the first
 time.
+§19 (per-reporter instance + reporter_id row tag) added 2026-05-25,
+formalising the multi-instance architecture shipped in sigmond
+docs/MULTI-INSTANCE-ARCHITECTURE.md Phases 3-6 and 8.
+
+v0.8 adds:
+
+- **§19 (new) — per-reporter instance, reporter_id row tag.**
+  Each templated recorder client runs one process per
+  *reporter identity* (operator-meaningful, path-safe regex
+  `[A-Z0-9][A-Z0-9-]*[A-Z0-9]` — e.g. `AC0G-B1`).  The
+  systemd unit, per-instance config, env file, sources file,
+  state dir, log dir, and runtime dir are all keyed on this
+  identifier — see sigmond's MULTI-INSTANCE-ARCHITECTURE.md §3
+  and §4.  Every spot row gains a first-class `reporter_id`
+  column.  The legacy `instance` field (== `radiod_id`) is
+  deprecated; will be removed when MULTI-INSTANCE-ARCHITECTURE.md
+  Phase 9 ships (a release after Phase 8's `smd instance
+  migrate` has been operator-driven on enough hosts).  WSPRnet
+  upload boundary renders the reporter ID's first `-` as `/`
+  (`AC0G-B1` → `AC0G/B1`); sigmond-internal surfaces never
+  carry the slash form.
+- **§3 amendment.**  Inventory's per-instance entries pick up
+  the reporter ID via the per-instance config's `[instance]`
+  block when present; legacy radiod-keyed instances continue
+  to inventory with no `[instance]` block until migrated.
 
 v0.7 adds:
 
@@ -2455,3 +2480,128 @@ Sigmond:
   - All other clients remain in default mode (RTP-default for
     radiod, host-clock-default for non-radiod) and are conformant
     unchanged.
+
+---
+
+## §19 — Per-reporter instance and `reporter_id` row tag (v0.8)
+
+Each templated recorder client (psk-recorder, wspr-recorder,
+hfdl-recorder, codar-sounder; mag-recorder forthcoming) runs **one
+process per reporter identity** on a host that has multiple
+reporters configured.  The reporter identity is operator-meaningful
+and path-safe by construction (no slashes, no leading/trailing
+hyphens).  This section locks the contract terms for client
+implementations; the operational details, file layout, and
+migration plan live in sigmond's
+`docs/MULTI-INSTANCE-ARCHITECTURE.md`.
+
+### §19.1 — Reporter ID format (MUST)
+
+A reporter ID matches the regex `[A-Z0-9][A-Z0-9-]*[A-Z0-9]` —
+uppercase alphanumerics and ASCII hyphens, no leading or trailing
+hyphen, minimum length 2.  Examples: `AC0G-B1`, `KP4MD-RPI4`,
+`W4UK-WEST`.  The form is path-safe by construction: a single
+identifier serves systemd template instance, config-file stem,
+env-file stem, data-dir name, log-dir name, and sources-file
+component.  Sigmond-internal surfaces never carry the WSPRnet slash
+form; see §19.4.
+
+### §19.2 — Per-instance config (MUST when client supports
+per-instance)
+
+A client that supports per-instance deployment MUST resolve its
+config file from `/etc/<client>/<reporter-id>.toml` in preference
+to the legacy `/etc/<client>/<client>-config.toml` shared path.
+The CLI flag is `--instance <reporter-id>`; the systemd
+template `<client>@.service` passes `--instance %i`.  When the
+per-instance config does not exist, clients MAY fall back to the
+legacy shared config with a deprecation warning (the soft-cutover
+pattern sigmond's MULTI-INSTANCE-ARCHITECTURE.md Phases 3-5 took).
+The legacy fall-through path SHALL be removed in a future
+contract minor bump aligned with sigmond's Phase 9.
+
+The per-instance config carries an `[instance]` block:
+
+```toml
+[instance]
+reporter_id = "AC0G-B1"
+
+[instance.metadata]
+antenna = "loop"            # optional, operator description
+sdr     = "rx888-mk2"       # optional, SDR model / serial / label
+```
+
+Additional `[instance.metadata.*]` keys are operator-defined and
+client-ignored; they exist for analysis pipelines downstream that
+want context per spot.
+
+### §19.3 — `reporter_id` row tag (MUST when client emits spots/rows)
+
+Every spot row, noise row, or equivalent canonical-payload row
+the client writes to `sigmond.hamsci_sink` SHALL carry a
+`reporter_id` field as a first-class column.  Value sources, in
+order of preference:
+
+1. The per-instance config's `[instance].reporter_id`, when
+   present.
+2. The `radiod_id` fallback (== the legacy `instance` field's
+   semantic).  This applies on legacy single-instance hosts where
+   no per-instance config exists yet.
+
+Clients MUST NOT derive `reporter_id` from the `--instance`
+command-line value on its own — that value during the cutover
+window is typically a radiod identifier (e.g. `my-rx888`) which
+would propagate a misleading reporter ID into downstream rows.
+Daemon-level fall back to `--instance` is explicitly forbidden;
+fall back at the row construction layer to `radiod_id` is the
+contract-correct path.
+
+The legacy `instance` field (== `radiod_id`) is **deprecated as
+of v0.8** but remains in row schemas for backwards compatibility
+during the deprecation window.  It will be removed when sigmond's
+MULTI-INSTANCE-ARCHITECTURE.md Phase 9 ships (one release after
+operator hosts have actually migrated via Phase 8's
+`smd instance migrate`).
+
+### §19.4 — WSPRnet upload boundary (MUST for WSPRnet-bound paths)
+
+WSPRnet's per-receiver identifier uses a slash-delimited form
+(`AC0G/B1`) that is not path-safe.  Sigmond-internal surfaces
+keep the hyphen form (`AC0G-B1`) consistently; the slash form
+is rendered ONLY at the WSPRnet upload boundary:
+
+```python
+wsprnet_form = reporter_id.replace("-", "/", 1)
+```
+
+Mechanical: first hyphen becomes the slash; remaining hyphens
+are part of the suffix.  Examples:
+- `AC0G-B1`     → `AC0G/B1`
+- `KP4MD-RPI4`  → `KP4MD/RPI4`
+- `W4UK-WEST-2` → `W4UK/WEST-2`
+
+The conversion lives in `sigmond.instance.to_wsprnet_form()`;
+clients (and the hs-uploader) SHOULD use that helper rather than
+re-implementing the replace.
+
+### §19.5 — Sources file shape (per-instance)
+
+A reporter's sources selection lives at
+`/etc/sigmond/clients/<client>@<reporter-id>.sources.toml` (per
+sigmond's MULTI-INSTANCE-ARCHITECTURE.md §4).  The `smd sources`
+CLI accepts the per-instance syntax (`smd sources add
+<client>@<reporter-id> <kind>:<id>`) silently; the bare
+`<client>` form is preserved for legacy single-instance
+deployments during the deprecation window.
+
+### §19.6 — Migration path
+
+Sigmond Phase 8 (`smd instance migrate`) is the one-shot
+interactive tool that flips an operating host from the legacy
+`<client>@<radiod-id>.service` shape to
+`<client>@<reporter-id>.service`.  Clients do not need to do
+anything special for migration — the daemon's `resolve_config_path`
+already prefers the per-instance file when present, and the
+systemd template already passes `--instance %i`; once the unit
+is renamed and the per-instance config exists, the daemon picks
+it up on next start.

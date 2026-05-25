@@ -5704,6 +5704,28 @@ def _fetch_public_ip(url: str, timeout: float = 5.0) -> Optional[str]:
     return None
 
 
+def _is_valid_per_instance_client(client: str, known_clients) -> bool:
+    """True when `client` is the per-instance form `<known>@<reporter-id>`.
+
+    Recognised by CLIENT-CONTRACT v0.8 §19.5: sources-CLI keys may take
+    the per-instance form so each reporter's sources selection lives
+    at `/etc/sigmond/clients/<client>@<reporter-id>.sources.toml`.
+    """
+    if "@" not in client:
+        return False
+    prefix, _, instance = client.partition("@")
+    if prefix not in known_clients:
+        return False
+    if not _HAS_SIGMOND_LIB:
+        return True   # can't validate strictly; be permissive
+    try:
+        from sigmond.instance import validate_reporter_id
+        validate_reporter_id(instance)
+        return True
+    except Exception:
+        return False
+
+
 def _sources_inventory():
     """Probe the environment and return (rows, error_msg).
 
@@ -5835,9 +5857,15 @@ def cmd_sources_add(args) -> int:
     from sigmond.sources import ClientSources, KNOWN_CLIENTS
 
     client = args.client
+    # Per-instance form `<client>@<reporter-id>` is contract-recognised
+    # at v0.8 (CLIENT-CONTRACT §19.5).  Suppress the unknown-client
+    # warning when the prefix is a known client AND the reporter-id
+    # part validates against the reporter-id regex; otherwise fall back
+    # to the legacy warning.
     if client not in KNOWN_CLIENTS:
-        _info(f'  ⚠ {client!r} is not in the well-known clients list '
-              f'{list(KNOWN_CLIENTS)} — selection will be recorded anyway')
+        if not _is_valid_per_instance_client(client, KNOWN_CLIENTS):
+            _info(f'  ⚠ {client!r} is not in the well-known clients list '
+                  f'{list(KNOWN_CLIENTS)} — selection will be recorded anyway')
 
     rows, _err_msg = _sources_inventory()
     rows = rows or []
