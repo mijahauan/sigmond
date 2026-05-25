@@ -25,10 +25,46 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Static
+from textual.widgets import Button, DataTable, Select, Static
 from textual.worker import Worker, WorkerState
 
 from ..mutation import confirm_and_run
+from .textual_wizard import TextualConfigWizardScreen
+
+
+# Sentinel for the per-instance dropdown "no instance" value.
+_NO_INSTANCE = "__none__"
+
+# Templated recorder clients — these have per-instance dimension.
+_TEMPLATED_RECORDER_CLIENTS = (
+    "psk-recorder",
+    "wspr-recorder",
+    "hfdl-recorder",
+    "codar-sounder",
+)
+
+
+def _instance_options_for_client(client: str) -> list:
+    """Build (label, value) list for the per-instance dropdown."""
+    options: list = [("(no instance)", _NO_INSTANCE)]
+    if client not in _TEMPLATED_RECORDER_CLIENTS:
+        return options
+    try:
+        from ...instance import (
+            list_instances, detect_migration_candidates,
+        )
+    except Exception:
+        return options
+    for i in list_instances(catalog_clients=[client]):
+        options.append((i.reporter_id, i.reporter_id))
+    try:
+        for c in detect_migration_candidates():
+            if c.client == client:
+                label = f"{c.old_instance} (legacy)"
+                options.append((label, c.old_instance))
+    except Exception:
+        pass
+    return options
 
 
 def _smd_binary() -> str:
@@ -92,6 +128,18 @@ class ClientConfigScreen(Vertical):
     ClientConfigScreen #cc-actions Button {
         margin-right: 1;
     }
+    ClientConfigScreen #cc-instance-row {
+        height: 3;
+        margin-top: 1;
+        margin-bottom: 1;
+    }
+    ClientConfigScreen #cc-instance-row Button {
+        margin-right: 1;
+    }
+    ClientConfigScreen #cc-instance {
+        width: 30;
+        margin-right: 2;
+    }
     ClientConfigScreen #cc-hint {
         color: $text-muted;
         margin-top: 0;
@@ -114,13 +162,28 @@ class ClientConfigScreen(Vertical):
         with Horizontal(id="cc-actions"):
             yield Button("⚙ Init wizard",  id="cc-init",   variant="primary")
             yield Button("✎ Edit config",  id="cc-edit",   variant="default")
+            yield Button("✎ Edit in-TUI",  id="cc-edit-tui", variant="default")
             yield Button("Refresh",        id="cc-refresh", variant="default")
 
+        # Per-instance row (sigmond MULTI-INSTANCE-ARCHITECTURE.md §8).
+        # Populated when a templated recorder row is selected; "Edit
+        # per-instance" runs `smd instance edit <client> <reporter-id>`
+        # (Phase-2 stub today — points at $EDITOR — see spec §6).
+        with Horizontal(id="cc-instance-row"):
+            yield Select(
+                options=[("(none)", _NO_INSTANCE)], value=_NO_INSTANCE,
+                id="cc-instance", allow_blank=False,
+            )
+            yield Button("✎ Edit per-instance",
+                         id="cc-edit-instance", variant="default")
+
         yield Static(
-            "[dim]Init runs the client's first-run interview "
-            "(`smd config init <name>`).  Edit opens the client's edit hook "
-            "or $EDITOR on its config file.  radiod uses the sigmond-owned "
-            "wizard.[/]",
+            "[dim]Init / Edit run the whiptail wizard (suspends the TUI). "
+            "Edit in-TUI opens an in-process Textual form for scalar keys "
+            "(no suspend); arrays-of-tables still need the whiptail "
+            "wizard's $EDITOR option.  radiod uses the sigmond-owned "
+            "wizard.  Edit per-instance is the new per-reporter path: "
+            "pick a row, then pick the instance from the dropdown.[/]",
             id="cc-hint")
 
         yield Static("", id="cc-last")
@@ -140,6 +203,47 @@ class ClientConfigScreen(Vertical):
             self._run_verb("init")
         elif bid == "cc-edit":
             self._run_verb("edit")
+        elif bid == "cc-edit-tui":
+            self._open_textual_wizard()
+        elif bid == "cc-edit-instance":
+            self._edit_per_instance()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Repopulate the per-instance dropdown when the operator
+        picks a different client row."""
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        instance_sel = self.query_one("#cc-instance", Select)
+        instance_sel.set_options(_instance_options_for_client(entry.name))
+        instance_sel.value = _NO_INSTANCE
+
+    def _edit_per_instance(self) -> None:
+        entry = self._selected_entry()
+        last = self.query_one("#cc-last", Static)
+        if entry is None:
+            last.update("[yellow]pick a row first[/]")
+            return
+        instance_val = self.query_one("#cc-instance", Select).value
+        if instance_val in (None, Select.BLANK, _NO_INSTANCE):
+            last.update(
+                "[yellow]Pick an instance from the dropdown — "
+                "use the regular Edit buttons above for client-wide "
+                "config[/]")
+            return
+        cmd = [_smd_binary(), 'instance', 'edit', entry.name,
+               str(instance_val)]
+        # Phase-2 stub today — points at $EDITOR — but the wiring is
+        # ready for when the per-client refactor (post-Phase 5) lets
+        # this drive the client's config flow with the per-instance
+        # path injected.  Suspends the TUI exactly like the other
+        # Edit buttons.
+        self.app.suspend()
+        try:
+            subprocess.run(cmd, check=False)
+        finally:
+            self.app.resume()
+        last.update(f"[green]✓[/] ran: {' '.join(cmd)}")
 
     # ------------------------------------------------------------------
     # data loading
@@ -217,6 +321,48 @@ class ClientConfigScreen(Vertical):
             body=body,
             cmd=cmd, sudo=True,
             on_complete=self._after_run,
+        )
+
+    def _open_textual_wizard(self) -> None:
+        entry = self._selected_entry()
+        last = self.query_one("#cc-last", Static)
+        if entry is None:
+            last.update("[yellow]pick a row first[/]")
+            return
+        if not entry.is_installed():
+            last.update(
+                f"[yellow]{entry.name} is not installed — "
+                f"run Install first[/]")
+            return
+
+        try:
+            from ...catalog import find_client_binary
+        except ImportError:
+            last.update("[red]catalog module missing find_client_binary[/]")
+            return
+        client_bin = find_client_binary(entry.name)
+        if not client_bin:
+            last.update(
+                f"[yellow]{entry.name}: no CLI binary found "
+                f"(not in PATH and no /opt/{entry.name}/venv/bin/{entry.name})[/]"
+            )
+            return
+
+        def _after_wizard(saved: Optional[bool]) -> None:
+            if saved:
+                last.update(
+                    f"[green]✔ saved via in-TUI wizard[/]  {entry.name}"
+                )
+                self._refresh()
+            else:
+                last.update(f"[dim]cancelled in-TUI wizard[/]  {entry.name}")
+
+        self.app.push_screen(
+            TextualConfigWizardScreen(
+                client_name=entry.name,
+                client_bin=client_bin,
+            ),
+            _after_wizard,
         )
 
     def _after_run(self, result: subprocess.CompletedProcess) -> None:

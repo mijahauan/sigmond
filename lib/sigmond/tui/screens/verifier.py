@@ -33,6 +33,17 @@ def _smd_binary() -> str:
     return found or '/usr/local/sbin/smd'
 
 
+# Sentinel for the "no instance filter" Select value.
+_INSTANCE_ALL = "__all__"
+
+# verifier target → templated recorder client (the spot rows come from
+# its instances).  Used to populate the per-instance dropdown.
+_TARGET_TO_CLIENT = {
+    "wspr": "wspr-recorder",
+    "psk":  "psk-recorder",
+}
+
+
 class VerifierScreen(Vertical):
     """Wsprnet upload audit (report) + per-callsign suppression clear (rehabilitate)."""
 
@@ -108,6 +119,12 @@ class VerifierScreen(Vertical):
                 [("wspr", "wspr"), ("psk", "psk")],
                 value="wspr", id="vf-target", allow_blank=False,
             )
+            yield Label("Instance")
+            yield Select(
+                self._instance_options_for("wspr"),
+                value=_INSTANCE_ALL, id="vf-instance",
+                allow_blank=False,
+            )
             yield Label("Window")
             yield Input("1h", id="vf-window",
                         placeholder="e.g. 1h, 24h, 7d")
@@ -143,6 +160,55 @@ class VerifierScreen(Vertical):
             yield Input("", id="vf-reh-call",
                         placeholder="e.g. W4UK/P")
             yield Button("Rehabilitate", id="vf-reh-run", variant="warning")
+
+    @staticmethod
+    def _instance_options_for(target: str) -> list:
+        """Build the (label, value) list for the instance Select widget."""
+        client = _TARGET_TO_CLIENT.get(target)
+        options: list = [("(all instances)", _INSTANCE_ALL)]
+        if client is None:
+            return options
+        try:
+            from ...instance import (
+                list_instances, detect_migration_candidates,
+            )
+        except Exception:
+            return options
+        for i in list_instances(catalog_clients=[client]):
+            options.append((i.reporter_id, i.reporter_id))
+        try:
+            for c in detect_migration_candidates():
+                if c.client == client:
+                    label = f"{c.old_instance} (legacy)"
+                    options.append((label, c.old_instance))
+        except Exception:
+            pass
+        return options
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """Repopulate instance dropdown on target change; auto-fill
+        RX call when an instance is picked."""
+        sel_id = event.select.id
+        if sel_id == "vf-target":
+            target = str(event.value) if event.value is not None else ""
+            if not target or target == Select.BLANK:
+                return
+            instance_sel = self.query_one("#vf-instance", Select)
+            instance_sel.set_options(self._instance_options_for(target))
+            instance_sel.value = _INSTANCE_ALL
+        elif sel_id == "vf-instance":
+            inst = event.value
+            if inst in (None, Select.BLANK, _INSTANCE_ALL):
+                return
+            # Render reporter-id back into WSPRnet slash form for the
+            # rx_call input (AC0G-B1 → AC0G/B1).  Operator can still
+            # hand-type to override.
+            try:
+                from ...instance import to_wsprnet_form
+                rxcall = to_wsprnet_form(str(inst))
+            except Exception:
+                rxcall = str(inst)
+            self.query_one("#vf-rxcall", Input).value = rxcall
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "vf-run":

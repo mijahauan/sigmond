@@ -91,7 +91,18 @@ class SourcesScreen(Vertical):
             "[dim]Edit selections via CLI for now:[/]\n"
             "  [cyan]smd sources add <client> <kind>:<id>[/]\n"
             "  [cyan]smd sources remove <client> <kind>:<id>[/]\n"
-            "[dim]Then return here and press Apply.[/]",
+            "[dim]Then return here and press Apply.[/]\n"
+            "\n"
+            "[dim]Per-instance reporters (sigmond "
+            "MULTI-INSTANCE-ARCHITECTURE.md §4) use the [/]"
+            "[cyan]<client>@<reporter-id>[/]"
+            "[dim] form once the sources CLI grows per-instance "
+            "awareness (Phase 7 — pending):[/]\n"
+            "  [cyan]smd sources add wspr-recorder@AC0G-B1 "
+            "radiod:my-rx888[/]\n"
+            "  [cyan]smd sources remove wspr-recorder@AC0G-B1 "
+            "kiwi:grape-corner-1[/]\n"
+            "[dim]Until then, selections are per-client.[/]",
             classes="sc-cli-hint", markup=True)
 
     def on_mount(self) -> None:

@@ -447,12 +447,33 @@ Three of the seven §8 deliverables shipped this round:
   component-level lifecycle lock, which doesn't apply to single-
   unit actions).
 
-**Deferred to Phase 6b** (same `§8` patterns, but lower operator
-priority):
-- Verifier screen — auto-fill `--rx-call` from per-instance config
-- Logs screen — per-instance journal targeting
-- Sources screen — two-stage (client → instance) selector
-- Client config screen — two-stage selector
+**Phase 6b — remaining four screen revisits. DONE (sigmond pending
+commit, 2026-05-25):**
+
+- **Verifier screen** — second-stage instance dropdown between
+  Target and Window.  Selecting an instance auto-fills the RX call
+  Input with the WSPRnet slash form derived from reporter_id
+  (e.g. `AC0G-B1` → `AC0G/B1` via `instance.to_wsprnet_form()`).
+  Operator can still hand-type to override.
+- **Logs screen** — second-stage instance dropdown populated when
+  a templated recorder component is picked.  When an instance is
+  selected, journalctl narrows to that single
+  `<client>@<instance>.service` unit instead of following all of
+  the component's units in aggregate.
+- **Client config screen** — per-instance dropdown + "Edit per-
+  instance" button.  Selecting a row populates the dropdown with
+  the client's known instances (config + legacy radiod-keyed).
+  The button runs `smd instance edit <client> <reporter-id>` (the
+  CLI command suspends the TUI exactly like the other Edit
+  buttons).  Today's `smd instance edit` is a Phase-2 stub that
+  points at `$EDITOR` — wiring is ready for when the per-client
+  refactor lets it drive the client's config flow with the per-
+  instance path injected.
+- **Sources screen** — added a hint section documenting the
+  per-instance CLI syntax (`smd sources add <client>@<reporter-id>
+  <kind>:<id>`) that the sources CLI will accept once **Phase 7**
+  grows it.  Full per-instance filter UI is deferred to that
+  phase; until then, sources are per-client.
 
 Inventory updated: `instance` row added in §2, screen count 30 → 31.
 

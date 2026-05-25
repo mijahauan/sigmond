@@ -56,6 +56,48 @@ def _installed_components() -> dict:
     return result
 
 
+# Sentinel for the "no instance filter" Select value.
+_INSTANCE_ALL = "__all__"
+
+# Per-recorder components that have templated systemd units; the
+# instance selector applies only when one of these is chosen.
+_TEMPLATED_COMPONENTS = (
+    "psk-recorder",
+    "wspr-recorder",
+    "hfdl-recorder",
+    "codar-sounder",
+)
+
+
+def _instance_options_for_component(component: str) -> list:
+    """Build the (label, value) list for the per-instance dropdown.
+
+    Returns the all-instances sentinel + every instance unit known to
+    systemctl for this component (configured per-instance reporter IDs
+    AND legacy radiod-keyed instances).  For non-templated components
+    returns the sentinel only.
+    """
+    options: list = [("(all instances)", _INSTANCE_ALL)]
+    if component not in _TEMPLATED_COMPONENTS:
+        return options
+    try:
+        from ...instance import (
+            list_instances, detect_migration_candidates,
+        )
+    except Exception:
+        return options
+    for i in list_instances(catalog_clients=[component]):
+        options.append((i.reporter_id, i.reporter_id))
+    try:
+        for c in detect_migration_candidates():
+            if c.client == component:
+                label = f"{c.old_instance} (legacy)"
+                options.append((label, c.old_instance))
+    except Exception:
+        pass
+    return options
+
+
 def _resolve_unit_names(component: str) -> list:
     """Resolve systemd units for a component.
 
@@ -132,6 +174,14 @@ class LogsScreen(Vertical):
             ]
             yield Select(options=options, id="lg-picker",
                          prompt="Component\u2026", allow_blank=True)
+            # Per-instance unit selector (sigmond
+            # MULTI-INSTANCE-ARCHITECTURE.md \u00a78).  Populated when the
+            # component picker selects a templated recorder.  Blank
+            # default \u2192 follow the existing component-aggregate journal
+            # (one `-u <client>@<inst>.service` per known unit).
+            yield Select(options=[("(all instances)", _INSTANCE_ALL)],
+                         value=_INSTANCE_ALL, id="lg-instance",
+                         prompt="Instance\u2026", allow_blank=True)
             yield Button("Follow journal", id="lg-journal", variant="primary")
             yield Button("Tail files",     id="lg-files",   variant="default")
             yield Button("Stop",           id="lg-stop",    variant="warning")
@@ -156,6 +206,17 @@ class LogsScreen(Vertical):
             self._stop(user_requested=True)
         elif bid == "lg-set-level":
             self._set_level()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """Repopulate the instance dropdown when component changes."""
+        if event.select.id != "lg-picker":
+            return
+        comp = str(event.value) if event.value is not None else ""
+        if not comp or event.value is Select.NULL:
+            return
+        instance_sel = self.query_one("#lg-instance", Select)
+        instance_sel.set_options(_instance_options_for_component(comp))
+        instance_sel.value = _INSTANCE_ALL
 
     def _set_level(self) -> None:
         comp = self._current_component()
@@ -231,6 +292,20 @@ class LogsScreen(Vertical):
                     f"(no deploy.toml or shim). Is it fully installed?[/]"
                 )
                 return
+            # Per-instance filter (sigmond MULTI-INSTANCE-ARCHITECTURE.md §8):
+            # narrow the unit list to the chosen instance only.
+            instance = self.query_one("#lg-instance", Select).value
+            if instance not in (None, Select.NULL, Select.BLANK, _INSTANCE_ALL):
+                target_unit = f"{comp}@{instance}.service"
+                if target_unit in units:
+                    units = [target_unit]
+                else:
+                    # Operator selected an instance that isn't in
+                    # _resolve_unit_names's list — could be a legacy
+                    # radiod-keyed unit.  Pass it directly to journalctl;
+                    # journalctl will report "no entries" cleanly if
+                    # the unit doesn't actually exist.
+                    units = [target_unit]
             cmd = ['journalctl', '--follow', '--no-hostname', '-n', '50']
             for u in units:
                 cmd.extend(['-u', u])
