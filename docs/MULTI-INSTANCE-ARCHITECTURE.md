@@ -372,11 +372,28 @@ new path is preferred *when present*, not enforced. The strict
 cutover happens in Phase 9 (remove the deprecated radiod-keyed
 unit names + the legacy shared-config fall-through).
 
-**Phase 4 — wspr-recorder per-instance refactor.** Same shape as
-Phase 3, applied to wspr-recorder. Drops the planned-but-unbuilt
-"single wspr-recorder serves N sources" approach from
-plan-multi-rx888-sources.md Phase 3 — each radiod source feeds one
-reporter ID, each reporter ID is one process.
+**Phase 4 — wspr-recorder per-instance refactor. DONE
+(wspr-recorder commit `27035e0`, 2026-05-25).** Same shape as Phase
+3 — soft cutover.  Drops the planned-but-unbuilt "single wspr-
+recorder serves N sources" approach from plan-multi-rx888-sources.md
+Phase 3 in favor of per-process-per-reporter. Specifically:
+
+- New `--instance <reporter-id>` flag on the daemon
+  (cli.py + legacy `__main__.py`).
+- `config.resolve_config_path()` (mirrors psk-recorder's): five-rung
+  precedence ladder, preferring `/etc/wspr-recorder/<instance>.toml`
+  when present, falling back to `/etc/wspr-recorder/config.toml`
+  with a `DeprecationWarning` when `--instance` was given but the
+  per-instance file is missing.
+- `config.extract_reporter_id()` reads the `[instance]` block from
+  either a parsed dict or a Path.
+- `SpotSink` accepts a `reporter_id`; both `spot_to_row` and
+  `noise_to_row` add a `reporter_id` field, falling back to
+  `radiod_id` when not provided.
+- systemd template `wspr-recorder@.service` now passes
+  `--instance %i`; `--config` intentionally dropped so the per-
+  instance path can take effect once the operator migrates.
+- 380/380 tests passing (19 new, 0 regressions).
 
 **Phase 5 — hfdl-recorder / codar-sounder / mag-recorder per-instance refactor.**
 Same pattern. Order chosen by which has the fewest config
