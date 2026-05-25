@@ -338,16 +338,39 @@ yet require client refactors — the sigmond side can create
 instances even when the client still loads from the
 shared-per-client config. Test with a "noop client" first.
 
-**Phase 3 — psk-recorder per-instance refactor.** psk-recorder is
-furthest along (already has `[[radiod]]` blocks; `instance` field in
-spot rows). Refactor `__main__` to:
-- accept an instance argument (`--instance <reporter-id>` or from
-  systemd `%i`)
-- load `/etc/psk-recorder/<reporter-id>.toml` instead of
-  `psk-recorder-config.toml`
-- write to per-instance data/log dirs
-- tag spots with `reporter_id`
-Pilot end-to-end with one reporter ID on a test host, then on bee1.
+**Phase 3 — psk-recorder per-instance refactor. DONE
+(psk-recorder commit `162f967`, 2026-05-25).** Soft cutover, not the
+hard switch the spec originally implied: legacy shared-config
+deployments keep working with a one-line `DeprecationWarning` so
+bee1's running psk-recorder isn't broken until the operator-driven
+migration (Phase 8). Specifically:
+
+- New `--instance <reporter-id>` flag on the daemon subparser
+  (alongside the still-honored `--radiod-id`).
+- `config.resolve_config_path()` precedence: `--config` (explicit)
+  > `$PSK_RECORDER_CONFIG` > `/etc/psk-recorder/<instance>.toml`
+  (preferred, when --instance given and file exists) > legacy
+  `/etc/psk-recorder/psk-recorder-config.toml` (deprecation
+  warning when --instance was given, silent otherwise).
+- `config.extract_reporter_id()` reads the per-instance
+  `[instance]` block; daemon falls back to `--instance` value when
+  the resolved config has no `[instance]` block.
+- Spot rows now carry **both** `instance` (= radiod_id, legacy;
+  removed in Phase 9) and `reporter_id` (= per-instance value or
+  radiod_id-derived fallback).
+- systemd template `psk-recorder@.service` passes `--instance %i`
+  alongside `--radiod-id %i`; `--config` intentionally omitted so
+  the per-instance path can take effect once the operator
+  migrates.
+- 235/235 tests passing (12 new, 0 regressions).
+
+Pilot deployment, then bee1 migration, happens in Phase 8.
+
+The original spec language ("load `/etc/psk-recorder/<reporter-id>.toml`
+instead of `psk-recorder-config.toml`") is technically softened: the
+new path is preferred *when present*, not enforced. The strict
+cutover happens in Phase 9 (remove the deprecated radiod-keyed
+unit names + the legacy shared-config fall-through).
 
 **Phase 4 — wspr-recorder per-instance refactor.** Same shape as
 Phase 3, applied to wspr-recorder. Drops the planned-but-unbuilt
