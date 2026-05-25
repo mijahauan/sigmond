@@ -1459,8 +1459,15 @@ def _run_wd_ctl_apply(client_dir: Path, dry_run: bool) -> bool:
     if not wd_ctl.exists():
         wd_ctl = client_dir / 'bin' / 'wd-ctl'
     if not wd_ctl.exists():
-        _err('wd-ctl not found — cannot generate env files and start services')
-        return False
+        # wsprdaemon-client is deprecated (catalog `[deprecated.*]`); on
+        # hosts where it's been purged, wd-ctl is legitimately missing
+        # and the apply step has nothing to do.  Only error when the
+        # legacy checkout is still on disk — that's the "broken state"
+        # the original message was written for.
+        if Path('/opt/git/sigmond/wsprdaemon-client').exists():
+            _err('wd-ctl not found — cannot generate env files and start services')
+            return False
+        return True
     cmd = [str(wd_ctl), 'apply']
     if dry_run:
         _info('dry-run: would run: sudo WD_SKIP_AFFINITY=1 ' + ' '.join(cmd))
