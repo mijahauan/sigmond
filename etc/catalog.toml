@@ -53,8 +53,25 @@ kind            = "client"
 description     = "RM3100 magnetometer recorder + PSWS uploader (non-radiod, §16 'other')"
 repo            = "https://github.com/mijahauan/mag-recorder"
 uses            = []
-requires        = []                                  # §16.5: not ka9q-radio dependent
+requires        = ["mag-usb", "hs-uploader"]          # C-source dep + sibling pkg for uv editable install
 contract        = "0.6"
 start_priority  = 200                                 # parallel with decoder chain
 # No install_script: install via `smd install mag-recorder` (deploy.toml drives the steps).
 # No topology_alias: avoid the deprecated alias surface for a brand-new client.
+
+[client.mag-usb]
+kind            = "library"                           # source-only dep: clone, no separate install
+description     = "USB driver for RM3100 magnetometers (built by mag-recorder/install.sh)"
+repo            = "https://github.com/wittend/mag-usb"
+# No install_script: mag-recorder's install.sh runs cmake/make against this checkout
+# and writes the binary to /usr/local/bin/mag-usb.  Sigmond auto-clones it as a
+# source-only dep before invoking mag-recorder's installer.
+
+[client.hs-uploader]
+kind            = "library"                           # source-only dep from the catalog's perspective
+description     = "HamSCI PSWS uploader (sibling Python pkg used by mag-recorder via uv editable install)"
+repo            = "https://github.com/mijahauan/hs-uploader"
+# No install_script: mag-recorder's pyproject.toml [tool.uv.sources] points at
+# ../hs-uploader as an editable install — only the source tree needs to exist.
+# `smd install hs-uploader` still works thanks to find_install_script's post-clone
+# discovery (the cloned repo carries its own install.sh).

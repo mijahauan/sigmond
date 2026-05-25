@@ -135,6 +135,13 @@ def _unmet_requires(client: str,
             continue
         if req.is_installed():
             continue
+        # Source-only deps (catalog entry with a repo URL but no
+        # install_script — e.g. mag-usb) are auto-cloned by
+        # installer._clone_source_only_deps just before install.sh runs.
+        # Don't report them as "missing" here; the auto-clone will satisfy them.
+        # getattr() guards against test fakes that omit these fields.
+        if getattr(req, 'repo', '') and not getattr(req, 'install_script', None):
+            continue
         out.append((name, req))
     return out
 

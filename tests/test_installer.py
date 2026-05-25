@@ -143,8 +143,9 @@ class TestRunInstallScript:
 
 
 class TestInstallClient:
-    def test_no_install_script_returns_false(self):
-        entry = _entry(name='radiod', kind='server', install_script=None)
+    def test_no_install_script_and_no_repo_returns_false(self):
+        entry = _entry(name='radiod', kind='server',
+                       install_script=None, repo='')
         assert install_client(entry) is False
 
     def test_full_flow(self, tmp_path):
@@ -156,3 +157,50 @@ class TestInstallClient:
             with mock.patch('sigmond.installer.subprocess.run') as m:
                 m.return_value = mock.Mock(returncode=0)
                 assert install_client(entry) is True
+
+    def test_source_only_dep_is_auto_cloned(self, tmp_path):
+        """A consumer's `requires` entry that is a pure source dep
+        (repo set, no install_script, not yet on disk) is cloned to
+        /opt/git/sigmond/<dep> before the consumer's install.sh runs.
+        Mirrors the mag-recorder → mag-usb relationship."""
+        repo = tmp_path / 'mag-recorder'
+        repo.mkdir()
+        script = repo / 'install.sh'
+        script.write_text('#!/bin/sh\n')
+        entry = _entry(name='mag-recorder', install_script=None,
+                       requires=('mag-usb',))
+        dep = CatalogEntry(
+            name='mag-usb', kind='library', description='C source dep',
+            repo='https://github.com/wittend/mag-usb',
+            install_script=None,
+        )
+        catalog = {'mag-recorder': entry, 'mag-usb': dep}
+        with mock.patch('sigmond.installer.clone_repo') as cr:
+            cr.side_effect = [repo, tmp_path / 'mag-usb']
+            with mock.patch('sigmond.installer.subprocess.run') as m:
+                m.return_value = mock.Mock(returncode=0)
+                assert install_client(entry, catalog=catalog) is True
+                # clone_repo should have been called twice: once for the
+                # consumer (pull_if_exists=False, the default), then again
+                # for the mag-usb source dep.
+                cloned_names = [c.args[0].name for c in cr.call_args_list]
+                assert cloned_names == ['mag-recorder', 'mag-usb']
+
+    def test_no_catalog_script_discovers_in_repo(self, tmp_path):
+        """mag-recorder pattern: catalog has no install_script, but the
+        repo carries install.sh which gets discovered post-clone."""
+        repo = tmp_path / 'fake-client'
+        repo.mkdir()
+        script = repo / 'install.sh'
+        script.write_text('#!/bin/sh\n')
+        entry = _entry(install_script=None)
+        with mock.patch('sigmond.installer.clone_repo', return_value=repo):
+            with mock.patch('sigmond.installer.subprocess.run') as m:
+                m.return_value = mock.Mock(returncode=0)
+                assert install_client(entry) is True
+                # Verify it actually invoked sudo bash <script>.
+                invoked_cmds = [c.args[0] for c in m.call_args_list]
+                assert any(
+                    cmd[0] == 'sudo' and str(script) in cmd
+                    for cmd in invoked_cmds
+                )

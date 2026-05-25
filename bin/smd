@@ -1734,11 +1734,18 @@ def _install_single_client(args) -> int:
             _heading('wd-rac (Remote Access Channel)')
             topology = _load_topology(TOPOLOGY_PATH)
             return 0 if _install_wd_rac(topology, dry_run, yes=yes) else 1
-        _err(f"'{entry.name}' has no install_script in the catalog")
+        # ka9q-radio is built natively (apt deps + make install) — no install.sh.
         if entry.name == 'ka9q-radio':
+            _err(f"'{entry.name}' has no install_script in the catalog")
             _info(f"{entry.name} is built natively by sigmond (apt deps + make install); "
                   f"use: smd install --components ka9q-radio --yes")
-        return 1
+            return 1
+        # Otherwise we expect to discover install.sh in the cloned repo
+        # post-clone (the mag-recorder pattern).  install_client() handles
+        # this fall-through; it needs a repo URL to clone from.
+        if not entry.repo:
+            _err(f"'{entry.name}' has no install_script and no repo URL in the catalog")
+            return 1
 
     # Pre-flight: declared `requires` aren't enforced anywhere else in the
     # install flow.  Warn the operator before doing real work if any are
@@ -1750,7 +1757,7 @@ def _install_single_client(args) -> int:
 
     _heading(f'install {entry.name}')
     _info(f'repo:   {entry.repo}')
-    _info(f'script: {entry.install_script}')
+    _info(f'script: {entry.install_script or "(discover in repo post-clone)"}')
 
     if dry_run:
         _info('(dry-run) would clone repo and run install.sh')
@@ -1762,7 +1769,8 @@ def _install_single_client(args) -> int:
     _netdiag_auto_refresh('install')
 
     try:
-        result = _do_install_client(entry, dry_run=dry_run, yes=yes, pull=True)
+        result = _do_install_client(entry, dry_run=dry_run, yes=yes, pull=True,
+                                    catalog=catalog)
     except RuntimeError as exc:
         _err(str(exc))
         return 1
@@ -1890,7 +1898,8 @@ def _install_full_suite(args) -> int:
     for entry in catalog_queue:
         _heading(f'install {entry.name}')
         try:
-            result = _do_install_client(entry, dry_run=False, yes=yes, pull=True)
+            result = _do_install_client(entry, dry_run=False, yes=yes, pull=True,
+                                        catalog=catalog)
             if result:
                 _ok(f'{entry.name} installed')
             else:

@@ -199,13 +199,20 @@ def clone_repo(
 
 
 def find_install_script(entry: CatalogEntry, repo_dir: Path) -> Optional[Path]:
-    """Locate the install script, preferring the actual repo over the catalog path."""
-    if not entry.install_script:
-        return None
-    catalog_path = Path(entry.install_script)
-    if catalog_path.exists():
-        return catalog_path
-    relative = catalog_path.name
+    """Locate the install script, preferring the actual repo over the catalog path.
+
+    When the catalog entry has no ``install_script`` (clients like
+    mag-recorder rely on convention rather than an explicit catalog pin),
+    fall back to the standard in-repo locations.  This lets the installer
+    clone a repo first and discover its install.sh post-clone.
+    """
+    if entry.install_script:
+        catalog_path = Path(entry.install_script)
+        if catalog_path.exists():
+            return catalog_path
+        relative = catalog_path.name
+    else:
+        relative = 'install.sh'
     for candidate in (
         repo_dir / 'scripts' / relative,
         repo_dir / 'scripts' / 'install.sh',
@@ -410,22 +417,84 @@ def apply_deploy_toml_links(repo_dir: Path, dry_run: bool = False) -> list[str]:
     return msgs
 
 
+def _clone_source_only_deps(
+    entry: CatalogEntry,
+    catalog: Optional[dict],
+    *,
+    base: Path = GIT_BASE,
+    dry_run: bool = False,
+) -> None:
+    """Auto-clone source-only deps declared in ``entry.requires``.
+
+    A "source-only dep" is a catalog entry with a ``repo`` URL but no
+    ``install_script`` — the consumer's install.sh builds against the
+    checkout (e.g. mag-recorder's install.sh runs cmake on
+    ``/opt/git/sigmond/mag-usb`` to produce ``/usr/local/bin/mag-usb``).
+    Sigmond's job is to ensure the source tree exists where the
+    consumer expects it.
+
+    No-op when ``catalog`` is None (test paths / older callers).
+    Already-cloned deps are left alone.
+    """
+    if not catalog:
+        return
+    for dep_name in entry.requires:
+        dep = catalog.get(dep_name)
+        if dep is None or not dep.repo or dep.install_script:
+            continue
+        dep_dir = base / dep_name
+        if dep_dir.exists():
+            continue
+        if dry_run:
+            print(f"  (dry-run) would clone source dep {dep_name} from {dep.repo}")
+            continue
+        print(f"  cloning source dep {dep_name} from {dep.repo}")
+        try:
+            clone_repo(dep, base=base)
+        except RuntimeError as exc:
+            print(f"  warning: could not clone {dep_name}: {exc}",
+                  file=sys.stderr)
+
+
 def install_client(
     entry: CatalogEntry,
     *,
     dry_run: bool = False,
     yes: bool = False,
     pull: bool = False,
+    catalog: Optional[dict] = None,
 ) -> bool:
     """Full install flow: clone repo + run install.sh + deploy.toml link steps.
 
     Returns True on success, False if the client can't be installed this way.
+
+    A missing ``install_script`` in the catalog is no longer fatal: as long
+    as the entry has a repo URL we clone it and look for an install.sh
+    inside.  Clients like mag-recorder rely on this convention rather than
+    pinning the script path in the catalog.
+
+    When *catalog* is supplied, any required catalog entry that's a pure
+    source dep (has a ``repo`` URL but no ``install_script``) is cloned
+    to ``/opt/git/sigmond/<name>`` before the consumer's install.sh runs.
     """
-    if not entry.install_script:
+    if not entry.install_script and not entry.repo:
         return False
 
     repo_dir = clone_repo(entry, pull_if_exists=pull)
-    ok = run_install_script(entry, repo_dir, dry_run=dry_run, yes=yes)
+    _clone_source_only_deps(entry, catalog, dry_run=dry_run)
+    script = find_install_script(entry, repo_dir)
+    if script is None:
+        # No install.sh anywhere — fall back to deploy.toml-only install
+        # (link steps + systemd enables).  Only counts as success if the
+        # deploy.toml actually defined something to do.
+        deploy = repo_dir / 'deploy.toml'
+        if not deploy.exists():
+            print(f"[err] {entry.name}: no install_script and no deploy.toml in {repo_dir}",
+                  file=sys.stderr)
+            return False
+        ok = True
+    else:
+        ok = run_install_script(entry, repo_dir, dry_run=dry_run, yes=yes)
     # Apply any deploy.toml link steps not covered by install.sh (idempotent).
     link_msgs = apply_deploy_toml_links(repo_dir, dry_run=dry_run)
     if link_msgs:
