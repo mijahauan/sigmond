@@ -30,6 +30,56 @@ Other design discussions in `docs/`:
 - `networking.md` — IGMP-snooping silent-failure mode and the
   igmp-querier mitigation.
 
+## Developer commands
+
+`smd` itself is stdlib-only at runtime, but the test suite and TUI need
+extras. The dev venv lives at `.venv/` (separate from the installed
+`/opt/sigmond/venv`); `scripts/dev-setup.sh` builds it:
+
+```bash
+./scripts/dev-setup.sh        # creates .venv with [tui,dev] extras +
+                              # editable ka9q-python from a sibling checkout.
+                              # Safe to re-run; recreates the venv.
+                              # Uses uv when available, falls back to pip+venv.
+```
+
+### Tests
+
+`pyproject.toml` configures pytest with `testpaths = ["tests"]`. The dev
+venv's pytest is the canonical runner:
+
+```bash
+.venv/bin/pytest                                  # full suite (42 test files)
+.venv/bin/pytest tests/test_lifecycle.py          # one file
+.venv/bin/pytest tests/test_lifecycle.py::test_X  # one test
+.venv/bin/pytest -k harmonize                     # by keyword
+.venv/bin/pytest -x -vv tests/test_catalog.py     # stop on first failure, verbose
+```
+
+Fixtures and shared scaffolding live in `tests/fixtures/` and `tests/conftest.py`.
+
+### Linting & typing
+
+No ruff / black / mypy / pre-commit configured. There is no formal
+formatter or type-checker gate; match the surrounding style and the
+existing stdlib-first convention. Don't introduce one without a
+conversation about scope (the core-must-be-stdlib-only constraint
+already forecloses most options).
+
+### Running `smd` from the dev tree without reinstalling
+
+`bin/smd` is plain Python and works from a checkout:
+
+```bash
+PYTHONPATH=lib ./bin/smd list           # uses your editable source tree
+PYTHONPATH=lib ./bin/smd tui            # TUI also (needs .venv with [tui])
+```
+
+Or use the installed symlink (`/usr/local/bin/smd`); on a sigmond-installed
+host that symlink already points at the repo, so an editable workflow is
+automatic — no `pip install -e` step needed for the core. The dev venv is
+only required for tests and the TUI extras.
+
 ## Core commands (implemented)
 
 ```
