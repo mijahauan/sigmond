@@ -80,8 +80,8 @@ warrant a separate row.
 | `client_config` | `action_show_client_config` | Run a client's first-run wizard / edit its config |
 | `components` | `action_show_components` | Catalog: install status, git ref, version policy per component |
 | `config_show` | `action_show_config` | Read-only coordination + client-config snapshot (`smd config show`) |
-| `cpu_affinity` | `action_show_cpu_affinity` | Hardware topology + affinity plan + observed state |
-| `cpu_freq` | `action_show_cpu_freq` | Per-CPU `scaling_max_freq` view against `[cpu_freq]` policy |
+| `cpu_affinity` | `action_show_cpu_affinity` | Hardware topology + affinity plan + observed state + Apply-plan button |
+| `cpu_freq` | `action_show_cpu_freq` | Per-CPU `scaling_max_freq` view against `[cpu_freq]` policy + Apply-policy button |
 | `diag_net` | `action_show_diag_net` | IGMP classification for multicast safety |
 | `environment` | `action_show_environment` | Declared vs observed peers (mDNS / ka9q / NTP / KiwiSDR / GPSDO) |
 | `fft_wisdom` | `action_show_fft_wisdom` | FFTW wisdom planning (one-time per host, hours on first run) |
@@ -122,8 +122,8 @@ warrant a separate row.
 | Coordination schema migration | `config migrate` | (button on `config_show`) | minor |
 | Coordination refresh | `config refresh` | — | **Gap** — CLI-only |
 | Backup / restore | `config backup / restore` | `backup`, `restore` | — |
-| CPU affinity plan | `diag cpu-affinity [--apply]` | `cpu_affinity` | apply still CLI-only |
-| CPU frequency plan | `diag cpu-freq [--apply]`, `cpu` | `cpu_freq` | apply still CLI-only |
+| CPU affinity plan | `diag cpu-affinity [--apply]` | `cpu_affinity` | apply button on screen (confirm-modal-gated, auto-refresh) |
+| CPU frequency plan | `diag cpu-freq [--apply]`, `cpu` | `cpu_freq` | apply button on screen (confirm-modal-gated, auto-refresh) |
 | Network / IGMP diagnostics | `diag net [--listen]` | `diag_net` | — |
 | FFTW wisdom (plan / status) | `wisdom plan / status` | `fft_wisdom` | one screen serves both verbs |
 | Per-client SDR source selection (radiod / KiwiSDR feeds) | `sources list/add/remove/apply` | `sources` | list + apply paths surfaced; add/remove still CLI-only |
@@ -150,25 +150,20 @@ warrant a separate row.
 
 ### Gap summary
 
-Two real surface gaps where CLI exposes a routine-monitoring or
-maintenance capability with no TUI representation (originally five;
-closed so far: **sources**, **activity watches**, **verifier**
-report+rehabilitate. The verifier screen combines what the
-inventory mapping split between Debugging and Maintenance — they
-share a single operator workflow ("see a dropped spot in report →
-rehabilitate that callsign"), so persona purity gave way to
-workflow cohesion):
+One real surface gap remains. Closed so far (4 of 5):
+**sources**, **activity watches**, **verifier** (report +
+rehabilitate combined for workflow cohesion), and the
+**cpu-affinity / cpu-freq apply** mutations (Apply buttons on the
+existing read screens, gated by confirm modals and auto-refreshing
+on success).
 
 1. **Coordination identity / refresh** — `config identity`,
    `config refresh`. Installation-adjacent (identity is first-run)
    and maintenance-adjacent (refresh after coordination changes).
-2. **CPU affinity / cpu-freq apply** — read views exist, but the
-   `--apply` mutation still requires dropping to the CLI.
 
-These map cleanly to the four-category proposal:
+Maps to the four-category proposal as:
 
 - Gap 1 → **Installation** (identity) + **Maintenance** (refresh)
-- Gap 2 → **Maintenance** (mutation buttons on existing screens)
 
 Closing the gaps is *not* in scope for the reorganization commit
 itself — the reorganization places empty slots where they belong, and

@@ -1,7 +1,8 @@
-"""CPU frequency screen — read-only view of `smd diag cpu-freq`.
+"""CPU frequency screen — view + apply for `smd diag cpu-freq`.
 
 Shows the [cpu_freq] policy from topology.toml and each CPU's current
-scaling_max_freq against it.  Apply lives on the CLI (requires root).
+scaling_max_freq against it.  Apply runs `sudo smd diag cpu-freq
+--apply` via a confirm-modal-gated button (auto-refresh on success).
 
 Motivation sits in the CPU-affinity memory: radiod cores need high
 clock to keep the USB3/FFT path fed; everything else can stay
@@ -11,13 +12,26 @@ power-efficient.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Static
 from textual.worker import Worker, WorkerState
+
+from ..mutation import confirm_and_run
+
+
+def _smd_binary() -> str:
+    argv0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
+        return argv0
+    found = shutil.which('smd')
+    return found or '/usr/local/sbin/smd'
 
 
 @dataclass
@@ -103,13 +117,16 @@ class CPUFreqScreen(Vertical):
     CPUFreqScreen Static {
         margin-bottom: 1;
     }
-    CPUFreqScreen #cf-apply-hint {
+    CPUFreqScreen #cf-controls {
+        height: 3;
+        margin-top: 1;
+    }
+    CPUFreqScreen #cf-controls Button {
+        margin-right: 1;
+    }
+    CPUFreqScreen #cf-last {
         margin-top: 1;
         color: $text-muted;
-    }
-    CPUFreqScreen #cf-refresh {
-        margin-top: 1;
-        width: auto;
     }
     """
 
@@ -121,11 +138,10 @@ class CPUFreqScreen(Vertical):
         table.add_columns("CPU", "Role", "Current MHz", "Target MHz", "Status")
         yield table
         yield Static("", id="cf-mismatch")
-        yield Static(
-            "To apply the policy:\n"
-            "  [cyan bold]sudo smd diag cpu-freq --apply[/]",
-            id="cf-apply-hint")
-        yield Button("Refresh", id="cf-refresh", variant="default")
+        with Horizontal(id="cf-controls"):
+            yield Button("Refresh", id="cf-refresh", variant="default")
+            yield Button("Apply policy", id="cf-apply", variant="warning")
+        yield Static("", id="cf-last", markup=True)
 
     def on_mount(self) -> None:
         self._refresh()
@@ -133,6 +149,31 @@ class CPUFreqScreen(Vertical):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cf-refresh":
             self._refresh()
+        elif event.button.id == "cf-apply":
+            self._run_apply()
+
+    def _run_apply(self) -> None:
+        cmd = [_smd_binary(), 'diag', 'cpu-freq', '--apply']
+        confirm_and_run(
+            self.app,
+            title="Apply CPU frequency policy?",
+            body=("Writes scaling_max_freq for each CPU per the "
+                  "[cpu_freq] policy in topology.toml.  Persistent "
+                  "across reboots via a systemd one-shot. "
+                  "Read-only side effects only — no service restarts."),
+            cmd=cmd, sudo=True,
+            on_complete=self._after_apply,
+        )
+
+    def _after_apply(self, result: subprocess.CompletedProcess) -> None:
+        last = self.query_one("#cf-last", Static)
+        argv = ' '.join(result.args) if result.args else ''
+        if result.returncode == 0:
+            last.update(f"[green]✔ exit 0[/]  {argv}")
+        else:
+            last.update(f"[red]✘ exit {result.returncode}[/]  {argv}")
+        # Refresh so the per-CPU table reflects the new state.
+        self._refresh()
 
     def _refresh(self) -> None:
         self.query_one("#cf-policy", Static).update("[dim]loading\u2026[/]")

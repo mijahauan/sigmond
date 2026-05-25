@@ -1,7 +1,8 @@
 """CPU affinity screen — hardware topology, plan, observed state, contention.
 
-Read-only.  Renders from ``build_affinity_report()``; no mutations.
-Mutation lives on the CLI (``sudo smd diag cpu-affinity --apply``) for now.
+Read view from ``build_affinity_report()``; mutation via an in-TUI
+Apply button that runs ``sudo smd diag cpu-affinity --apply``
+(confirm-modal-gated, auto-refresh on success).
 
 Motivation: help operators see whether radiod's USB3/FFT path is actually
 protected on this host — which CPUs it owns, whether governor/drop-ins
@@ -10,10 +11,24 @@ are in order, and whether any other process is pinned to its cores.
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import sys
 from typing import Optional
 
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Static
+
+from ..mutation import confirm_and_run
+
+
+def _smd_binary() -> str:
+    argv0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
+        return argv0
+    found = shutil.which('smd')
+    return found or '/usr/local/sbin/smd'
 
 
 def _format_cpu_list(cpus) -> str:
@@ -143,9 +158,16 @@ class CPUAffinityScreen(Vertical):
     CPUAffinityScreen Static {
         margin-bottom: 1;
     }
-    CPUAffinityScreen #cpu-rerun {
+    CPUAffinityScreen #cpu-controls {
+        height: 3;
         margin-top: 1;
-        width: auto;
+    }
+    CPUAffinityScreen #cpu-controls Button {
+        margin-right: 1;
+    }
+    CPUAffinityScreen #cpu-last {
+        margin-top: 1;
+        color: $text-muted;
     }
     """
 
@@ -160,7 +182,10 @@ class CPUAffinityScreen(Vertical):
         yield table
         yield Static("", id="cpu-contention")
         yield Static("", id="cpu-warnings")
-        yield Button("Re-run", id="cpu-rerun", variant="default")
+        with Horizontal(id="cpu-controls"):
+            yield Button("Re-run", id="cpu-rerun", variant="default")
+            yield Button("Apply plan", id="cpu-apply", variant="warning")
+        yield Static("", id="cpu-last", markup=True)
 
     def on_mount(self) -> None:
         self._refresh()
@@ -168,6 +193,32 @@ class CPUAffinityScreen(Vertical):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cpu-rerun":
             self._refresh()
+        elif event.button.id == "cpu-apply":
+            self._run_apply()
+
+    def _run_apply(self) -> None:
+        cmd = [_smd_binary(), 'diag', 'cpu-affinity', '--apply']
+        confirm_and_run(
+            self.app,
+            title="Apply CPU affinity plan?",
+            body=("Writes systemd drop-ins pinning each managed unit to "
+                  "its planned CPU set, reloads systemd, and restarts "
+                  "affected units so the new affinity takes effect.  "
+                  "Radiod and other latency-sensitive services may "
+                  "blip during restart."),
+            cmd=cmd, sudo=True,
+            on_complete=self._after_apply,
+        )
+
+    def _after_apply(self, result: subprocess.CompletedProcess) -> None:
+        last = self.query_one("#cpu-last", Static)
+        argv = ' '.join(result.args) if result.args else ''
+        if result.returncode == 0:
+            last.update(f"[green]✔ exit 0[/]  {argv}")
+        else:
+            last.update(f"[red]✘ exit {result.returncode}[/]  {argv}")
+        # Refresh so the observed/contention sections reflect the new state.
+        self._refresh()
 
     def _refresh(self) -> None:
         try:

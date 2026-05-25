@@ -379,14 +379,16 @@ Decisions the migration commit can make without re-opening §3:
   only; `cmd_*` bodies are not touched except where a rename
   forces it (e.g., `cmd_timestd_tune_storage` lives in the same
   function, just reached via `storage tune-timestd`).
-- The remaining capability gaps from §3 of the inventory
-  (identity/refresh in TUI, cpu-affinity/freq `--apply` in TUI).
-  Three of the original five gaps closed in follow-up commits:
-  the `sources` screen (list + apply; add/remove still CLI), the
-  `activity` screen (live tail of `smd watch <target>` for all
-  seven targets via a single screen with a target selector), and
-  the `verifier` screen (report + rehabilitate combined because
-  they share an operator workflow). v2 cleans up the CLI; remaining
+- The remaining capability gap from §3 of the inventory
+  (identity/refresh in TUI). Four of the original five gaps closed
+  in follow-up commits: the `sources` screen (list + apply;
+  add/remove still CLI), the `activity` screen (live tail of `smd
+  watch <target>` for all seven targets via a single screen with a
+  target selector), the `verifier` screen (report + rehabilitate
+  combined because they share an operator workflow), and Apply
+  buttons on the `cpu_affinity` and `cpu_freq` screens (each runs
+  the matching `sudo smd diag cpu-* --apply` via confirm modal,
+  auto-refreshes on success). v2 cleans up the CLI; the remaining
   TUI gap-fill is a separate track.
 - A `pkg` synonym for `component`. Considered, rejected — `component`
   is the term used in catalog.toml, topology.toml, and the existing
