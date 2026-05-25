@@ -671,6 +671,36 @@ class SigmondApp(App):
             "Safe to re-run — the CLI is idempotent.",
         )
 
+    def action_show_instance(self) -> None:
+        from .screens.instance import InstanceScreen
+        center = self.query_one("#center")
+        center.remove_children()
+        center.mount(InstanceScreen())
+
+        self.query_one(ContextPanel).show_help(
+            "Instance",
+            "Per-reporter client instance lifecycle (sigmond's "
+            "MULTI-INSTANCE-ARCHITECTURE.md §3).\n\n"
+            "Each instance is one deployment context of a recorder "
+            "client (psk-recorder, wspr-recorder, hfdl-recorder, "
+            "codar-sounder, mag-recorder) keyed by an operator-"
+            "meaningful reporter ID (e.g. AC0G-B1).\n\n"
+            "Listing: read-only view of /etc/<client>/<reporter-id>.toml "
+            "files across known clients.  Refresh re-walks the catalog.\n\n"
+            "Add: creates per-instance config / env / sources files "
+            "(does NOT enable or start the unit — that's `smd instance "
+            "enable` after editing the config).\n\n"
+            "Remove: deletes per-instance files.  Doesn't touch the "
+            "systemd unit (run `sudo smd instance disable` first if "
+            "the unit is running) or state/log/run dirs (use `--purge` "
+            "from the CLI for that).\n\n"
+            "Migrate: scans for legacy radiod-keyed deployments "
+            "(`<client>@<radiod-id>.service`).  Dry-run lists "
+            "candidates here; the actual interactive migration is "
+            "CLI-only — run `sudo smd instance migrate --yes` in a "
+            "terminal.",
+        )
+
     def action_show_sources(self) -> None:
         from .screens.sources import SourcesScreen
         center = self.query_one("#center")

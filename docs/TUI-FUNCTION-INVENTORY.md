@@ -65,7 +65,7 @@ Notes / leftovers:
 
 ## 2. TUI screen surface (`lib/sigmond/tui/screens/`)
 
-30 screen modules. Each maps to exactly one `action_show_*` in
+31 screen modules. Each maps to exactly one `action_show_*` in
 `lib/sigmond/tui/app.py`. `action_show_update` is a kept-for-back-compat
 alias that re-dispatches to `action_show_components`, so it doesn't
 warrant a separate row.
@@ -87,6 +87,7 @@ warrant a separate row.
 | `fft_wisdom` | `action_show_fft_wisdom` | FFTW wisdom planning (one-time per host, hours on first run) |
 | `gpsdo` | `action_show_gpsdo` | Live GPSDO status from `/run/gpsdo/` |
 | `install` | `action_show_install` | Catalog install picker (single / all-missing) |
+| `instance` | `action_show_instance` | Per-reporter client instance lifecycle — list / add / remove + dry-run scan of legacy radiod-keyed deployments (full migration is CLI-only via `sudo smd instance migrate --yes`) |
 | `ka9q_watch` | `action_show_ka9q_watch` | Compare pinned ka9q-radio commit vs `origin/main` |
 | `kiwisdr` | `action_show_kiwisdr` | Live KiwiSDR status + GPS |
 | `lifecycle` | `action_show_lifecycle` | Start / stop / restart / reload managed units |

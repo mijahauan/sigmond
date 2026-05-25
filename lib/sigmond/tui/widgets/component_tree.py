@@ -74,6 +74,7 @@ class ComponentTree(Tree):
         installation.add_leaf("\u2691 Software versions", data={"screen": "components"})
         installation.add_leaf("\u2795 Install",           data={"screen": "install"})
         installation.add_leaf("\u229e SDR inventory",     data={"screen": "sdr_inventory"})
+        installation.add_leaf("\u25ab Instances",         data={"screen": "instance"})
         installation.add_leaf("\u2a09 FFT Wisdom",        data={"screen": "fft_wisdom"})
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
@@ -125,6 +126,8 @@ class ComponentTree(Tree):
             self.app.action_show_apply()
         elif screen == "sources":
             self.app.action_show_sources()
+        elif screen == "instance":
+            self.app.action_show_instance()
         elif screen == "activity":
             self.app.action_show_activity()
         elif screen == "verifier":

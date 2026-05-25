@@ -423,10 +423,38 @@ when no [instance] block exists; row-construction layers fall back
 to radiod_id (matching the legacy `instance` field semantic).
 Same fix baked into the Phase 5 commits from the start.
 
-**Phase 6 — TUI screen revisits.** Add instance selectors to
-activity / verifier / logs / lifecycle / sources / client_config
-screens per §8. Add the new Instance screen under Installation in
-the nav tree.
+**Phase 6 — TUI screen revisits. PARTIAL (sigmond pending commit, 2026-05-25).**
+Three of the seven §8 deliverables shipped this round:
+
+- **Instance screen (new, under Installation)** — `lib/sigmond/tui/
+  screens/instance.py`.  DataTable listing of per-reporter
+  instances; add (with --dry-run option) + remove + dry-run scan of
+  legacy radiod-keyed deployments.  Full interactive migration
+  stays CLI-only (`sudo smd instance migrate --yes`) — the TUI
+  doesn't have a sensible interactive multi-prompt flow for that.
+- **Activity screen** — added a second-stage instance dropdown.
+  Selecting a per-recorder target (wspr/psk/hfdl/codar) populates
+  the dropdown with configured per-instance reporter IDs PLUS any
+  legacy radiod-keyed instances detected via systemctl.  Meta
+  targets (ka9q / uploads / verifier) show "(no instance
+  dimension)".  Passes `--instance <reporter-id>` to `smd watch
+  <target>` when a specific instance is selected.
+- **Lifecycle screen** — added a per-instance section below the
+  existing component-level view.  Lists every templated recorder
+  unit known to systemctl (active or inactive).  Per-unit
+  start / stop / restart / reload-or-restart buttons that shell
+  directly to `sudo systemctl <verb> <unit>` (bypassing sigmond's
+  component-level lifecycle lock, which doesn't apply to single-
+  unit actions).
+
+**Deferred to Phase 6b** (same `§8` patterns, but lower operator
+priority):
+- Verifier screen — auto-fill `--rx-call` from per-instance config
+- Logs screen — per-instance journal targeting
+- Sources screen — two-stage (client → instance) selector
+- Client config screen — two-stage selector
+
+Inventory updated: `instance` row added in §2, screen count 30 → 31.
 
 **Phase 7 — Spot-schema bump to v0.8 + uploader awareness.** Add
 `reporter_id` to the canonical JSON payload; teach the hs-uploader

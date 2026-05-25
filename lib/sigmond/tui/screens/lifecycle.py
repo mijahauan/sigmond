@@ -18,11 +18,61 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Static
+from textual.widgets import Button, DataTable, Select, Static
 from textual.worker import Worker, WorkerState
 
 from ..mutation import confirm_and_run
 from .overview import _component_status
+
+
+# Sentinel for the "no instance selected" Select value.
+_NO_INSTANCE = "__none__"
+
+
+def _list_templated_units() -> list[tuple[str, str]]:
+    """Walk systemctl-loaded `<client>@<instance>.service` units.
+
+    Returns a list of (unit_label, unit_name) suitable for a Select
+    widget, sorted by client then instance.  Includes both active
+    and inactive units so the operator can start a stopped instance.
+    """
+    out: list[tuple[str, str]] = []
+    try:
+        result = subprocess.run(
+            ["systemctl", "list-units", "--all", "--no-legend",
+             "--no-pager", "--plain", "--type=service"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return out
+    if result.returncode != 0:
+        return out
+    # Templated recorder clients we recognise — mirrors the set in
+    # sigmond.instance._TEMPLATED_RECORDER_CLIENTS.
+    known = ("psk-recorder", "wspr-recorder", "hfdl-recorder",
+             "codar-sounder")
+    rows: list[tuple[str, str, str]] = []
+    for line in (result.stdout or "").splitlines():
+        cols = line.split(None, 4)
+        if len(cols) < 4:
+            continue
+        unit_name = cols[0]
+        active = cols[2]
+        if not unit_name.endswith(".service"):
+            continue
+        base = unit_name[:-len(".service")]
+        if "@" not in base:
+            continue
+        client, _, instance = base.partition("@")
+        if client not in known or not instance:
+            continue
+        rows.append((client, instance, active))
+    rows.sort()
+    for client, instance, active in rows:
+        label = f"{client}@{instance}  [{active}]"
+        unit_name = f"{client}@{instance}.service"
+        out.append((label, unit_name))
+    return out
 
 
 def _smd_binary() -> str:
@@ -141,6 +191,27 @@ class LifecycleScreen(Vertical):
         margin-top: 1;
         width: auto;
     }
+    LifecycleScreen .lc-section {
+        text-style: bold;
+        margin-top: 2;
+        margin-bottom: 1;
+    }
+    LifecycleScreen .lc-body {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    LifecycleScreen #lc-i-row {
+        height: 3;
+        margin-top: 1;
+        margin-bottom: 1;
+    }
+    LifecycleScreen #lc-i-row Button {
+        margin-right: 1;
+    }
+    LifecycleScreen #lc-i-select {
+        width: 60;
+        margin-right: 2;
+    }
     """
 
     def __init__(self, **kwargs) -> None:
@@ -172,6 +243,31 @@ class LifecycleScreen(Vertical):
         yield Static("", id="lc-last")
         yield Button("Refresh", id="lc-refresh", variant="default")
 
+        # ---- Per-instance section --------------------------------------
+        yield Static("Per-instance units", classes="lc-section")
+        yield Static(
+            "Target one specific `<client>@<instance>.service` unit. "
+            "Lists every templated recorder unit known to systemctl "
+            "(active or inactive).  Buttons here shell out to "
+            "`sudo systemctl <verb> <unit>` directly — sigmond's "
+            "lifecycle lock is for cross-component operations, which "
+            "single-unit actions don't need.",
+            classes="lc-body")
+        instance_options = _list_templated_units()
+        if not instance_options:
+            instance_options = [("(no templated units found)", _NO_INSTANCE)]
+        with Horizontal(id="lc-i-row"):
+            yield Select(
+                instance_options,
+                value=instance_options[0][1] if instance_options else _NO_INSTANCE,
+                id="lc-i-select",
+                allow_blank=False,
+            )
+            yield Button("▶ Start",   id="lc-i-start",   variant="success")
+            yield Button("■ Stop",    id="lc-i-stop",    variant="error")
+            yield Button("↺ Restart", id="lc-i-restart", variant="warning")
+            yield Button("⟳ Reload",  id="lc-i-reload",  variant="warning")
+
     def on_mount(self) -> None:
         self._refresh()
 
@@ -196,6 +292,21 @@ class LifecycleScreen(Vertical):
             self._verb_all("restart") if self._target is None else self._verb_one("restart", self._target)
         elif bid == "lc-reload":
             self._verb_all("reload") if self._target is None else self._verb_one("reload", self._target)
+        # Per-instance buttons — shell directly to `sudo systemctl <verb> <unit>`.
+        elif bid in ("lc-i-start", "lc-i-stop", "lc-i-restart", "lc-i-reload"):
+            unit = self.query_one("#lc-i-select", Select).value
+            if unit in (None, Select.BLANK, _NO_INSTANCE):
+                self.query_one("#lc-last", Static).update(
+                    "[red]Per-instance: select a unit first[/]")
+                return
+            verb_map = {
+                "lc-i-start":   "start",
+                "lc-i-stop":    "stop",
+                "lc-i-restart": "restart",
+                "lc-i-reload":  "reload-or-restart",
+            }
+            verb = verb_map[bid]
+            self._verb_one_unit(verb, str(unit))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Click or Enter on a row: select it (or deselect if already selected)."""
@@ -277,6 +388,22 @@ class LifecycleScreen(Vertical):
             title=f"Confirm: {verb} {comp}",
             body=f"Run [bold]sudo smd {verb} --components {comp}[/].\n\nAre you sure?",
             cmd=[smd, verb, '--components', comp], sudo=True,
+            on_complete=self._after_verb,
+        )
+
+    def _verb_one_unit(self, verb: str, unit: str) -> None:
+        """Per-instance action: shell directly to `sudo systemctl <verb> <unit>`.
+
+        Bypasses sigmond's component-level lifecycle plumbing because
+        single-unit actions don't need the cross-component lifecycle
+        lock.  Sigmond's `smd start/stop/restart` still own the
+        "all enabled" and "by component" paths above.
+        """
+        confirm_and_run(
+            self.app,
+            title=f"Confirm: systemctl {verb} {unit}",
+            body=f"Run [bold]sudo systemctl {verb} {unit}[/].\n\nAre you sure?",
+            cmd=['systemctl', verb, unit], sudo=True,
             on_complete=self._after_verb,
         )
 

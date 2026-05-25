@@ -42,6 +42,19 @@ WATCH_TARGETS = [
     ("verifier", "wsprnet upload-then-verify audit (lost / in-flight / delivered)"),
 ]
 
+# Per-recorder targets map to a templated client.  Meta targets
+# (ka9q / uploads / verifier) have no instance dimension.
+_TARGET_TO_CLIENT = {
+    "wspr":  "wspr-recorder",
+    "psk":   "psk-recorder",
+    "hfdl":  "hfdl-recorder",
+    "codar": "codar-sounder",
+}
+
+# Sentinel value for the "no instance filter" choice in the instance
+# dropdown.  Selecting this means we don't pass --instance to smd watch.
+_INSTANCE_ALL = "__all__"
+
 
 class ActivityScreen(Vertical):
     """Live tail of `smd watch <target>` output."""
@@ -70,6 +83,10 @@ class ActivityScreen(Vertical):
         width: 60;
         margin-right: 2;
     }
+    ActivityScreen #ac-instance {
+        width: 30;
+        margin-right: 2;
+    }
     ActivityScreen #ac-output {
         height: 24;
         border: solid $primary-background;
@@ -84,6 +101,39 @@ class ActivityScreen(Vertical):
         super().__init__(**kwargs)
         self._proc: Optional[subprocess.Popen] = None
 
+    @staticmethod
+    def _instance_options_for(target: str) -> list:
+        """Build the (label, value) list for the instance Select widget.
+
+        For per-recorder targets (wspr/psk/hfdl/codar), enumerate
+        configured per-instance reporter IDs and known legacy radiod-
+        keyed names.  For meta targets, return a single disabled-shape
+        sentinel.
+        """
+        client = _TARGET_TO_CLIENT.get(target)
+        if client is None:
+            return [("(no instance dimension)", _INSTANCE_ALL)]
+        options: list = [("(all instances)", _INSTANCE_ALL)]
+        try:
+            from ...instance import (
+                list_instances, detect_migration_candidates,
+            )
+        except Exception:
+            return options
+        # Configured per-instance reporter IDs
+        for i in list_instances(catalog_clients=[client]):
+            options.append((i.reporter_id, i.reporter_id))
+        # Legacy radiod-keyed instances (unmigrated yet) — useful since
+        # smd watch can still target them by name.
+        try:
+            for c in detect_migration_candidates():
+                if c.client == client:
+                    label = f"{c.old_instance} (legacy)"
+                    options.append((label, c.old_instance))
+        except Exception:
+            pass
+        return options
+
     def compose(self):
         yield Static("Activity — live tail by target", classes="ac-title")
         yield Static(
@@ -97,6 +147,15 @@ class ActivityScreen(Vertical):
                  ((t, f"{t}  —  {desc}") for t, desc in WATCH_TARGETS)],
                 value="wspr",
                 id="ac-target",
+                allow_blank=False,
+            )
+            # Per-instance dropdown (sigmond MULTI-INSTANCE-ARCHITECTURE
+            # §3 / §8) — populated on target change.  For meta targets
+            # (ka9q / uploads / verifier) the dropdown is disabled.
+            yield Select(
+                self._instance_options_for("wspr"),
+                value=_INSTANCE_ALL,
+                id="ac-instance",
                 allow_blank=False,
             )
             yield Button("Start", id="ac-start", variant="primary")
@@ -119,6 +178,17 @@ class ActivityScreen(Vertical):
         elif event.button.id == "ac-clear":
             self.query_one("#ac-output", RichLog).clear()
 
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """Repopulate the instance dropdown when the target changes."""
+        if event.select.id != "ac-target":
+            return
+        target = str(event.value) if event.value is not None else ""
+        if not target or target == Select.BLANK:
+            return
+        instance_sel = self.query_one("#ac-instance", Select)
+        instance_sel.set_options(self._instance_options_for(target))
+        instance_sel.value = _INSTANCE_ALL
+
     def _start(self) -> None:
         # Stop any in-flight watch first.  Switching target while one
         # is running implicitly replaces it.
@@ -131,6 +201,12 @@ class ActivityScreen(Vertical):
             return
 
         cmd = [_smd_binary(), 'watch', str(target)]
+        # Per-instance filter (sigmond MULTI-INSTANCE-ARCHITECTURE.md §8).
+        # Only applies to per-recorder targets (meta targets ignore).
+        instance_val = self.query_one("#ac-instance", Select).value
+        if (target in _TARGET_TO_CLIENT
+                and instance_val not in (None, Select.BLANK, _INSTANCE_ALL)):
+            cmd += ['--instance', str(instance_val)]
         log = self.query_one("#ac-output", RichLog)
         log.write(f"$ {' '.join(cmd)}")
         self.query_one("#ac-last", Static).update(
