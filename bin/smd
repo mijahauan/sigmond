@@ -8883,37 +8883,43 @@ def cmd_psk_watch(args) -> int:
     fact 192 = sum of the last ~3 polls (each ~60 spots).
     """
     instance = getattr(args, 'instance', None)
-    log_path = Path(f'/var/log/psk-recorder/{instance}.log') if instance \
-               else None
-    if log_path is None:
-        # Pick the most-recently-modified daemon log if no instance was
-        # specified.  psk-recorder's systemd unit writes stdout/stderr
-        # to /var/log/psk-recorder/<radiod_id>.log via
-        # `StandardOutput=append:`, separately from the per-mode
-        # decode logs (which end in -ft8.log / -ft4.log).
-        candidates = sorted(
-            (p for p in Path('/var/log/psk-recorder').glob('*.log')
-             if not (p.name.endswith('-ft8.log')
-                     or p.name.endswith('-ft4.log'))),
+    log_dir = Path('/var/log/psk-recorder')
+    # psk-recorder's per-mode spot logs are `<radiod_id>-ft8.log` and
+    # `<radiod_id>-ft4.log`, written by the in-process ChTailer.  The
+    # daemon's own stdout goes to the journal (StandardOutput=journal
+    # in the systemd unit), so there is no `<radiod_id>.log` to tail.
+    if instance:
+        ft8_log = log_dir / f'{instance}-ft8.log'
+        ft4_log = log_dir / f'{instance}-ft4.log'
+        if not (ft8_log.exists() or ft4_log.exists()):
+            _err(f'no per-mode log for {instance!r} in {log_dir}.  '
+                 f'Looked for {ft8_log.name}, {ft4_log.name}.')
+            return 1
+    else:
+        # Pick the freshest -ft8.log; derive the matching -ft4.log.
+        ft8_candidates = sorted(
+            log_dir.glob('*-ft8.log'),
             key=lambda p: p.stat().st_mtime if p.exists() else 0,
             reverse=True,
         )
-        if not candidates:
-            _err('no /var/log/psk-recorder/<radiod_id>.log found '
+        if not ft8_candidates:
+            _err('no /var/log/psk-recorder/*-ft8.log found '
                  '— is psk-recorder running?')
             return 1
-        log_path = candidates[0]
+        ft8_log = ft8_candidates[0]
+        # Strip the `-ft8` suffix to get the radiod_id stem; FT4 log
+        # may not exist if no FT4 freqs are configured, which is fine.
+        radiod_id = ft8_log.stem[: -len('-ft8')]
+        ft4_log = log_dir / f'{radiod_id}-ft4.log'
+
+    # `log_path` is used only for the heading display; show the FT8 log
+    # name since it's the canonical per-cycle artifact.
+    log_path = ft8_log
 
     # `recent` is the verbose-mode N: how many per-mode decoded
     # spots to print under each "shipped" line.  0 = terse counts only.
     n_recent = int(getattr(args, 'recent', 0) or 0)
     verbose = bool(getattr(args, 'verbose', False))
-    # Per-mode decoded-spot logs.  These are append-only (not deleted
-    # on PSKReporter ack like the spool's .spots.txt files), so they
-    # always have history we can tail when verbose mode is requested.
-    instance_stem = log_path.stem
-    ft8_log = log_path.with_name(f'{instance_stem}-ft8.log')
-    ft4_log = log_path.with_name(f'{instance_stem}-ft4.log')
 
     # All three modes share the per-FT8-cycle loop.  `-v` shows
     # every spot (cap=None); N shows up to N per mode; no args

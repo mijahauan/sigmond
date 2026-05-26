@@ -21,6 +21,7 @@ v0.5 §5.5 and releases it on exit.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import Callable, Optional
 
@@ -105,7 +106,7 @@ class ConfirmModal(ModalScreen[bool]):
 
 
 class UpdateOutputModal(ModalScreen):
-    """Scrollable live-output modal for long-running commands (e.g. smd list --apply, wd-ctl apply).
+    """Scrollable live-output modal for long-running commands (e.g. smd component update, wd-ctl apply).
 
     Streams stdout+stderr into a scrollable pane.  The Dismiss button is
     disabled until the command exits so the operator can't accidentally
@@ -271,3 +272,83 @@ def _run_plain(app: App, cmd: list) -> subprocess.CompletedProcess:
     with app.suspend():
         result = subprocess.run(cmd, check=False)
     return result
+
+
+def run_with_stdin(
+    app: App,
+    cmd: list,
+    stdin_bytes: bytes,
+    sudo: bool = False,
+) -> subprocess.CompletedProcess:
+    """Run ``cmd`` with ``stdin_bytes`` piped to stdin, capturing stdout/stderr.
+
+    Used by in-TUI editors that drive a CLI's ``config apply --json -``
+    contract.  Unlike :func:`suspend_and_run_sudo`, this does NOT suspend
+    the app on the happy path — the child runs silently with captured
+    streams and the TUI never blanks.
+
+    When ``sudo=True`` the call tries ``sudo -n`` first (works if the
+    operator has NOPASSWD configured for the command).  If that's
+    rejected with the well-known "a password is required" exit, the
+    function falls back to suspending the app and running ``sudo``
+    interactively so the operator can type their password in the
+    real terminal; on resume, stderr is no longer captured (the
+    operator already saw it) and ``result.stderr`` is set to "" for
+    parity with the captured path.
+
+    Returns the :class:`subprocess.CompletedProcess` with bytes for
+    stdout/stderr (decoded to str for the suspended fallback so callers
+    don't have to special-case the two paths).
+    """
+    if not sudo:
+        return subprocess.run(
+            cmd, input=stdin_bytes,
+            capture_output=True, check=False,
+        )
+
+    # Fast path: try sudo -n (no password prompt).
+    fast = subprocess.run(
+        ['sudo', '-n', *cmd], input=stdin_bytes,
+        capture_output=True, check=False,
+    )
+    # sudo prints "a password is required" (or similar) to stderr and
+    # exits 1 when -n can't run without a prompt.  Distinguish that
+    # from a genuine command failure by looking at stderr.
+    needs_password = (
+        fast.returncode != 0
+        and (b'password is required' in fast.stderr
+             or b'a terminal is required' in fast.stderr
+             or b'sudo: a password' in fast.stderr)
+    )
+    if not needs_password:
+        return fast
+
+    # Slow path: suspend so the operator can type a password.  The
+    # child inherits the parent's TTY for stdin (so sudo can prompt),
+    # but we still pipe our JSON payload via a tempfile so the child's
+    # actual stdin reader sees our bytes after sudo finishes authing.
+    #
+    # Implementation: write stdin to a NamedTemporaryFile, then run
+    # `sudo <cmd> < tmpfile`.  Tempfile is removed in finally.
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    try:
+        tmp.write(stdin_bytes)
+        tmp.flush()
+        tmp.close()
+        with app.suspend():
+            with open(tmp.name, 'rb') as fh:
+                result = subprocess.run(
+                    ['sudo', *cmd], stdin=fh, check=False,
+                )
+        # Suspended path didn't capture stdout/stderr; surface empty
+        # bytes so callers can treat the return value uniformly.
+        return subprocess.CompletedProcess(
+            args=result.args, returncode=result.returncode,
+            stdout=b'', stderr=b'',
+        )
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
