@@ -33,15 +33,32 @@ from textual.worker import Worker, WorkerState
 from ...instance import list_instances
 
 
-# Map encoding int → human-friendly name.  Mirrors ka9q-python's
-# Encoding enum so the operator sees "s16be" instead of "4".
+# Map encoding int ↔ human-friendly name.  Authoritative values come
+# from ka9q-python's Encoding enum (S16LE=1, S16BE=2, OPUS=3, F32=4,
+# AX25=5, F32BE=8).  We duplicate the table here because the sigmond
+# TUI runs in its own venv without ka9q-python always importable
+# from worker context.
 _ENCODING_NAMES = {
-    0: "unknown",
     1: "s16le",
     2: "s16be",
-    3: "f32le",
-    4: "s16be",
-    5: "f32",
+    3: "opus",
+    4: "f32",
+    5: "ax25",
+    8: "f32be",
+}
+
+# Reverse lookup: case-insensitive string → numeric.  Used to compare
+# what a client's config declares against the encoding ka9q-python
+# reports on the live channel.
+_ENCODING_INTS = {
+    "s16le": 1,
+    "s16be": 2,
+    "opus":  3,
+    "f32":   4,
+    "f32le": 4,
+    "float": 4,     # wspr-recorder config alias for f32
+    "ax25":  5,
+    "f32be": 8,
 }
 
 
@@ -49,6 +66,12 @@ def _decode_encoding(enc: int | None) -> str:
     if enc is None:
         return "?"
     return _ENCODING_NAMES.get(int(enc), str(enc))
+
+
+def _encoding_to_int(enc: str | None) -> Optional[int]:
+    if not enc:
+        return None
+    return _ENCODING_INTS.get(str(enc).strip().lower())
 
 
 # HFDL band center frequencies (Hz).  Mirrors
@@ -122,13 +145,22 @@ def _client_config_path(client: str, instance: str) -> Optional[Path]:
     return None
 
 
-def _extract_status_and_freqs(client: str, cfg: dict) -> tuple[str, set[int]]:
-    """Return (status_dns, configured_freqs_hz) for the given client.
+def _extract_status_and_freqs(
+    client: str, cfg: dict,
+) -> tuple[str, set[int], Optional[int]]:
+    """Return ``(status_dns, configured_freqs_hz, encoding_int)`` for
+    the given client.
 
     Each client lays out its config differently; the canonical mDNS
     status name and the frequencies it tunes are at different keys.
-    Returns ("", set()) on parse failure so the caller can degrade
-    gracefully (the worker shows the radiod's full channel list).
+    ``encoding_int`` is the ka9q-python Encoding numeric value the
+    client expects on its channels (e.g. 2 for s16be, 4 for f32) —
+    used as an additional filter so stale channels at the same
+    frequency but a no-longer-used encoding don't show up as if they
+    were the live ones.  None means "don't filter by encoding".
+
+    Returns ("", set(), None) on parse failure so the caller can
+    degrade gracefully.
     """
     if client == "psk-recorder":
         blocks = cfg.get("radiod") or []
@@ -136,6 +168,7 @@ def _extract_status_and_freqs(client: str, cfg: dict) -> tuple[str, set[int]]:
             blocks = [blocks]
         status = ""
         freqs: set[int] = set()
+        encoding: Optional[int] = None
         for b in blocks:
             if not status:
                 status = str(b.get("status") or "")
@@ -143,12 +176,17 @@ def _extract_status_and_freqs(client: str, cfg: dict) -> tuple[str, set[int]]:
                 m = b.get(mode) or {}
                 for hz in m.get("freqs_hz", []) or []:
                     freqs.add(int(hz))
-        return status, freqs
+                if encoding is None and m.get("encoding"):
+                    encoding = _encoding_to_int(m["encoding"])
+        # psk-recorder defaults to s16be when not overridden.
+        if encoding is None and freqs:
+            encoding = _ENCODING_INTS["s16be"]
+        return status, freqs, encoding
 
     if client == "wspr-recorder":
         rad = cfg.get("radiod") or {}
         status = str(rad.get("status") or "")
-        freqs: set[int] = set()
+        freqs = set()
         # The wsprdaemon-style config keeps frequencies as a list of
         # strings under [frequencies].bands (each string in plain-Hz
         # / MHz / kHz notation).  The newer [[band]] array-of-tables
@@ -161,7 +199,10 @@ def _extract_status_and_freqs(client: str, cfg: dict) -> tuple[str, set[int]]:
             hz = _parse_wspr_freq(str(band.get("frequency", "")))
             if hz is not None:
                 freqs.add(hz)
-        return status, freqs
+        defaults = cfg.get("channel_defaults") or {}
+        encoding = _encoding_to_int(defaults.get("encoding")) or \
+            _ENCODING_INTS["s16be"]
+        return status, freqs, encoding
 
     if client == "hfdl-recorder":
         blocks = cfg.get("radiod") or []
@@ -177,7 +218,9 @@ def _extract_status_and_freqs(client: str, cfg: dict) -> tuple[str, set[int]]:
                 hz = _HFDL_BAND_CENTERS_HZ.get(name)
                 if hz is not None:
                     freqs.add(hz)
-        return status, freqs
+        # dumphfdl always consumes s16be IQ; hfdl-recorder hardcodes
+        # this and there's no operator-facing override.
+        return status, freqs, _ENCODING_INTS["s16be"]
 
     if client == "codar-sounder":
         blocks = cfg.get("radiod") or []
@@ -185,6 +228,7 @@ def _extract_status_and_freqs(client: str, cfg: dict) -> tuple[str, set[int]]:
             blocks = [blocks]
         status = ""
         freqs = set()
+        encoding = None
         for b in blocks:
             if not status:
                 status = str(b.get("status") or "")
@@ -195,14 +239,31 @@ def _extract_status_and_freqs(client: str, cfg: dict) -> tuple[str, set[int]]:
                         freqs.add(int(hz))
                     except (TypeError, ValueError):
                         pass
-        return status, freqs
+            if encoding is None and b.get("encoding"):
+                encoding = _encoding_to_int(b["encoding"])
+        # codar-sounder's TOML doesn't pin encoding; the daemon
+        # asks radiod for whatever the [[radiod.fragment]] declares,
+        # which on bee1 is f32 today.  Leave None for freq-only
+        # matching when the operator hasn't overridden — easier to
+        # adjust later when a real encoding contract lands than to
+        # hardcode an assumption that quietly drifts.
+        return status, freqs, encoding
 
     if client == "hf-timestd":
         ka9q = cfg.get("ka9q") or {}
         status = str(ka9q.get("status") or "")
         freqs = set()
         recorder = cfg.get("recorder") or {}
+        # Encoding can be set per channel_group, or once on
+        # [recorder.channel_defaults].  Per-group wins when present;
+        # we take the FIRST group's encoding (hosts typically use one
+        # uniform encoding across all groups — and the alternative
+        # would be per-channel encoding tracking, which is a lot more
+        # plumbing for negligible benefit).
+        encoding: Optional[int] = None
         for group in (recorder.get("channel_group") or {}).values():
+            if encoding is None:
+                encoding = _encoding_to_int(group.get("encoding"))
             for ch in (group.get("channels") or []):
                 hz = ch.get("frequency_hz")
                 if hz is not None:
@@ -210,9 +271,13 @@ def _extract_status_and_freqs(client: str, cfg: dict) -> tuple[str, set[int]]:
                         freqs.add(int(hz))
                     except (TypeError, ValueError):
                         pass
-        return status, freqs
+        if encoding is None:
+            encoding = _encoding_to_int(
+                (recorder.get("channel_defaults") or {}).get("encoding")
+            )
+        return status, freqs, encoding
 
-    return "", set()
+    return "", set(), None
 
 
 # ---------------------------------------------------------------------------
@@ -356,11 +421,11 @@ class ReceiverChannelsScreen(Vertical):
                 return result
             result["config_path"] = str(cfg_path)
             cfg = _read_toml(cfg_path)
-            status_dns, configured_freqs = _extract_status_and_freqs(
-                client, cfg,
-            )
+            status_dns, configured_freqs, configured_encoding = \
+                _extract_status_and_freqs(client, cfg)
             result["status_dns"] = status_dns
             result["configured_freqs"] = sorted(configured_freqs)
+            result["configured_encoding"] = configured_encoding
             if not status_dns:
                 result["error"] = (
                     "no radiod status address in config (look for "
@@ -383,10 +448,18 @@ class ReceiverChannelsScreen(Vertical):
                 result["error"] = f"discover_channels: {exc}"
                 return result
 
-            # Build a frequency → list-of-channels map so we can show
-            # the unique-by-mcast group when the same freq has multiple
-            # consumers.
+            # Filter live channels to ones the client actually owns.
+            # Match by frequency AND encoding when the client config
+            # declares an encoding — radiod / ka9q-python derives the
+            # SSRC from (freq, preset, rate, encoding, client_id), so
+            # a former config that used a different encoding leaves
+            # stale channels at the same frequency.  Those zombies
+            # share our multicast destination but aren't what the
+            # client currently consumes; they only age out when their
+            # LIFETIME tag expires (or the operator clears them
+            # manually).  Encoding-aware filtering hides them.
             rows: list[dict] = []
+            stale_at_freq = 0
             for ssrc, ch in channels.items():
                 try:
                     freq_hz = int(round(float(ch.frequency)))
@@ -394,16 +467,23 @@ class ReceiverChannelsScreen(Vertical):
                     continue
                 if configured_freqs and freq_hz not in configured_freqs:
                     continue
+                ch_enc = getattr(ch, "encoding", None)
+                if (configured_encoding is not None
+                        and ch_enc is not None
+                        and int(ch_enc) != configured_encoding):
+                    stale_at_freq += 1
+                    continue
                 rows.append({
                     "ssrc": int(ssrc),
                     "frequency_hz": freq_hz,
                     "preset": getattr(ch, "preset", "?"),
                     "sample_rate": int(getattr(ch, "sample_rate", 0) or 0),
-                    "encoding": getattr(ch, "encoding", None),
+                    "encoding": ch_enc,
                     "snr": getattr(ch, "snr", None),
                     "multicast_address": getattr(ch, "multicast_address", ""),
                     "port": getattr(ch, "port", 0),
                 })
+            result["stale_at_freq"] = stale_at_freq
 
             rows.sort(key=lambda r: (r["frequency_hz"], r["ssrc"]))
             result["rows"] = rows
@@ -443,13 +523,22 @@ class ReceiverChannelsScreen(Vertical):
             key = (r["multicast_address"], r["port"])
             mcast_groups[key] = mcast_groups.get(key, 0) + 1
 
+        enc_int = data.get("configured_encoding")
+        enc_str = (_decode_encoding(enc_int) if enc_int is not None
+                   else "any")
+        stale = data.get("stale_at_freq", 0)
+        stale_note = (f"  •  [yellow]{stale} stale channel(s) at matching "
+                      f"freq with wrong encoding (zombies awaiting LIFETIME "
+                      f"expiry)[/]") if stale else ""
         summary.update(
             f"radiod = [bold]{data.get('status_dns', '?')}[/]  •  "
+            f"encoding = {enc_str}  •  "
             f"config = [dim]{data.get('config_path', '?')}[/]\n"
             f"{len(rows)} matching channel(s) "
             f"({configured_n} configured / "
             f"{data.get('total_channels', 0)} live on radiod)  "
             f"across {len(mcast_groups)} multicast destination(s)"
+            f"{stale_note}"
         )
 
         for r in rows:
