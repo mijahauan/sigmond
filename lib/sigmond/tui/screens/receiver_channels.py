@@ -218,9 +218,10 @@ def _extract_status_and_freqs(
                 hz = _HFDL_BAND_CENTERS_HZ.get(name)
                 if hz is not None:
                     freqs.add(hz)
-        # dumphfdl always consumes s16be IQ; hfdl-recorder hardcodes
-        # this and there's no operator-facing override.
-        return status, freqs, _ENCODING_INTS["s16be"]
+        # dumphfdl consumes complex f32 IQ (--sample-format cf32);
+        # hfdl-recorder hardcodes HFDL_ENCODING = 4 (F32LE) in
+        # core/radiod.py and there's no operator-facing override.
+        return status, freqs, _ENCODING_INTS["f32"]
 
     if client == "codar-sounder":
         blocks = cfg.get("radiod") or []
@@ -241,12 +242,12 @@ def _extract_status_and_freqs(
                         pass
             if encoding is None and b.get("encoding"):
                 encoding = _encoding_to_int(b["encoding"])
-        # codar-sounder's TOML doesn't pin encoding; the daemon
-        # asks radiod for whatever the [[radiod.fragment]] declares,
-        # which on bee1 is f32 today.  Leave None for freq-only
-        # matching when the operator hasn't overridden — easier to
-        # adjust later when a real encoding contract lands than to
-        # hardcode an assumption that quietly drifts.
+        # codar-sounder hardcodes encoding=4 (F32LE) in
+        # codar_sounder/core/stream.py: the dechirper consumes
+        # complex F32 IQ and there's no operator-facing override.
+        # Trust the source-of-truth here, just like hfdl-recorder.
+        if encoding is None:
+            encoding = _ENCODING_INTS["f32"]
         return status, freqs, encoding
 
     if client == "hf-timestd":
