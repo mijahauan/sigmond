@@ -9575,6 +9575,99 @@ def cmd_instance_migrate(args) -> int:
     return 0
 
 
+def cmd_radiod_migrate(args) -> int:
+    """RADIOD-IDENTIFICATION.md §6 Phase 5 — rewrite legacy radiod-id
+    schema in client configs + coordination.toml to use the canonical
+    `status` field (multicast mDNS name).
+
+    Detects:
+      - Per-client config files under /etc/<client>/*.toml containing
+        legacy `id` + `radiod_status`/`status_address`/`status_dns`
+        fields (psk/wspr/hfdl/codar/hf-timestd schema variants).
+      - coordination.toml's `[radiod."<label>"]` block keyed by an
+        arbitrary label rather than the multicast hostname.
+
+    Dry-run by default; `--yes` to apply.  Idempotent — runs that
+    find nothing to change exit 0 without writing.  No services are
+    restarted; operator runs `sudo smd restart <component>` after
+    reviewing the diff.
+    """
+    try:
+        from sigmond.radiod_migrate import (
+            apply_coord_rewrite, detect_candidates,
+            detect_coord_rewrite, rewrite,
+        )
+    except ImportError as exc:
+        _err(f'sigmond.radiod_migrate not importable: {exc}')
+        return 1
+
+    dry_run = not getattr(args, 'yes', False)
+    if not dry_run and _need_root('radiod migrate'):
+        return 1
+
+    candidates = detect_candidates()
+    coord_rewrite = detect_coord_rewrite()
+
+    if not candidates and not coord_rewrite:
+        _ok('no migration candidates found — all configs already use the '
+            '`status` field')
+        return 0
+
+    _heading('radiod migrate' + (' (dry-run)' if dry_run else ''))
+
+    # Client config rewrites
+    for c in candidates:
+        new_body = rewrite(
+            c.config_path.read_text(),
+            c.schema_kind, c.legacy_field, c.current_status,
+        )
+        _info(f'{c.config_path}')
+        _info(f'  client={c.client}  schema={c.schema_kind}  '
+              f'status={c.current_status!r}')
+        _info(f'  legacy field `{c.legacy_field}` → canonical `status`')
+        if c.schema_kind == 'array':
+            _info('  legacy `id` line removed (redundant once `status` '
+                  'is the identifier)')
+        if not dry_run:
+            try:
+                c.config_path.write_text(new_body)
+                _ok(f'  rewrote {c.config_path}')
+            except OSError as exc:
+                _err(f'  write failed: {exc}')
+                return 1
+
+    # Coordination.toml block-key rewrite
+    if coord_rewrite:
+        print()
+        _info(f'{coord_rewrite.coord_path}')
+        _info(f'  [radiod."{coord_rewrite.old_key}"] → '
+              f'[radiod."{coord_rewrite.new_key}"]')
+        _info(f'  `status_dns` field dropped (block key IS the multicast)')
+        _info(f'  [[clients.X]] radiod_id refs updated to new key')
+        if not dry_run:
+            new_body = apply_coord_rewrite(coord_rewrite)
+            try:
+                coord_rewrite.coord_path.write_text(new_body)
+                _ok(f'  rewrote {coord_rewrite.coord_path}')
+            except OSError as exc:
+                _err(f'  write failed: {exc}')
+                return 1
+
+    print()
+    if dry_run:
+        _info('Dry-run.  Re-run with `--yes` to apply the changes above '
+              '(requires root).')
+        _info('After applying, restart affected components to reload '
+              'the new schema:')
+        _info('  sudo smd restart <component>')
+    else:
+        _ok(f'migrated {len(candidates)} client config(s)' +
+            (' + coordination.toml' if coord_rewrite else ''))
+        _info('Restart affected components to pick up the new schema:')
+        _info('  sudo smd restart <component>  (or systemctl restart per unit)')
+    return 0
+
+
 def cmd_config_catalog_prune(args) -> int:
     """Trim /etc/sigmond/catalog.toml so it carries only the entries
     that diverge from the in-repo catalog.
@@ -10162,6 +10255,23 @@ def main() -> int:
         '--yes', action='store_true',
         help='actually perform the migration (requires root); '
              'without this, only the candidate list is printed')
+
+    # smd radiod — RADIOD-IDENTIFICATION.md §6 Phase 5
+    p_radiod = sub.add_parser(
+        'radiod',
+        help='radiod identification / canonical-naming operations '
+             '(see docs/RADIOD-IDENTIFICATION.md)')
+    radiod_sub = p_radiod.add_subparsers(dest='radiod_command')
+
+    p_r_migrate = radiod_sub.add_parser(
+        'migrate',
+        help='rewrite legacy radiod-id schema in client configs + '
+             'coordination.toml to use the canonical `status` field '
+             '(dry-run by default)')
+    p_r_migrate.add_argument(
+        '--yes', action='store_true',
+        help='actually rewrite the files (requires root); '
+             'without this, only the per-file diff is printed')
 
     # start
     # All four lifecycle verbs accept positional component names (systemctl
@@ -11065,6 +11175,15 @@ def main() -> int:
         if ic == 'migrate':
             return cmd_instance_migrate(args)
         p_instance.print_help()
+        return 0
+
+    # `smd radiod <verb>` — radiod-identification canonical naming
+    # (RADIOD-IDENTIFICATION.md §6 Phase 5).
+    if args.command == 'radiod':
+        rc = getattr(args, 'radiod_command', None)
+        if rc == 'migrate':
+            return cmd_radiod_migrate(args)
+        p_radiod.print_help()
         return 0
 
     # `smd component <verb>` — v2 canonical catalog namespace
