@@ -38,10 +38,17 @@ _INSTANCE_ALL = "__all__"
 
 # verifier target → templated recorder client (the spot rows come from
 # its instances).  Used to populate the per-instance dropdown.
+# hf-timestd is a singleton (one PSWS station_id per host), so timestd
+# has no entry here — its instance dropdown stays at "(all instances)".
 _TARGET_TO_CLIENT = {
     "wspr": "wspr-recorder",
     "psk":  "psk-recorder",
 }
+
+# Targets whose CLI accepts the wspr/psk delivery-audit flags
+# (--rx-call, --lost, --in-flight, --delivered, --cadence).  timestd
+# audits a local product DB instead, so those flags don't apply.
+_SPOT_QUEUE_TARGETS = {"wspr", "psk"}
 
 
 class VerifierScreen(Vertical):
@@ -105,10 +112,12 @@ class VerifierScreen(Vertical):
         yield Static("Verifier — wsprnet upload audit + rehabilitate",
                      classes="vf-title")
         yield Static(
-            "Reports the cohort of spots that were uploaded but never "
-            "appeared in wspr.rx (lost / in-flight / delivered breakdown), "
-            "and lets you clear a negative-cache suppression so wsprd/jt9 "
-            "are re-fed a callsign on the next cycle.",
+            "Per-target health reports: wspr/psk audit the local "
+            "forwarding queue (lost / in-flight / delivered, plus "
+            "cadence); timestd audits per-channel cadence in the "
+            "hf-timestd product DB.  The lower section lets you clear "
+            "a wsprnet negative-cache suppression so wsprd/jt9 are "
+            "re-fed a callsign on the next cycle.",
             classes="vf-body")
 
         # ---- Report section ---------------------------------------------
@@ -116,7 +125,7 @@ class VerifierScreen(Vertical):
         with Horizontal(classes="vf-field-row"):
             yield Label("Target")
             yield Select(
-                [("wspr", "wspr"), ("psk", "psk")],
+                [("wspr", "wspr"), ("psk", "psk"), ("timestd", "timestd")],
                 value="wspr", id="vf-target", allow_blank=False,
             )
             yield Label("Instance")
@@ -227,16 +236,20 @@ class VerifierScreen(Vertical):
         cmd = [_smd_binary(), 'verifier', 'report',
                '--target', str(target),
                '--window', window]
-        if rxcall:
-            cmd += ['--rx-call', rxcall]
-        if self.query_one("#vf-lost", Checkbox).value:
-            cmd.append('--lost')
-        if self.query_one("#vf-inflight", Checkbox).value:
-            cmd.append('--in-flight')
-        if self.query_one("#vf-delivered", Checkbox).value:
-            cmd.append('--delivered')
-        if self.query_one("#vf-cadence", Checkbox).value:
-            cmd.append('--cadence')
+        # wspr/psk delivery-audit flags don't apply to the timestd
+        # product-DB audit — silently skip them so passing through a
+        # timestd report doesn't fail argparse.
+        if str(target) in _SPOT_QUEUE_TARGETS:
+            if rxcall:
+                cmd += ['--rx-call', rxcall]
+            if self.query_one("#vf-lost", Checkbox).value:
+                cmd.append('--lost')
+            if self.query_one("#vf-inflight", Checkbox).value:
+                cmd.append('--in-flight')
+            if self.query_one("#vf-delivered", Checkbox).value:
+                cmd.append('--delivered')
+            if self.query_one("#vf-cadence", Checkbox).value:
+                cmd.append('--cadence')
 
         log = self.query_one("#vf-output", RichLog)
         log.clear()
