@@ -6885,6 +6885,7 @@ def _psk_watch_cycle_loop(
     SLOT_SEC = 15.0
     show_spots = max_lines_per_mode != 0
     _heading(f'PSK Reporter per-cycle activity ({log_path.name})')
+    _info('   stage: decoder (decode_ft8) → per-mode log (pre-SQLite, pre-upload)')
     _info(f'   ▸ every {int(SLOT_SEC)} s (FT8 cadence) + {SETTLE:.0f} s settle:')
     if max_lines_per_mode is None:
         _info(f'     ALL FT8 spots from the last {int(SLOT_SEC)} s cycle')
@@ -7151,6 +7152,7 @@ def cmd_verifier_watch(args) -> int:
     )
 
     _heading(f'Upload-verifier activity ({unit_pattern})')
+    _info('   stage: post-upload verification (server-side round-trip check)')
     _info('   ▸ one line per ~5 min verifier pass — confirms our spots')
     _info('     round-tripped through the upload server\'s recent set')
     _info(f'   ▸ replaying last {backlog_min} min of history')
@@ -7346,6 +7348,7 @@ def cmd_uploads_watch(args) -> int:
     ts_re = _re.compile(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}),')
 
     _heading('Upload activity (WSPRnet + PSK Reporter)')
+    _info('   stage: post-batch upload events → external services (WSPRnet, PSK Reporter)')
     _info('   ▸ one line per shipped batch — every ~60 s for WSPR,')
     _info('     every few seconds during a busy FT8 minute for PSK')
     if backlog_min > 0:
@@ -7567,6 +7570,28 @@ def cmd_wspr_watch(args) -> int:
                  'or pass --instance <reporter-id> to scope.') != 0:
         return 1
 
+    # Resolve the reporter_id for the display.  When --instance is
+    # set, the systemd template instance IS the reporter (operator
+    # supplied).  When omitted, peek at active units; if exactly one
+    # is active, use its instance suffix.  More than one → leave
+    # blank (each cycle line still carries rx_source to disambiguate;
+    # mixed-instance mode is rare and not worth resolving per-line).
+    resolved_reporter: Optional[str] = instance
+    if resolved_reporter is None:
+        try:
+            r = subprocess.run(
+                ['systemctl', 'list-units', '--no-legend', '--no-pager',
+                 '--type=service', '--state=active', 'wspr-recorder@*.service'],
+                capture_output=True, text=True, check=False,
+            )
+            active_units = [l.split()[0] for l in r.stdout.splitlines()
+                            if l.strip()]
+            if len(active_units) == 1:
+                unit = active_units[0]
+                resolved_reporter = unit.split('@', 1)[1].rsplit('.', 1)[0]
+        except (FileNotFoundError, IndexError):
+            pass
+
     n_recent = int(getattr(args, 'recent', 0) or 0)
     verbose = bool(getattr(args, 'verbose', False))
     if verbose:
@@ -7625,6 +7650,7 @@ def cmd_wspr_watch(args) -> int:
     ts_re = _re.compile(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}),')
 
     _heading(f'WSPR cycle activity ({unit_pattern})')
+    _info('   stage: decoder (wsprd) → SQLite (wspr.spots) → upload (wsprdaemon.org / wsprnet)')
     _info('   ▸ one line per WSPR cycle, fired by wspr-recorder\'s')
     _info('     CycleBatcher the instant all bands\' spots are committed')
     if cap is None:
@@ -8285,8 +8311,10 @@ def cmd_wspr_watch(args) -> int:
                 # without compressing them.  Shorter names get
                 # trailing spaces so the next column lines up.
                 rx_part = f' rx={short:<16}'
+            reporter_part = (f' reporter={resolved_reporter}'
+                             if resolved_reporter else '')
             cycle_text = (
-                f'[{hms}] cycle UTC {hh}:{mm}{rx_part}  '
+                f'[{hms}] cycle UTC {hh}:{mm}{reporter_part}{rx_part}  '
                 f'{spots_n:>3} spots{noise_part} / {bands_n:>2} bands  '
                 f'(write {write_ms:>3} ms){counts_part}'
             )
@@ -8492,6 +8520,7 @@ def cmd_hfdl_watch(args) -> int:
     WIN_SEC = 15.0
 
     _heading(f'HFDL decoded frames ({instance})')
+    _info('   stage: decoder (dumphfdl) → JSONL spool (pre-SQLite)')
     bands_display = ', '.join(p.stem for p in band_files)
     _info(f'   ▸ {len(band_files)} band file(s): {bands_display}')
     _info(f'   ▸ every {int(WIN_SEC)} s — summary across all bands')
@@ -8805,6 +8834,7 @@ def cmd_codar_watch(args) -> int:
     WIN_SEC = 15.0  # codar-sounder CPI cadence
 
     _heading(f'CODAR ionospheric soundings ({instance})')
+    _info('   stage: decoder (codar-sounder) → JSONL spool (pre-SQLite)')
     _info(f'   ▸ {len(stations)} station(s): {", ".join(stations)}')
     _info(f'   ▸ every {int(WIN_SEC)} s (CPI cadence) — '
           f'per-window rollup')
