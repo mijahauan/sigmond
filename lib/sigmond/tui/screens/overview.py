@@ -403,8 +403,18 @@ class OverviewScreen(Vertical):
                          if u.role == 'radiod' and u.main_pid
                          and not u.drop_in_present)
         pinned = sum(1 for c in r.contention if not c.is_default)
+        # Expected governor is configurable via topology.toml
+        # [cpu_affinity] radiod_governor (default 'performance';
+        # operators with thermal budgets can set 'schedutil').
+        # Mirrors the harmonize.py rule + cmd_status check.
+        try:
+            expected_gov = (data.view.topology.cpu_affinity.get(
+                'radiod_governor', 'performance')
+                if data.view else 'performance')
+        except AttributeError:
+            expected_gov = 'performance'
         bad_gov = [cpu for cpu in r.radiod_cpus
-                   if r.capabilities.governors.get(cpu) not in (None, 'performance')]
+                   if r.capabilities.governors.get(cpu) not in (None, expected_gov)]
 
         warnings: list = []
         if unenforced:
@@ -414,7 +424,7 @@ class OverviewScreen(Vertical):
         if pinned:
             warnings.append(f"{pinned} pinned process(es) overlap")
         if bad_gov:
-            warnings.append(f"governor not 'performance' on cpus {sorted(bad_gov)}")
+            warnings.append(f"governor not {expected_gov!r} on cpus {sorted(bad_gov)}")
 
         if warnings:
             for w in warnings:

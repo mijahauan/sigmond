@@ -22,7 +22,10 @@ class DefaultsTests(unittest.TestCase):
     def test_missing_file_uses_defaults(self):
         with tempfile.TemporaryDirectory() as d:
             t = load_topology(Path(d) / 'absent.toml')
-        self.assertEqual(t.cpu_affinity, {'radiod_cpus': '', 'other_cpus': ''})
+        self.assertEqual(t.cpu_affinity, {
+            'radiod_cpus': '', 'other_cpus': '',
+            'radiod_governor': 'performance',
+        })
         self.assertEqual(t.cpu_freq,
                          {'radiod_max_mhz': 3200, 'other_max_mhz': 1400})
 

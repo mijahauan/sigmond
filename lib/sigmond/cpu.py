@@ -926,12 +926,18 @@ def build_affinity_report(
 
     warnings: list = []
 
+    # Expected governor is configurable via topology.toml
+    # [cpu_affinity] radiod_governor.  Defaults to 'performance' for
+    # max-throughput hosts; operators with thermal budgets can set
+    # 'schedutil' or another governor.
+    expected_gov = (topology_cpu_affinity or {}).get(
+        'radiod_governor', 'performance')
     for cpu in sorted(radiod_cpus_set):
         gov = caps.governors.get(cpu)
-        if gov and gov not in PREFERRED_RADIOD_GOVERNORS:
+        if gov and gov != expected_gov:
             warnings.append(
-                f"governor {gov!r} on radiod cpu{cpu} — expected 'performance' "
-                "for uncontested USB3/FFT throughput"
+                f"governor {gov!r} on radiod cpu{cpu} — expected "
+                f"{expected_gov!r}"
             )
 
     isol = caps.cmdline_isolcpus or caps.isolated_cpus

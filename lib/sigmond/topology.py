@@ -32,8 +32,11 @@ class Component:
 # CPU affinity and frequency defaults.  See CLAUDE.md + the cpu-affinity
 # design memory — empty strings mean 'auto-compute from hardware'.
 _DEFAULT_CPU_AFFINITY = {
-    'radiod_cpus': '',    # e.g. "0-1"
-    'other_cpus':  '',    # e.g. "2-15"
+    'radiod_cpus':     '',             # e.g. "0-1"
+    'other_cpus':      '',             # e.g. "2-15"
+    'radiod_governor': 'performance',  # cpufreq governor on radiod cores;
+                                       # override to e.g. 'schedutil' on
+                                       # thermally-constrained hosts.
 }
 _DEFAULT_CPU_FREQ = {
     'radiod_max_mhz': 3200,
@@ -128,6 +131,8 @@ def load_topology(path: Path = TOPOLOGY_PATH,
         cpu_affinity['radiod_cpus'] = str(ca['radiod_cpus'])
     if 'other_cpus' in ca:
         cpu_affinity['other_cpus'] = str(ca['other_cpus'])
+    if 'radiod_governor' in ca:
+        cpu_affinity['radiod_governor'] = str(ca['radiod_governor'])
 
     cpu_freq = dict(_DEFAULT_CPU_FREQ)
     cf = raw.get('cpu_freq', {})

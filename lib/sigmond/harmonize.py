@@ -323,15 +323,22 @@ def rule_cpu_isolation_runtime(view: SystemView) -> RuleResult:
         issues.append(
             f"radiod running without smd drop-in: {', '.join(unenforced)}")
 
+    # Governor expectation is configurable via topology.toml
+    # [cpu_affinity] radiod_governor.  Default 'performance' for
+    # greenfield (max throughput); operators with thermal budgets
+    # can set 'schedutil' or another governor and the check
+    # respects that without flagging it.
+    expected_gov = view.topology.cpu_affinity.get('radiod_governor',
+                                                  'performance')
     bad_gov = [(cpu, report.capabilities.governors[cpu])
                for cpu in sorted(report.radiod_cpus)
                if report.capabilities.governors.get(cpu)
-               and report.capabilities.governors[cpu] != 'performance']
+               and report.capabilities.governors[cpu] != expected_gov]
     if bad_gov:
         sample = ', '.join(f"cpu{c}={g}" for c, g in bad_gov[:4])
         more = f' (+{len(bad_gov) - 4} more)' if len(bad_gov) > 4 else ''
         issues.append(
-            f"governor not 'performance' on radiod cores: {sample}{more}")
+            f"governor not {expected_gov!r} on radiod cores: {sample}{more}")
 
     if issues:
         return RuleResult("cpu_isolation_runtime", "warn",

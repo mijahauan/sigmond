@@ -3745,9 +3745,15 @@ def cmd_status(args) -> int:
                           if u.role == 'radiod' and u.main_pid
                           and not u.drop_in_present]
             pinned = [c for c in _aff_report.contention if not c.is_default]
+            # Expected governor is configurable (default 'performance'
+            # for greenfield; operators with thermal budgets can set
+            # 'schedutil' or other via topology.toml [cpu_affinity]
+            # radiod_governor).  Mirrors the harmonize.py rule.
+            expected_gov = topology.get('cpu_affinity', {}).get(
+                'radiod_governor', 'performance')
             bad_gov = [cpu for cpu in _aff_report.radiod_cpus
                        if _aff_report.capabilities.governors.get(cpu) not in
-                       (None, 'performance')]
+                       (None, expected_gov)]
             warnings = []
             if unenforced:
                 warnings.append(
@@ -3760,7 +3766,7 @@ def cmd_status(args) -> int:
                     f'{len(pinned)} pinned process(es) overlap radiod cores')
             if bad_gov:
                 warnings.append(
-                    f'governor not \'performance\' on cpus {sorted(bad_gov)}')
+                    f'governor not {expected_gov!r} on cpus {sorted(bad_gov)}')
             if warnings:
                 for w in warnings:
                     _warn(w)
