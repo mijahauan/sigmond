@@ -48,12 +48,12 @@ class ComponentTree(Tree):
         monitoring.add_leaf("\u25d0 GPSDO live",        data={"screen": "gpsdo"})
         monitoring.add_leaf("\u25c9 ka9q-radio live",   data={"screen": "radiod"})
         monitoring.add_leaf("\u25b6 KiwiSDR live",      data={"screen": "kiwisdr"})
-        monitoring.add_leaf("\u2261 Config view",       data={"screen": "config_show"})
 
         maintenance = self.root.add("Maintenance", expand=True)
         maintenance.add_leaf("\u21bb Lifecycle",        data={"screen": "lifecycle"})
         maintenance.add_leaf("\u21c4 Apply",            data={"screen": "apply"})
         maintenance.add_leaf("\u2699 Client config",    data={"screen": "client_config"})
+        maintenance.add_leaf("\u2261 Config view",      data={"screen": "config_show"})
         maintenance.add_leaf("\u2604 Sources",          data={"screen": "sources"})
         maintenance.add_leaf("\u2699 CPU affinity",     data={"screen": "cpu_affinity"})
         maintenance.add_leaf("\u21f5 CPU frequency",    data={"screen": "cpu_freq"})

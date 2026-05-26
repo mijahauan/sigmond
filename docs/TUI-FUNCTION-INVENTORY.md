@@ -194,6 +194,12 @@ Maintenance / Updating         [routine operator actions]
     Lifecycle                  (start / stop / restart / reload)
     Apply                      (reconcile services with config)
     Client config              (edit / re-run wizard)
+    Config view                (read-only coordination + client-config
+                                snapshot; grouped with the other
+                                config screens here — operators reach
+                                for "show me the config" alongside
+                                "edit the config", not from the
+                                live-monitoring surfaces.)
     Sources                    (per-client SDR feed selection
                                 (radiod / KiwiSDR); list + apply
                                 in TUI, add/remove via CLI)
@@ -227,7 +233,6 @@ Routine monitoring             [day-to-day "is it working" surfaces]
     GPSDO live                 (per-device PLL / GPS / antenna)
     ka9q-radio live            (per-radiod channels + SNR)
     KiwiSDR live               (per-KiwiSDR status)
-    Config view                (read-only coordination snapshot)
 ```
 
 ### Screens that span categories — resolved
@@ -241,7 +246,7 @@ Routine monitoring             [day-to-day "is it working" surfaces]
 | `client_config` | **Maintenance** | View is already in `config_show`; this screen is the edit path. |
 | `components` (Software versions) | **Installation** | Confusable with Maintenance (updates), but the primary mental model is "what catalog do I have, at what pins" — close-coupled to fresh install. The `--update / --apply` mutating path is a maintenance use-case; the *list* view is installation. Keep here; follow-up can split if it becomes annoying. |
 | `topology` | **Installation** | Enable/disable is mostly first-time and rarely revisited after a host stabilises. |
-| `config_show` | **Monitoring** | Read-only. The "Migrate" button on it is rare-enough that we don't split. |
+| `config_show` | **Maintenance** | Operators reach for "show me the config" alongside the config-editing screens (Client config, Sources, CPU affinity), not from the live-state monitoring surfaces.  The "Migrate" button on it reinforces that grouping. |
 
 ### Renames
 
