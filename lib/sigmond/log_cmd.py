@@ -44,11 +44,28 @@ def get_inventory_log_paths(client_name: str, timeout: float = 5.0) -> Optional[
 
 
 def flatten_log_paths(obj: dict | str, _result: list[str] | None = None) -> list[str]:
-    """Recursively flatten a nested log_paths dict into a list of file paths."""
+    """Recursively flatten a nested log_paths dict into a list of file paths.
+
+    String values containing shell-glob metacharacters (``*`` ``?``
+    ``[``) are expanded against the filesystem before being added —
+    a client that rotates its log file per day (e.g. mag-recorder's
+    ``samples-YYYY-MM-DD.jsonl``) can list a single glob in its
+    inventory and have callers see every currently-extant file.
+    Globs that match nothing pass through verbatim so the missing-
+    file warning at the call site still fires.
+    """
     if _result is None:
         _result = []
     if isinstance(obj, str):
-        _result.append(obj)
+        if any(c in obj for c in "*?["):
+            import glob as _glob
+            matches = sorted(_glob.glob(obj))
+            if matches:
+                _result.extend(matches)
+            else:
+                _result.append(obj)    # keep so caller can warn
+        else:
+            _result.append(obj)
     elif isinstance(obj, dict):
         for v in obj.values():
             flatten_log_paths(v, _result)
