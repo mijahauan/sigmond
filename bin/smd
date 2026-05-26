@@ -8243,13 +8243,19 @@ def cmd_wspr_watch(args) -> int:
             # they don't dominate the display.
 
             counts_part = ''
+            rows: list = []     # per-spot detail; populated either by
+                                # the legacy-format branch (sqlite
+                                # query is authoritative) or for
+                                # verbose/N mode on top of inline-bands
+                                # counts (best-effort, can race the
+                                # cross-rx dedup deletes).
             if inline_bands_s is not None:
                 # wspr-recorder emitted the per-band breakdown in the
-                # log line itself — use it verbatim.  This bypasses
-                # the sqlite query (and the cross-rx dedup race that
-                # deletes "loser" siblings within ms of insert,
-                # making bee1/bee2's breakdowns disappear before we
-                # could read them in 3-source mode).
+                # log line itself — use it verbatim for counts_part.
+                # This bypasses the sqlite query (and the cross-rx
+                # dedup race that deletes "loser" siblings within ms
+                # of insert, making bee1/bee2's breakdowns disappear
+                # before we could read them in 3-source mode).
                 counts: dict = {}
                 for tok in inline_bands_s.split():
                     if ':' not in tok:
@@ -8261,6 +8267,14 @@ def cmd_wspr_watch(args) -> int:
                         continue
                 if counts:
                     counts_part = '  [' + _format_band_counts(counts) + ']'
+                # For -v / N verbose mode the operator wants per-spot
+                # detail.  Inline-bands gives counts only, so still
+                # query pending_uploads — accept the race risk in
+                # exchange for actually delivering on the `-v` promise.
+                # Missing rows just show fewer spots; counts_part
+                # remains authoritative.
+                if show_spots:
+                    rows = _query_cycle(cycle_iso, rx or '') or []
             else:
                 # Older wspr-recorder log format (no inline breakdown)
                 # — fall back to querying pending_uploads.  Filter by
