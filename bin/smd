@@ -2932,6 +2932,98 @@ def _disable_hftimestd_affinity_watcher() -> bool:
     return disabled_any
 
 
+def _apply_radiod_governor(radiod_cpus, governor='performance') -> int:
+    """Set scaling_governor on radiod CPUs (runtime sysfs + boot-time service).
+
+    Runs as part of `smd diag cpu-affinity --apply`.  Closes the gap
+    between sigmond's CPU-affinity surface (which already manages
+    systemd AllowedCPUs drop-ins) and the cpufreq governor (which
+    `smd validate` checks via `_aff_report.capabilities.governors`).
+
+    - Writes ``performance`` (or the operator's choice) to each
+      radiod CPU's ``scaling_governor`` sysfs node for immediate effect.
+      Skips CPUs without a cpufreq driver and CPUs already at target.
+    - Installs / refreshes ``/etc/systemd/system/smd-cpu-governor.service``,
+      a one-shot that re-applies the governor at every boot so the
+      setting survives reboot.  Enabled with ``--now`` so it's also
+      considered ``active`` post-apply.
+
+    Returns the count of sysfs write errors (0 on success).  No-op
+    when ``radiod_cpus`` is empty.
+    """
+    if not radiod_cpus:
+        return 0
+
+    runtime_errors = 0
+    changed = []
+    for cpu in sorted(radiod_cpus):
+        gov_path = Path(f'/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor')
+        if not gov_path.exists():
+            continue
+        try:
+            current = gov_path.read_text().strip()
+        except OSError:
+            continue
+        if current == governor:
+            continue
+        try:
+            gov_path.write_text(governor)
+            changed.append((cpu, current))
+        except OSError as e:
+            _err(f'cpu{cpu:2d}: governor write failed: {e}')
+            runtime_errors += 1
+
+    for cpu, prev in changed:
+        _ok(f'cpu{cpu:2d}: governor {prev} → {governor}')
+
+    # Boot-time persistence via a one-shot service.  CPU list is
+    # embedded into the unit at apply time; re-run `smd diag
+    # cpu-affinity --apply` after editing topology.toml's
+    # [cpu_affinity] radiod_cpus or radiod_governor.
+    cpu_list = ' '.join(str(c) for c in sorted(radiod_cpus))
+    unit_content = (
+        '# Managed by `smd diag cpu-affinity --apply`.  Sets cpufreq\n'
+        '# scaling_governor on radiod CPUs at boot so the setting\n'
+        '# survives reboot.  Re-run the apply verb after editing\n'
+        '# /etc/sigmond/topology.toml [cpu_affinity] to refresh this\n'
+        '# unit.\n'
+        '\n'
+        '[Unit]\n'
+        'Description=smd radiod-CPU governor (boot-time)\n'
+        'DefaultDependencies=no\n'
+        'After=sysinit.target\n'
+        'Before=multi-user.target\n'
+        '\n'
+        '[Service]\n'
+        'Type=oneshot\n'
+        'RemainAfterExit=yes\n'
+        f"ExecStart=/bin/bash -c 'for cpu in {cpu_list}; do "
+        f"echo {governor} > /sys/devices/system/cpu/cpu$cpu/cpufreq/"
+        "scaling_governor; done'\n"
+        '\n'
+        '[Install]\n'
+        'WantedBy=multi-user.target\n'
+    )
+    unit_path = Path('/etc/systemd/system/smd-cpu-governor.service')
+    existing = unit_path.read_text() if unit_path.exists() else ''
+    if existing != unit_content:
+        try:
+            unit_path.write_text(unit_content)
+        except OSError as e:
+            _err(f'failed to write {unit_path}: {e}')
+            return runtime_errors + 1
+        _run(['systemctl', 'daemon-reload'], sudo=True)
+        _run(['systemctl', 'enable', '--now',
+              'smd-cpu-governor.service'], sudo=True)
+        _ok(f'smd-cpu-governor.service installed + enabled '
+            f'(cpus={cpu_list}, governor={governor})')
+    else:
+        _info(f'smd-cpu-governor.service already up-to-date '
+              f'(cpus={cpu_list}, governor={governor})')
+
+    return runtime_errors
+
+
 def _apply_cpu_affinity_runtime(unit: str, cpus: set) -> bool:
     """Apply CPUAffinity/AllowedCPUs to a running unit without restarting it."""
     cpu_str = _cpu_list_str(cpus)
@@ -3112,6 +3204,20 @@ def cmd_diag_cpu_affinity(args) -> int:
                 else:
                     _info(f'{inst}: not running or set-property unsupported')
         print()
+
+        # cpufreq governor on radiod CPUs (runtime + boot persistence).
+        # Closes the validate warning at smd:3643 which checks
+        # _aff_report.capabilities.governors against 'performance'.
+        print()
+        _info('Setting cpufreq governor on radiod cores ...')
+        radiod_cpus_all = (set().union(*radiod_plan.values())
+                           if radiod_plan else set())
+        cpu_aff_cfg = topology.get('cpu_affinity', {}) or {}
+        governor = cpu_aff_cfg.get('radiod_governor', 'performance')
+        gov_errors = _apply_radiod_governor(radiod_cpus_all, governor)
+        if gov_errors:
+            _err(f'{gov_errors} governor write(s) failed')
+            errors += gov_errors
 
         if errors:
             _err(f'{errors} drop-in(s) failed to write')
