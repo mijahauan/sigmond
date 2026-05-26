@@ -18,7 +18,7 @@ import sys
 from typing import Optional
 
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, RichLog, Select, Static
+from textual.widgets import Button, RichLog, Select, Static, Switch
 from textual.worker import get_current_worker
 
 
@@ -52,6 +52,14 @@ _TARGET_TO_CLIENT = {
     "hfdl":  "hfdl-recorder",
     "codar": "codar-sounder",
 }
+
+# Targets that accept `-v` / `--verbose` (per-cycle or per-window
+# mode showing every spot/frame/sample, no cap).  The meta-target
+# watches (ka9q / uploads / verifier) don't have a verbose mode —
+# their event stream is already the canonical detail.
+_VERBOSE_CAPABLE_TARGETS = frozenset({
+    "wspr", "psk", "hfdl", "codar", "mag",
+})
 
 # Sentinel value for the "no instance filter" choice in the instance
 # dropdown.  Selecting this means we don't pass --instance to smd watch.
@@ -88,6 +96,15 @@ class ActivityScreen(Vertical):
     ActivityScreen #ac-instance {
         width: 30;
         margin-right: 2;
+    }
+    ActivityScreen .ac-verbose-label {
+        margin-left: 2;
+        padding-top: 1;
+        width: 4;
+        color: $text-muted;
+    }
+    ActivityScreen #ac-verbose {
+        margin-right: 1;
     }
     ActivityScreen #ac-output {
         height: 24;
@@ -163,6 +180,13 @@ class ActivityScreen(Vertical):
             yield Button("Start", id="ac-start", variant="primary")
             yield Button("Stop", id="ac-stop", variant="warning", disabled=True)
             yield Button("Clear", id="ac-clear", variant="default")
+            # Verbose toggle — appends `-v` to the spawned `smd
+            # watch <target>` when the target supports it
+            # (wspr / psk / hfdl / codar / mag).  No-op for the
+            # meta-target watches (ka9q / uploads / verifier) whose
+            # event stream is already the canonical detail.
+            yield Static("-v", classes="ac-verbose-label")
+            yield Switch(value=False, id="ac-verbose")
         yield RichLog(id="ac-output", highlight=False, markup=False,
                       max_lines=5000, wrap=False)
         yield Static("[dim]idle — pick a target and press Start[/]",
@@ -209,6 +233,13 @@ class ActivityScreen(Vertical):
         if (target in _TARGET_TO_CLIENT
                 and instance_val not in (None, Select.BLANK, _INSTANCE_ALL)):
             cmd += ['--instance', str(instance_val)]
+        # Verbose toggle — only append for targets that accept `-v`.
+        # The Switch can stay on as the operator changes targets; we
+        # just silently drop the flag when the new target doesn't
+        # support it instead of raising an error or auto-toggling.
+        if (target in _VERBOSE_CAPABLE_TARGETS
+                and self.query_one("#ac-verbose", Switch).value):
+            cmd += ['-v']
         log = self.query_one("#ac-output", RichLog)
         log.write(f"$ {' '.join(cmd)}")
         self.query_one("#ac-last", Static).update(
