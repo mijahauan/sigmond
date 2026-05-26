@@ -54,7 +54,7 @@ cd /opt/git/sigmond/sigmond
 
 `install.sh` creates a `sigmond` system user that owns
 `/opt/git/sigmond/*`, adds you to the `sigmond` group so you can edit
-sources as yourself, sets up `/opt/sigmond/venv`, and symlinks `smd` to
+sources as yourself, sets up `/opt/git/sigmond/sigmond/venv`, and symlinks `smd` to
 `/usr/local/bin/smd`. Open a new shell after install (or
 `newgrp sigmond`) to pick up the group membership.
 
@@ -388,14 +388,14 @@ uv run python bin/smd tui
 ```
 
 `smd tui` imports `sigmond.tui` using the current interpreter first;
-if that fails, it re-execs into the production venv at `/opt/sigmond/venv/`
+if that fails, it re-execs into the production venv at `/opt/git/sigmond/sigmond/venv/`
 (auto-created on a root install). So the dev `.venv` and the installed
-`/opt/sigmond/venv` both work the same way — one declaration, two locations.
+`/opt/git/sigmond/sigmond/venv` both work the same way — one declaration, two locations.
 
 ### Production venv
 
 On a root install (`sudo smd install`), sigmond creates
-`/opt/sigmond/venv/` and `pip install -e '<repo>[tui]'`s itself into it.
+`/opt/git/sigmond/sigmond/venv/` and `pip install -e '<repo>[tui]'`s itself into it.
 Only the TUI subcommand ever enters that venv; all other `smd` verbs stay
 on the system Python.
 

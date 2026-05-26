@@ -34,7 +34,7 @@ Other design discussions in `docs/`:
 
 `smd` itself is stdlib-only at runtime, but the test suite and TUI need
 extras. The dev venv lives at `.venv/` (separate from the installed
-`/opt/sigmond/venv`); `scripts/dev-setup.sh` builds it:
+`/opt/git/sigmond/sigmond/venv`); `scripts/dev-setup.sh` builds it:
 
 ```bash
 ./scripts/dev-setup.sh        # creates .venv with [tui,dev] extras +

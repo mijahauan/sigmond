@@ -26,7 +26,7 @@
 #      /opt/git/sigmond/* as themselves)
 #   8. Writes a default /etc/sigmond/topology.toml (all components off)
 #   9. Copies /etc/sigmond/catalog.toml from the repo
-#  10. Builds /opt/sigmond/venv with sigmond[tui] (Textual + Rich)
+#  10. Builds /opt/git/sigmond/sigmond/venv with sigmond[tui] (Textual + Rich)
 #  11. Symlinks bin/smd into /usr/local/bin/smd (on every user's PATH)
 #
 # After this script completes, run:
@@ -43,7 +43,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CANONICAL_REPO="/opt/git/sigmond/sigmond"
 SMD_BIN="$REPO_DIR/bin/smd"
-VENV_DIR="/opt/sigmond/venv"
+VENV_DIR="/opt/git/sigmond/sigmond/venv"
 # /usr/local/bin (not /usr/local/sbin) so smd is on every user's PATH out of
 # the box.  smd self-elevates per-operation via sudo (see _run sudo=True in
 # bin/smd), so non-root users get read-only verbs for free and a sudo prompt
@@ -393,11 +393,15 @@ info "Creating system directories…"
 $SUDO mkdir -p \
     /etc/sigmond \
     /var/lib/sigmond \
-    /var/log/sigmond \
-    /opt/sigmond
-$SUDO chmod 755 /etc/sigmond /opt/sigmond
+    /var/log/sigmond
+$SUDO chmod 755 /etc/sigmond
 $SUDO chown sigmond:sigmond /var/lib/sigmond /var/log/sigmond
 $SUDO chmod 2770 /var/lib/sigmond /var/log/sigmond
+# Post-consolidation (2026-05-26) the prod venv lives at
+# /opt/git/sigmond/sigmond/venv (inside the repo), so the legacy
+# /opt/sigmond/ tree is no longer needed.  Greenfield installs
+# never create it; existing hosts can `rm -rf /opt/sigmond` after
+# moving the venv into the repo.
 ok "System directories ready"
 
 # ─── catalog.toml ─────────────────────────────────────────────────────────────

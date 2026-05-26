@@ -15,12 +15,12 @@ Run after a `smd instance migrate` (or any TUI vocabulary change) to
 confirm the screens still match what the CLI accepts.
 
 Usage:
-    /opt/sigmond/venv/bin/python scripts/tui_walk.py
+    /opt/git/sigmond/sigmond/venv/bin/python scripts/tui_walk.py
 
 Exit code 0 on full pass, 1 on any failure.
 
 Requires:
-    - `textual` (production venv `/opt/sigmond/venv` has it; the dev
+    - `textual` (production venv `/opt/git/sigmond/sigmond/venv` has it; the dev
       venv `.venv` needs `[tui]` extras via scripts/dev-setup.sh).
     - On a freshly installed host with no migrated instances, content
       checks may report empty option lists — that's a host-state

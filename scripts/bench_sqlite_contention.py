@@ -12,7 +12,7 @@ Gating thresholds (from spec §10 Phase 1):
   - zero SQLITE_BUSY / OperationalError under WAL + 30 s busy_timeout
 
 Run from the sigmond venv:
-    /opt/sigmond/venv/bin/python scripts/bench_sqlite_contention.py
+    /opt/git/sigmond/sigmond/venv/bin/python scripts/bench_sqlite_contention.py
 """
 
 from __future__ import annotations

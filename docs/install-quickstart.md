@@ -55,11 +55,11 @@ Hardware (for an actual SDR install, not just `smd`):
    `sigmond` group so you can edit sources as yourself. Sets
    `setgid` on directories so new files inherit the group.
 6. **System dirs + config.** Creates FHS dirs (`/etc/sigmond`,
-   `/var/lib/sigmond`, `/var/log/sigmond`, `/opt/sigmond`),
+   `/var/lib/sigmond`, `/var/log/sigmond`),
    installs `catalog.toml` and a default disabled-everywhere
    `topology.toml` if not already present.
 7. **uv + venv.** Installs `uv` if missing, then builds
-   `/opt/sigmond/venv` and `pip install -e sigmond[tui]`. uv resolves
+   `/opt/git/sigmond/sigmond/venv` and `pip install -e sigmond[tui]`. uv resolves
    the `ka9q-python` path-based dep via `[tool.uv.sources]`.
 8. **`smd` symlink.** Symlinks `bin/smd` to `/usr/local/bin/smd`
    (on every user's PATH). Removes any legacy `/usr/local/sbin/smd`.
@@ -84,7 +84,7 @@ That's it. After the success banner you have:
 - `/usr/local/bin/smd` on your PATH
 - `/opt/git/sigmond/{sigmond,ka9q-python}` checked out and owned by
   the `sigmond` system user (group-shared with you)
-- `/opt/sigmond/venv` with sigmond + Textual + Rich + ka9q-python
+- `/opt/git/sigmond/sigmond/venv` with sigmond + Textual + Rich + ka9q-python
 - `/etc/sigmond/{catalog,topology}.toml`
 - `/etc/sudoers.d/sigmond-nopasswd` (if your account didn't already
   have passwordless sudo)
@@ -102,7 +102,7 @@ ls -la /opt/git/sigmond/   # both repos owned by sigmond:sigmond
 If `smd` reports import errors, check the venv:
 
 ```bash
-/opt/sigmond/venv/bin/python -c "import sigmond, textual, ka9q_python"
+/opt/git/sigmond/sigmond/venv/bin/python -c "import sigmond, textual, ka9q_python"
 ```
 
 If `smd` says no permission, confirm your group membership took effect:

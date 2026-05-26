@@ -152,11 +152,11 @@ The script will:
 1. Verify sudo access
 2. Confirm git and Python 3.11+ are present (installs them if not)
 3. Create FHS directories: `/etc/sigmond/`, `/var/lib/sigmond/`,
-   `/var/log/sigmond/`, `/opt/sigmond/`
+   `/var/log/sigmond/`
 4. Write `/etc/sigmond/catalog.toml` (component registry)
 5. Write `/etc/sigmond/topology.toml` (all components disabled by default)
 6. Install `uv` (fast Python package manager) to `/usr/local/bin/`
-7. Build `/opt/sigmond/venv` with `sigmond[tui]` (Textual + Rich)
+7. Build `/opt/git/sigmond/sigmond/venv` with `sigmond[tui]` (Textual + Rich)
 8. Install ka9q-python into the venv (editable)
 9. Symlink `bin/smd` → `/usr/local/bin/smd` (and remove any legacy
    `/usr/local/sbin/smd`)
@@ -168,7 +168,7 @@ Expected output ends with:
 ```
 
 > **Bug note (fixed in install.sh):** On a re-run after a failed install,
-> `uv venv` refuses to overwrite the existing `/opt/sigmond/venv` directory.
+> `uv venv` refuses to overwrite the existing `/opt/git/sigmond/sigmond/venv` directory.
 > Fixed by passing `--clear` to `uv venv` (and `--clear` to `python -m venv`
 > in the pip fallback path). The script is now safely re-entrant.
 
@@ -385,8 +385,10 @@ client should still show as installed (the symlinks at
 ├── catalog.toml        — component registry (do not edit)
 └── topology.toml       — which components are enabled (edit this)
 
-/opt/sigmond/
-└── venv/               — Python venv with sigmond[tui] + ka9q-python
+/opt/git/sigmond/sigmond/
+├── venv/               — Python venv with sigmond[tui] + ka9q-python (prod)
+├── .venv/              — Python venv with [tui,dev] extras (dev tooling)
+└── ...                 — source
 
 /usr/local/bin/smd      — symlink to the repo's bin/smd
 /usr/local/bin/uv       — fast Python package manager (installed by install.sh)

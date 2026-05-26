@@ -7,7 +7,7 @@ SIGMOND_LOG         = Path('/var/log/sigmond')
 SIGMOND_STATE       = Path('/var/lib/sigmond')
 SIGMOND_RUN         = Path('/run/sigmond')
 LIFECYCLE_LOCK      = SIGMOND_STATE / 'lifecycle.lock'
-SIGMOND_VENV        = Path('/opt/sigmond/venv')
+SIGMOND_VENV        = Path('/opt/git/sigmond/sigmond/venv')
 
 TOPOLOGY_PATH       = SIGMOND_CONF / 'topology.toml'
 COORDINATION_PATH   = SIGMOND_CONF / 'coordination.toml'
