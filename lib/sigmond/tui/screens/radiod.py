@@ -119,9 +119,20 @@ class RadiodScreen(Vertical):
         margin-top: 1;
         color: $text-muted;
     }
+    RadiodScreen #radiod-main-buttons {
+        height: 3;
+        margin-top: 1;
+        margin-bottom: 1;
+    }
     RadiodScreen #radiod-main-buttons Button,
     RadiodScreen #dd-buttons Button {
         margin-right: 1;
+    }
+    /* Constrain the channels DataTable so the buttons row above
+       stays visible at all terminal sizes once the table is full. */
+    RadiodScreen #radiod-channels {
+        height: 1fr;
+        min-height: 12;
     }
     RadiodScreen .dd-row {
         height: 3;
@@ -183,6 +194,17 @@ class RadiodScreen(Vertical):
                     "Active Channels  [dim](select a row, then 'Deep dive' for the per-SSRC get/set panel)[/]",
                     classes="section-title", markup=True,
                 )
+                # Buttons go ABOVE the channels table so they stay
+                # visible after the table fills with 60+ rows post-
+                # poll.  Putting them after the DataTable pushed
+                # them off-screen as soon as the operator had real
+                # data — exactly when the operator wanted to click
+                # Deep dive.
+                with Horizontal(id="radiod-main-buttons"):
+                    yield Button("Deep dive", id="radiod-deep-dive",
+                                 variant="primary")
+                    yield Button("Refresh", id="radiod-refresh",
+                                 variant="default")
                 channels = DataTable(
                     id="radiod-channels", cursor_type="row",
                     zebra_stripes=True,
@@ -192,11 +214,6 @@ class RadiodScreen(Vertical):
                     "Encoding", "SNR (dB)",
                 )
                 yield channels
-                with Horizontal(id="radiod-main-buttons"):
-                    yield Button("Deep dive", id="radiod-deep-dive",
-                                 variant="primary")
-                    yield Button("Refresh", id="radiod-refresh",
-                                 variant="default")
 
             with Vertical(id="deep-dive-view"):
                 yield Static("Deep dive — (select an SSRC first)",
