@@ -42,6 +42,7 @@ class ComponentTree(Tree):
         self.root.add_leaf("\u25a3 Overview", data={"screen": "overview"})
 
         monitoring = self.root.add("Monitoring", expand=True)
+        monitoring.add_leaf("\u2316 Environment",        data={"screen": "environment"})
         monitoring.add_leaf("\u29b5 Timing & Authority", data={"screen": "timing_authority"})
         monitoring.add_leaf("\u2299 Annotation Quality", data={"screen": "annotation_quality"})
         monitoring.add_leaf("\u26a1 Activity",          data={"screen": "activity"})
@@ -66,7 +67,6 @@ class ComponentTree(Tree):
         debugging.add_leaf("\u2261 Logs",               data={"screen": "logs"})
         debugging.add_leaf("\u2697 Verifier",           data={"screen": "verifier"})
         debugging.add_leaf("\u2714 Validate",           data={"screen": "validate"})
-        debugging.add_leaf("\u2316 Environment",        data={"screen": "environment"})
         debugging.add_leaf("\u2726 Diag: net",          data={"screen": "diag_net"})
         debugging.add_leaf("\u25ce ka9q-watch",         data={"screen": "ka9q_watch"})
 

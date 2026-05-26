@@ -212,12 +212,15 @@ Debugging                      [diagnose + watch when something looks wrong]
     Logs                       (journal / log_paths follow)
     Verifier                   (wsprnet upload audit + rehabilitate)
     Validate                   (cross-client harmonization rules)
-    Environment                (declared vs observed peers)
     Diag: net                  (IGMP + multicast)
     ka9q-watch                 (pin vs upstream compat)
 
 Routine monitoring             [day-to-day "is it working" surfaces]
     Overview                   (landing)
+    Environment                (declared vs observed peers — the "what's
+                                actually here?" snapshot the operator
+                                wants AT THE TOP of Monitoring, before
+                                drilling into any one peer's live view)
     Timing & Authority         (combined: authority substrate view on
                                 top + chrony facade view below — the
                                 natural reading order for "is timing
