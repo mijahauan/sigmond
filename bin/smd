@@ -9310,6 +9310,272 @@ def cmd_psk_watch(args) -> int:
     return 0
 
 
+def cmd_mag_watch(args) -> int:
+    """Live tail of mag-recorder's RM3100 magnetometer activity.
+
+    Three observable rhythms, all surfaced in one stream:
+
+      * Sample tick — ~1 Hz JSONL appended to
+        ``/var/lib/mag-recorder/samples-<UTC-date>.jsonl``.
+        Default: 10 s rollup (sample count + rate + last
+        temperature + per-axis range).  ``-v`` shows every sample.
+      * Daily packager event — once per UTC midnight.  Matches
+        ``packager: samples-DATE.jsonl -> OBS<DATE>T00:00.zip (N
+        samples)`` in /var/log/mag-recorder/upload.log.
+      * Daily PSWS upload event — after packaging.  Matches
+        ``PswsMagnetometerSftp: uploaded OBS<DATE>T00:00.zip ->
+        S<station>@<host>`` in /var/log/mag-recorder/upload.log.
+
+    Unlike the radio-recorder watches, mag has no per-instance
+    template — it's a singleton like hf-timestd.  No --instance
+    arg.
+    """
+    if _watch_preflight(
+            'mag-watch', 'mag-recorder.service',
+            hint='Start the daemon with `smd start mag-recorder`.') != 0:
+        return 1
+
+    n_recent = int(getattr(args, 'recent', 0) or 0)
+    verbose = bool(getattr(args, 'verbose', False))
+    show_samples = (verbose or n_recent > 0)
+    cap = None if verbose else (n_recent if n_recent > 0 else 0)
+    backlog_min = max(0, int(getattr(args, 'backlog', 0) or 0))
+
+    import datetime as _dt
+    import json as _json
+    import math as _math
+    import time as _time
+
+    WIN_SEC = 10.0
+    spool_dir = Path('/var/lib/mag-recorder')
+    upload_log = Path('/var/log/mag-recorder/upload.log')
+
+    _heading('Magnetometer activity (mag-recorder)')
+    _info('   stage: 1 Hz RM3100 USB magnetometer → JSONL samples → '
+          'daily PSWS SFTP')
+    _info(f'   ▸ every {int(WIN_SEC)} s — sample-rate + range rollup')
+    if verbose:
+        _info('     + every sample, verbatim')
+    elif cap:
+        _info(f'     + first {cap} sample(s) per window')
+    _info('   ▸ packager / PSWS upload events surfaced as they fire')
+    if backlog_min > 0:
+        _info(f'   ▸ replaying last {backlog_min} min of '
+              'packager/upload events from upload.log')
+    _info('   Ctrl-C to exit.')
+    print(flush=True)
+
+    sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+
+    def _file_size(p: Path) -> int:
+        try:
+            return p.stat().st_size
+        except (FileNotFoundError, PermissionError):
+            try:
+                r = subprocess.run(
+                    [*sudo_prefix, 'stat', '-c', '%s', str(p)],
+                    capture_output=True, text=True, check=False,
+                )
+                return int(r.stdout.strip()) if r.returncode == 0 else 0
+            except (FileNotFoundError, ValueError):
+                return 0
+
+    def _read_since(p: Path, start: int) -> tuple[int, str]:
+        end = _file_size(p)
+        if end <= start:
+            return start, ''
+        try:
+            r = subprocess.run(
+                [*sudo_prefix, 'tail', '-c', f'+{start + 1}', str(p)],
+                capture_output=True, text=True, check=False,
+            )
+            text = r.stdout
+        except FileNotFoundError:
+            return start, ''
+        return start + len(text.encode()), text
+
+    def _samples_path() -> Path:
+        return spool_dir / f"samples-{_dt.datetime.now(_dt.timezone.utc).strftime('%Y-%m-%d')}.jsonl"
+
+    # Prime cursors at current EOF — default to live mode.  Upload
+    # log can be replayed with --backlog MIN since each line carries
+    # a timestamp; samples-*.jsonl is too noisy to replay.
+    samples_path = _samples_path()
+    sample_pos = _file_size(samples_path)
+    if upload_log.exists() and backlog_min > 0:
+        # Walk back from EOF to find the first line whose timestamp
+        # is older than backlog_min.  Cheaper than reading the whole
+        # file when upload.log has grown.
+        try:
+            cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(
+                minutes=backlog_min)
+            text = upload_log.read_text(errors='replace')
+            lines = text.splitlines()
+            keep_from_byte = len(text.encode())
+            running = 0
+            for line in lines:
+                running += len(line.encode()) + 1
+            # Coarse: just rewind to start, let the loop emit
+            # whatever's in the backlog window.  Upload events
+            # are rare (once per day), so this is cheap enough.
+            upload_pos = 0
+        except OSError:
+            upload_pos = _file_size(upload_log)
+    else:
+        upload_pos = _file_size(upload_log) if upload_log.exists() else 0
+
+    # Per-window accumulators
+    win_samples: list[dict] = []
+
+    import re as _re
+    _PACKAGER_RE = _re.compile(
+        r'packager:\s+(?P<src>samples-\S+\.jsonl)\s+->\s+'
+        r'(?P<dst>OBS\S+\.zip)\s+\((?P<n>\d+)\s+samples\)'
+    )
+    _UPLOAD_RE = _re.compile(
+        r'PswsMagnetometerSftp:\s+uploaded\s+(?P<zip>OBS\S+\.zip)\s+->\s+'
+        r'(?P<dest>\S+)(?:\s+\(trigger=(?P<trigger>[^)]+)\))?'
+    )
+    _ISO_TS_RE = _re.compile(r'\b(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})')
+
+    def _emit_window() -> None:
+        if not win_samples:
+            now_str = _dt.datetime.now().strftime('%H:%M:%S')
+            print(f'[{now_str}] win {int(WIN_SEC)}s  samples=  0 (0.0/s)  '
+                  f'[red]— no samples; is /dev/ttyMAG0 present?[/]'
+                  .replace('[red]', '').replace('[/]', ''),
+                  flush=True)
+            return
+        n = len(win_samples)
+        rate = n / WIN_SEC
+        last = win_samples[-1]
+        rt = last.get('rt')
+        rt_str = f'{rt:5.2f}°C' if isinstance(rt, (int, float)) else '?'
+        # |B| from the last sample (instantaneous; counts).
+        try:
+            x, y, z = float(last['x']), float(last['y']), float(last['z'])
+            B = _math.sqrt(x*x + y*y + z*z)
+            b_str = f'|B|={B:>8.0f}'
+        except (KeyError, TypeError, ValueError):
+            b_str = '|B|=?'
+        # Per-axis range within the window (peak-to-peak).
+        def _ax_range(key: str) -> str:
+            vals = [float(s.get(key, 0)) for s in win_samples
+                    if isinstance(s.get(key), (int, float))]
+            if not vals:
+                return '±?'
+            r = max(vals) - min(vals)
+            return f'±{r/2:>6.0f}'
+        rid = last.get('reporter_id')
+        rid_part = f'  reporter={rid}' if rid else ''
+        now_str = _dt.datetime.now().strftime('%H:%M:%S')
+        print(
+            f'[{now_str}] win {int(WIN_SEC)}s  samples={n:>3d} '
+            f'({rate:.1f}/s)  rt={rt_str}  {b_str}  '
+            f'ΔX={_ax_range("x")}  ΔY={_ax_range("y")}  '
+            f'ΔZ={_ax_range("z")}'
+            f'{rid_part}',
+            flush=True,
+        )
+        if show_samples:
+            to_show = win_samples if cap is None else win_samples[:cap]
+            for s in to_show:
+                ts = str(s.get('ts', '')).split('T')[-1].rstrip('Z')[:8] or '--:--:--'
+                try:
+                    print(
+                        f'         {ts}  rt={float(s.get("rt", 0)):5.2f}  '
+                        f'x={float(s.get("x", 0)):>10.2f}  '
+                        f'y={float(s.get("y", 0)):>10.2f}  '
+                        f'z={float(s.get("z", 0)):>10.2f}',
+                        flush=True,
+                    )
+                except (TypeError, ValueError):
+                    print(f'         {ts}  (malformed)', flush=True)
+            if cap is not None and len(win_samples) > len(to_show):
+                print(f'         … ({len(win_samples) - len(to_show)} more)',
+                      flush=True)
+
+    def _emit_event_lines(text: str) -> None:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            ts_match = _ISO_TS_RE.search(line)
+            hms = (ts_match.group(2) if ts_match
+                   else _dt.datetime.now().strftime('%H:%M:%S'))
+            m = _PACKAGER_RE.search(line)
+            if m:
+                print(
+                    f'[{hms}] PACKAGER  {m.group("src")} → '
+                    f'{m.group("dst")}  ({m.group("n")} samples)',
+                    flush=True,
+                )
+                continue
+            m = _UPLOAD_RE.search(line)
+            if m:
+                trig = m.group('trigger') or ''
+                trig_part = f'  trigger={trig}' if trig else ''
+                print(
+                    f'[{hms}] UPLOAD    {m.group("zip")} → '
+                    f'{m.group("dest")}{trig_part}',
+                    flush=True,
+                )
+
+    # Main loop
+    try:
+        next_fire = _time.monotonic() + WIN_SEC
+        while True:
+            # Re-derive sample file every iteration to handle UTC
+            # midnight rollover without losing the cursor.
+            cur_samples_path = _samples_path()
+            if cur_samples_path != samples_path:
+                samples_path = cur_samples_path
+                sample_pos = 0   # new file from byte 0
+
+            # Drain the sample file into the accumulator
+            new_end, chunk = _read_since(samples_path, sample_pos)
+            sample_pos = new_end
+            for line in chunk.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    win_samples.append(_json.loads(line))
+                except _json.JSONDecodeError:
+                    continue
+
+            # Drain upload.log for packager + upload events
+            if upload_log.exists():
+                new_end, chunk = _read_since(upload_log, upload_pos)
+                upload_pos = new_end
+                _emit_event_lines(chunk)
+
+            # Sleep until the next window boundary
+            now = _time.monotonic()
+            if now >= next_fire:
+                _emit_window()
+                win_samples = []
+                next_fire = max(now + WIN_SEC, next_fire + WIN_SEC)
+            else:
+                _time.sleep(min(0.5, next_fire - now))
+    except KeyboardInterrupt:
+        return 130
+
+
+def _add_mag_watch_args(p) -> None:
+    """Argument spec shared by `smd mag-watch` and `smd watch mag`."""
+    p.add_argument('recent', nargs='?', type=int, default=0, metavar='N',
+                   help='per-10s-window mode: print up to N samples per '
+                        'window (default 0 = rollup only; -v = print all)')
+    p.add_argument('-v', '--verbose', action='store_true',
+                   help='per-window mode showing every sample — '
+                        'same cadence as N, no cap')
+    p.add_argument('--backlog', type=int, default=0, metavar='MIN',
+                   help='replay packager/upload events from the last MIN '
+                        'minutes (default: live only; sample stream is '
+                        'always live-only — too noisy to replay)')
+
+
 def cmd_completion(args) -> int:
     sub = getattr(args, 'completion_command', None)
     if sub == 'bash':
@@ -10981,6 +11247,13 @@ def main() -> int:
                                   '(alias: smd watch codar)')
     _add_codar_watch_args(p_codar)
 
+    # mag-watch — live tail of mag-recorder sample/packager/upload activity
+    p_mag = sub.add_parser('mag-watch',
+                           help='live tail of RM3100 magnetometer sample '
+                                'activity + daily packager/PSWS-upload events '
+                                '(alias: smd watch mag)')
+    _add_mag_watch_args(p_mag)
+
     # ka9q-watch — alert on upstream ka9q-radio changes that could break clients
     p = sub.add_parser('ka9q-watch',
                        help='check ka9q-radio upstream for changes that could '
@@ -10997,7 +11270,7 @@ def main() -> int:
     # identical — only the invocation is different.
     p_watch = sub.add_parser('watch',
                              help='unified live-tail interface '
-                                  '(smd watch wspr | psk | hfdl | codar | ka9q | uploads | verifier)')
+                                  '(smd watch wspr | psk | hfdl | codar | mag | ka9q | uploads | verifier)')
     watch_sub = p_watch.add_subparsers(dest='watch_target')
 
     p_w_wspr = watch_sub.add_parser(
@@ -11027,6 +11300,13 @@ def main() -> int:
              '(per-station peak counts + layer + SNR rollup)',
     )
     _add_codar_watch_args(p_w_codar)
+
+    p_w_mag = watch_sub.add_parser(
+        'mag',
+        help='live tail of mag-recorder RM3100 magnetometer activity '
+             '(per-10s rollup + daily packager/PSWS upload events)',
+    )
+    _add_mag_watch_args(p_w_mag)
 
     p_w_ka9q = watch_sub.add_parser(
         'ka9q',
@@ -11248,6 +11528,10 @@ def main() -> int:
         _deprecated('codar-watch', 'watch codar')
         return cmd_codar_watch(args)
 
+    if args.command == 'mag-watch':
+        _deprecated('mag-watch', 'watch mag')
+        return cmd_mag_watch(args)
+
     if args.command == 'watch':
         target = getattr(args, 'watch_target', None)
         if target == 'wspr':
@@ -11258,6 +11542,8 @@ def main() -> int:
             return cmd_hfdl_watch(args)
         if target == 'codar':
             return cmd_codar_watch(args)
+        if target == 'mag':
+            return cmd_mag_watch(args)
         if target == 'ka9q':
             if not _HAS_SIGMOND_LIB:
                 print('smd: sigmond library not found; install '

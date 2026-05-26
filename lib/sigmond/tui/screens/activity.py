@@ -37,13 +37,15 @@ WATCH_TARGETS = [
     ("psk",      "PSK Reporter ft8/ft4 cycles + flushes"),
     ("hfdl",     "HFDL per-band frame counts + GS/aircraft"),
     ("codar",    "CODAR per-station soundings + SNR rollup"),
+    ("mag",      "RM3100 magnetometer sample rollup + daily PSWS upload"),
     ("ka9q",     "ka9q-radio upstream drift check"),
     ("uploads",  "All upload activity (WSPRnet + wsprdaemon.org + PSK Reporter)"),
     ("verifier", "wsprnet upload-then-verify audit (lost / in-flight / delivered)"),
 ]
 
 # Per-recorder targets map to a templated client.  Meta targets
-# (ka9q / uploads / verifier) have no instance dimension.
+# (ka9q / uploads / verifier) have no instance dimension.  mag is
+# the singleton non-radiod client — no instance dropdown either.
 _TARGET_TO_CLIENT = {
     "wspr":  "wspr-recorder",
     "psk":   "psk-recorder",
