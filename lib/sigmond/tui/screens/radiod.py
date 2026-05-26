@@ -1,33 +1,34 @@
-"""Radiod status screen — coordinator view + per-SSRC get/set deep dive.
+"""Radiod status screen — three-stage drill-down (LAN → radiod → SSRC).
 
-Two views, one screen:
+Stage 1 — LAN-wide radiod discovery
+  On mount, calls ``ka9q.discovery.discover_radiod_services()`` to
+  enumerate every radiod publishing on the LAN.  The top-of-screen
+  Select widget lists them as ``"<name>  ({hostname})"``; the
+  initial pick is whatever the caller passed in (the "default"
+  radiod from coordination.toml) or the first discovered entry.
+  "Refresh radiods" re-runs discovery without remounting.
 
-  Main view
-    Frontend table (rx888 / sdrplay state surfaced via the FIRST
-    channel's poll_status — ka9q-python publishes frontend metadata
-    inside every channel's status payload).  Today's keys: rf_agc /
-    rf_atten / rf_gain / if_power / fe_low_edge / fe_high_edge /
-    calibrate / ad_over / samples_since_over / input_samprate /
-    description.  Older keys (reference / lock / mixer_gain /
-    if_gain / lna_gain) were dropped: ka9q-python no longer
-    populates them on most front-ends.
+Stage 2 — main view (channels list)
+  Once a radiod is selected, queries it via
+  ``discover_channels(status, 10s)`` and ``RadiodControl.poll_status``
+  to render the Frontend table and the Active Channels list.
+  Frontend keys are the live ka9q-python ones (rf_gain / rf_atten /
+  if_power / fe edges / calibrate / ad_over / samples_since_over /
+  input_samprate / description); older dead keys (reference / lock /
+  mixer_gain / if_gain / lna_gain) were dropped.
 
-  Deep dive (per-SSRC)
-    Triggered by selecting a channel row in the main view and
-    clicking "Deep dive".  Opens an in-screen get/set panel for that
-    one SSRC: full poll_status read-out + editable Apply controls
-    for the common write surfaces (tuning, filter, gain/AGC,
-    squelch, output, lifetime, description).  Pre-fix this button
-    shelled out to `ka9q tui` in a subprocess; the in-screen panel
-    keeps sigmond's TUI alive and lets the operator move between
-    SSRCs without restarting the deep-dive tool.
+Stage 3 — deep dive (per-SSRC)
+  Select a channel row + "Deep dive" → in-screen get/set panel for
+  that one SSRC: full poll_status read-out + editable Apply
+  controls for tuning, filter, gain/AGC, squelch, output, lifetime,
+  description.  Each Apply only fires the setters whose value
+  actually changed against the baseline poll_status snapshot.
+  Double-click a row → external ``ka9q tui --ssrc <N>`` shortcut.
 
-Read paths use ``ka9q-python``'s public API (`discover_channels`,
-`RadiodControl.poll_status`) verified against the live state on
-bee1.  Write paths use the matching ``set_*`` methods on
-``RadiodControl``; each Apply button only fires the setters whose
-field actually changed, so a click doesn't re-issue the entire
-category to radiod.
+Read paths use ``ka9q-python``'s public API
+(``discover_radiod_services`` / ``discover_channels`` /
+``RadiodControl.poll_status``).  Write paths use the matching
+``set_*`` methods on ``RadiodControl``.
 """
 
 from __future__ import annotations
@@ -140,6 +141,17 @@ class RadiodScreen(Vertical):
         margin-top: 1;
         color: $text-muted;
     }
+    RadiodScreen #radiod-selector-row {
+        height: 3;
+        margin-bottom: 1;
+    }
+    RadiodScreen #radiod-selector {
+        width: 60;
+        margin-right: 2;
+    }
+    RadiodScreen #radiod-addr {
+        color: $text-muted;
+    }
     RadiodScreen #radiod-main-buttons {
         height: 3;
         margin-top: 1;
@@ -178,10 +190,23 @@ class RadiodScreen(Vertical):
     }
     """
 
-    def __init__(self, radiod_id: str, status_dns: str, **kwargs) -> None:
+    def __init__(self, radiod_id: str = "", status_dns: str = "",
+                 **kwargs) -> None:
         super().__init__(**kwargs)
+        # Caller-supplied "preferred" radiod (typically from
+        # coordination.toml) — used as the initial Select value if it
+        # appears in LAN discovery.  Empty string = "pick the first
+        # discovered radiod".
+        self._initial_radiod_id = radiod_id
+        self._initial_status_dns = status_dns
+        # Currently-selected radiod — populated by Stage 1 discovery
+        # (or pre-seeded from the constructor args before the first
+        # Stage 2 query fires).
         self._radiod_id = radiod_id
         self._status_dns = status_dns
+        # Cached `discover_radiod_services()` result so the Select
+        # widget can map ``hostname → friendly name`` after a pick.
+        self._discovered: list[dict] = []
         # Current deep-dive SSRC (None when in main view).
         self._dd_ssrc: Optional[int] = None
         # Last poll_status payload for the current deep-dive SSRC,
@@ -199,11 +224,19 @@ class RadiodScreen(Vertical):
     # ------------------------------------------------------------------
 
     def compose(self):
-        yield Static(f"radiod: {self._radiod_id}", classes="section-title")
-        yield Static(
-            f"status address: {self._status_dns or '(not configured)'}",
-            id="radiod-addr",
-        )
+        # Stage 1 — radiod selector, populated by LAN-wide mDNS
+        # discovery on mount.  Stays visible at the top of the
+        # screen across stage transitions so the operator can pivot
+        # between radiods without backing out of the deep dive.
+        yield Static("Radiods on the LAN", classes="section-title")
+        with Horizontal(id="radiod-selector-row"):
+            yield Select(
+                [("(discovering…)", "")], value="",
+                id="radiod-selector", allow_blank=False,
+            )
+            yield Button("Refresh radiods", id="radiod-rediscover",
+                         variant="default")
+        yield Static("", id="radiod-addr")
 
         # Main view (channels list) and deep-dive view (per-SSRC
         # get/set) share the screen via a ContentSwitcher.  Both
@@ -307,7 +340,14 @@ class RadiodScreen(Vertical):
     # ------------------------------------------------------------------
 
     def on_mount(self) -> None:
-        self._poll_radiod()
+        # Stage 1 — LAN-wide radiod discovery first.  Once it returns
+        # we either auto-select the caller-supplied radiod (if it
+        # shows up in discovery) or the first entry, then fire the
+        # Stage 2 channels poll for that radiod.
+        self.query_one("#radiod-status", Static).update(
+            "[dim]Discovering radiods on the LAN…[/]")
+        self.run_worker(self._fetch_radiods, thread=True,
+                        group="rd-discover")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
@@ -315,6 +355,11 @@ class RadiodScreen(Vertical):
             self._enter_deep_dive()
         elif bid == "radiod-refresh":
             self._poll_radiod()
+        elif bid == "radiod-rediscover":
+            self.query_one("#radiod-status", Static).update(
+                "[dim]Re-discovering radiods…[/]")
+            self.run_worker(self._fetch_radiods, thread=True,
+                            group="rd-discover")
         elif bid == "dd-refresh":
             self._refresh_deep_dive()
         elif bid == "dd-back":
@@ -328,16 +373,114 @@ class RadiodScreen(Vertical):
         elif bid == "dd-apply-output":
             self._apply_output()
 
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """When the operator picks a different radiod from the Stage 1
+        selector, re-run the Stage 2 channels poll against that
+        radiod.  Other Select widgets (`#dd-encoding`) ignore."""
+        if event.select.id != "radiod-selector":
+            return
+        new_dns = str(event.value) if event.value is not None else ""
+        if not new_dns or new_dns == self._status_dns:
+            return
+        # Promote the new selection.
+        self._status_dns = new_dns
+        # Find the friendly name + id from the cached discovery
+        # result; fall back to the hostname if we can't find a match.
+        match = next((r for r in self._discovered
+                      if r.get("hostname") == new_dns), None)
+        self._radiod_id = (match.get("name") if match else new_dns) or new_dns
+        # If we were in the deep-dive view for the old radiod, drop
+        # back to the channels list — an SSRC from one radiod is
+        # meaningless on another.
+        if self._dd_ssrc is not None:
+            self._exit_deep_dive()
+        self._render_radiod_addr_line()
+        self._poll_radiod()
+
     # ------------------------------------------------------------------
     # main view — radiod-wide poll
     # ------------------------------------------------------------------
 
+    def _fetch_radiods(self) -> dict:
+        """Worker — enumerate radiods broadcasting on the LAN."""
+        try:
+            from ka9q.discovery import discover_radiod_services
+        except ImportError:
+            return {"error": "ka9q-python not installed in sigmond's venv"}
+        try:
+            results = discover_radiod_services(timeout=5.0) or []
+        except Exception as exc:
+            return {"error": f"discover_radiod_services: {exc}"}
+        return {"radiods": list(results)}
+
+    def _render_radiods(self, data: dict) -> None:
+        if "error" in data:
+            self.query_one("#radiod-status", Static).update(
+                f"[red]{data['error']}[/]")
+            return
+        radiods = data.get("radiods") or []
+        self._discovered = radiods
+        selector = self.query_one("#radiod-selector", Select)
+        if not radiods:
+            selector.set_options([("(no radiods on the LAN)", "")])
+            selector.value = ""
+            self.query_one("#radiod-status", Static).update(
+                "[yellow]No radiods broadcasting on the LAN.  Plug in / "
+                "start radiod and click 'Refresh radiods'.[/]")
+            return
+        # Build (label, hostname) tuples; hostname is the
+        # Stage-2 query target.
+        options = [
+            (f"{r.get('name', '?')}  ({r.get('hostname', '?')})",
+             r.get('hostname', ''))
+            for r in radiods
+            if r.get('hostname')
+        ]
+        selector.set_options(options)
+        # Pick the caller-supplied preference if it's in the list;
+        # otherwise the first discovered radiod.
+        wanted = self._initial_status_dns
+        chosen = next((opt for _label, opt in options if opt == wanted),
+                      options[0][1])
+        # Update internal state FIRST so the SelectChanged handler
+        # fired by the next assignment sees no change and skips its
+        # own Stage 2 dispatch (otherwise we'd start two polls).
+        self._status_dns = chosen
+        match = next((r for r in radiods if r.get("hostname") == chosen),
+                     None)
+        if match:
+            self._radiod_id = match.get("name", chosen)
+        selector.value = chosen
+        self._render_radiod_addr_line()
+        self.query_one("#radiod-status", Static).update(
+            f"[green]{len(radiods)} radiod(s) on the LAN[/]")
+        # Kick off Stage 2 for the newly-selected radiod.
+        self._poll_radiod()
+
+    def _render_radiod_addr_line(self) -> None:
+        """Show '<friendly name>  •  status: <hostname>' under the
+        Select so the operator sees what they're querying."""
+        match = next(
+            (r for r in self._discovered
+             if r.get("hostname") == self._status_dns), None)
+        if match:
+            addr = match.get("address", "?")
+            port = match.get("port", "?")
+            txt = (f"  •  status: {self._status_dns}"
+                   f"  ({addr}:{port})")
+        else:
+            txt = (f"  •  status: {self._status_dns or '(none)'}")
+        self.query_one("#radiod-addr", Static).update(
+            f"[bold]{self._radiod_id or '(unknown radiod)'}[/]{txt}",
+        )
+
     def _poll_radiod(self) -> None:
         if not self._status_dns:
             self.query_one("#radiod-status", Static).update(
-                "[yellow]No status_dns configured in coordination.toml[/]")
+                "[yellow]No radiod selected[/]")
             return
-        self.query_one("#radiod-status", Static).update("Querying radiod…")
+        self.query_one("#radiod-status", Static).update(
+            f"[dim]Querying {self._radiod_id or self._status_dns}…[/]")
         self.run_worker(self._fetch_status, thread=True, group="rd-main")
 
     def _fetch_status(self) -> dict:
@@ -385,7 +528,9 @@ class RadiodScreen(Vertical):
         data = event.worker.result or {}
         if not isinstance(data, dict):
             return
-        if event.worker.group == "rd-main":
+        if event.worker.group == "rd-discover":
+            self._render_radiods(data)
+        elif event.worker.group == "rd-main":
             self._render_main(data)
         elif event.worker.group == "rd-deep":
             self._render_deep_dive(data)
