@@ -3394,28 +3394,62 @@ def cmd_diag_cpu_freq(args) -> int:
             _warn(f'cpu{cpu:2d}: cannot read scaling_max_freq: {e}')
             continue
 
-        avail_path = freq_dir / 'scaling_available_frequencies'
-        if avail_path.exists():
-            try:
-                avail = sorted(int(f) for f in avail_path.read_text().split() if f.isdigit())
-                candidates = [f for f in avail if f <= target_khz]
-                nearest_khz = max(candidates) if candidates else (avail[0] if avail else target_khz)
-            except (ValueError, IndexError):
-                nearest_khz = target_khz
-        else:
-            nearest_khz = target_khz
+        # Clamp at the hardware ceiling (cpuinfo_max_freq) but do NOT
+        # round to scaling_available_frequencies.  The earlier
+        # round-down behavior silently capped radiod CPUs at the
+        # highest discrete P-state the driver exposed
+        # (e.g. acpi-cpufreq exposes [1.8, 1.7, 1.4 GHz] on AMD Ryzen
+        # even though cpuinfo_max_freq is 4.37 GHz), which on bee1
+        # left every radiod CPU pinned at 1.8 GHz despite the
+        # configured target of 3.2 GHz — and the "matches policy"
+        # check compared against the rounded value, hiding the gap.
+        # The kernel accepts off-list values for scaling_max_freq
+        # under both acpi-cpufreq and intel_pstate; the driver then
+        # manages how the hardware reaches that ceiling (turbo /
+        # boost on AMD, P-state interpolation on Intel).
+        try:
+            hw_max_khz = int(
+                (freq_dir / 'cpuinfo_max_freq').read_text().strip()
+            )
+        except (OSError, ValueError):
+            hw_max_khz = target_khz   # no hw ceiling info; trust the operator
+        applied_khz = min(target_khz, hw_max_khz)
 
         current_mhz = current_khz  // 1000
-        nearest_mhz = nearest_khz // 1000
+        applied_mhz = applied_khz // 1000
 
-        if current_khz == nearest_khz:
-            _ok(f'cpu{cpu:2d}  [{role}]  {current_mhz:5d} MHz  ✓')
+        # Per-CPU verdict: compare scaling_max_freq against what we
+        # would apply.  If the kernel later rounds our write down
+        # (some old drivers do this silently), the next pass will
+        # surface that as a fresh diff.
+        if current_khz == applied_khz:
+            note = '' if applied_khz == target_khz else (
+                f' (hw ceiling — target was {target_mhz} MHz)'
+            )
+            _ok(f'cpu{cpu:2d}  [{role}]  {current_mhz:5d} MHz  ✓{note}')
         else:
-            arrow = f'{current_mhz} → {nearest_mhz} MHz'
+            arrow = f'{current_mhz} → {applied_mhz} MHz'
             if do_apply:
                 try:
-                    (freq_dir / 'scaling_max_freq').write_text(str(nearest_khz))
-                    _ok(f'cpu{cpu:2d}  [{role}]  {arrow}  applied')
+                    (freq_dir / 'scaling_max_freq').write_text(str(applied_khz))
+                    # Re-read to see what the kernel actually accepted
+                    # (some drivers silently round).
+                    try:
+                        actual_khz = int(
+                            (freq_dir / 'scaling_max_freq').read_text().strip()
+                        )
+                    except (OSError, ValueError):
+                        actual_khz = applied_khz
+                    actual_mhz = actual_khz // 1000
+                    if actual_khz == applied_khz:
+                        _ok(f'cpu{cpu:2d}  [{role}]  {arrow}  applied')
+                    else:
+                        # Kernel rounded our write — show what we got.
+                        _warn(
+                            f'cpu{cpu:2d}  [{role}]  '
+                            f'{current_mhz} → {applied_mhz} MHz requested, '
+                            f'kernel set {actual_mhz} MHz'
+                        )
                     changes += 1
                 except OSError as e:
                     _err(f'cpu{cpu:2d}: write failed: {e}')
