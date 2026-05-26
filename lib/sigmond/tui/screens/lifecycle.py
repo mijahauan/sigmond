@@ -44,15 +44,18 @@ def _list_templated_units() -> list[tuple[str, str]]:
     units; list-unit-files contributes the persistently-enabled
     instances that may currently be stopped.
     """
-    # Templated services we recognise.  The first four are the
-    # reporter-keyed recorder clients (instance == reporter_id —
-    # mirrors sigmond.instance._TEMPLATED_RECORDER_CLIENTS).  The
-    # last is hf-timestd's per-radio-frequency metrology template
-    # (instance == channel name like WWV_25000) — structurally
-    # different from a reporter id, but the user still wants to
-    # start/stop/restart individual channels from this screen.
+    # Templated services we recognise here are the reporter-keyed
+    # recorder clients (instance == reporter_id — mirrors
+    # sigmond.instance._TEMPLATED_RECORDER_CLIENTS).  hf-timestd is
+    # a singleton (one PSWS station_id per host); its per-frequency
+    # `timestd-metrology@<channel>` workers are internal sub-services
+    # of that one instance, not separate reporter instances, so they
+    # are intentionally NOT listed here — they would invite the
+    # operator to start/stop individual channels from the
+    # "per-instance" surface as if they were peer instances of
+    # hf-timestd, which they are not.
     known = ("psk-recorder", "wspr-recorder", "hfdl-recorder",
-             "codar-sounder", "timestd-metrology")
+             "codar-sounder")
 
     states: dict[tuple[str, str], str] = {}
 

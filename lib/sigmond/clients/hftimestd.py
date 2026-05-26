@@ -18,9 +18,17 @@ from .base import ClientAdapter, ClientView, DiskWrite, InstanceView
 from .contract import ContractAdapter
 
 
-# Common locations where the hf-timestd CLI might live.
+# Common locations where the hf-timestd CLI might live.  Order:
+# canonical system install first, repo venv second, PATH last.
+# Pre-fix we used PATH first, which on a developer host could
+# resolve to a stale /home/<user>/.local/bin/hf-timestd shim
+# pointing at a pre-consolidation source tree — the shim's import
+# blew up before `inventory --json` could even run, ContractAdapter
+# recorded contract_version=None, and the Overview screen showed
+# "?".
 _HFTIMESTD_BIN_CANDIDATES = (
     "/usr/local/bin/hf-timestd",
+    "/opt/git/sigmond/hf-timestd/venv/bin/hf-timestd",
     "/opt/hf-timestd/venv/bin/hf-timestd",
 )
 
@@ -31,33 +39,50 @@ class HfTimestdAdapter(ClientAdapter):
     def __init__(self, config_path: Optional[Path] = None):
         self.config_path = config_path or HF_TIMESTD_CONF
 
-    def _find_binary(self) -> Optional[str]:
-        on_path = shutil.which("hf-timestd")
-        if on_path:
-            return on_path
+    def _candidate_binaries(self) -> list[str]:
+        """Return every plausible hf-timestd CLI path on this host,
+        canonical-first then PATH last."""
+        seen: set[str] = set()
+        out: list[str] = []
         for cand in _HFTIMESTD_BIN_CANDIDATES:
-            if Path(cand).is_file():
-                return cand
-        return None
+            if Path(cand).is_file() and cand not in seen:
+                out.append(cand)
+                seen.add(cand)
+        on_path = shutil.which("hf-timestd")
+        if on_path and on_path not in seen:
+            out.append(on_path)
+        return out
+
+    def _find_binary(self) -> Optional[str]:
+        # Back-compat for callers that just want "any" working path —
+        # they're rare and they don't actually invoke the binary, so
+        # returning the first candidate is fine.
+        cands = self._candidate_binaries()
+        return cands[0] if cands else None
 
     def read_view(self) -> ClientView:
-        # Phase 2: prefer the contract surface if hf-timestd >= 6.12.x
-        binary = self._find_binary()
-        if binary:
+        # Phase 2: prefer the contract surface if hf-timestd >= 6.12.x.
+        # Try every candidate binary in canonical-first order so a
+        # broken dev shim on PATH doesn't poison the result.
+        last_view: Optional[ClientView] = None
+        for binary in self._candidate_binaries():
             contract = ContractAdapter()
             contract.name = self.name
             contract.binary = binary
             view = contract.read_view()
-            # If the binary lacks an `inventory` subcommand (older
-            # hf-timestd) the ContractAdapter returns issues like
-            # "exit 2: invalid choice: 'inventory'".  Detect that and
-            # fall through to the direct file read.
-            if view.installed or not any(
-                "invalid choice" in iss or "inventory" in iss
-                for iss in view.issues
-            ):
+            if view.installed:
                 return view
+            # If the binary lacks an `inventory` subcommand (older
+            # hf-timestd) we fall through to the direct file read.
+            if any("invalid choice" in iss or "inventory" in iss
+                   for iss in view.issues):
+                last_view = view
+                break    # don't keep probing other binaries — they're
+                         # the same code, would fail the same way
+            last_view = view
 
+        if last_view is not None and last_view.installed:
+            return last_view
         return self._read_direct()
 
     def _read_direct(self) -> ClientView:
