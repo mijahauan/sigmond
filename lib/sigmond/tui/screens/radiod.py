@@ -32,11 +32,32 @@ category to radiod.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
 from typing import Any, Optional
 
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, ContentSwitcher, DataTable, Input, Select, Static, Switch
 from textual.worker import Worker, WorkerState
+
+
+# Window (seconds) during which two RowSelected events on the same
+# SSRC count as a "double-click" and trigger the external `ka9q tui`
+# launcher.  Larger than a typical OS double-click threshold so the
+# operator has room over SSH where round-trip latency adds jitter.
+_DOUBLE_SELECT_WINDOW_S = 0.6
+
+
+def _find_tool(name: str) -> Optional[str]:
+    """Locate a venv-installed CLI tool.  Checks sys.executable's
+    sibling first (sigmond's own venv), then $PATH."""
+    venv_bin = Path(sys.executable).parent / name
+    if venv_bin.is_file():
+        return str(venv_bin)
+    return shutil.which(name)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +188,11 @@ class RadiodScreen(Vertical):
         # used to detect "what changed" on Apply so we only call the
         # setters whose value actually moved.
         self._dd_baseline: dict = {}
+        # Double-select tracking — two RowSelected events on the
+        # same channels-table row within _DOUBLE_SELECT_WINDOW_S
+        # launch ka9q-python's external TUI focused on that SSRC.
+        self._last_select_ts: float = 0.0
+        self._last_select_ssrc: Optional[int] = None
 
     # ------------------------------------------------------------------
     # compose
@@ -191,7 +217,9 @@ class RadiodScreen(Vertical):
                 yield frontend
 
                 yield Static(
-                    "Active Channels  [dim](select a row, then 'Deep dive' for the per-SSRC get/set panel)[/]",
+                    "Active Channels  [dim](select a row + 'Deep dive' "
+                    "→ in-screen get/set panel; double-click a row "
+                    "→ launch external ka9q TUI on that SSRC)[/]",
                     classes="section-title", markup=True,
                 )
                 # Buttons go ABOVE the channels table so they stay
@@ -411,6 +439,81 @@ class RadiodScreen(Vertical):
     # ------------------------------------------------------------------
     # deep-dive view
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # double-select → launch external ka9q TUI on that SSRC
+    # ------------------------------------------------------------------
+
+    def on_data_table_row_selected(
+            self, event: DataTable.RowSelected) -> None:
+        """Two RowSelected events on the same row within
+        _DOUBLE_SELECT_WINDOW_S launch the external `ka9q tui`
+        focused on that SSRC.
+
+        Textual fires RowSelected on Enter and on click-when-already-
+        highlighted.  Single Enter or first click just moves the
+        cursor (RowHighlighted) — the operator has to act twice to
+        trigger this path.  The in-screen Deep-dive panel remains
+        the primary access via the button; this is the "I want the
+        full ka9q-python tool with its own keybindings" shortcut.
+        """
+        if event.data_table.id != "radiod-channels":
+            return
+        try:
+            row = event.data_table.get_row(event.row_key)
+            ssrc = int(row[0]) if row else None
+        except (TypeError, ValueError, KeyError):
+            return
+        if ssrc is None:
+            return
+
+        now = time.monotonic()
+        within_window = (now - self._last_select_ts) <= _DOUBLE_SELECT_WINDOW_S
+        same_row = (self._last_select_ssrc == ssrc)
+        if within_window and same_row:
+            # Reset so a third event doesn't relaunch immediately.
+            self._last_select_ts = 0.0
+            self._last_select_ssrc = None
+            self._launch_ka9q_tui(ssrc)
+        else:
+            self._last_select_ts = now
+            self._last_select_ssrc = ssrc
+
+    def _launch_ka9q_tui(self, ssrc: int) -> None:
+        """Suspend sigmond's TUI and run `ka9q tui <status> --ssrc N`.
+
+        Restores sigmond's TUI on exit.  Surfaces non-zero exit
+        codes (e.g. ka9q missing from the venv) in the radiod-status
+        widget; the in-screen Deep-dive panel remains the primary
+        path either way.
+        """
+        status_widget = self.query_one("#radiod-status", Static)
+        ka9q_bin = _find_tool("ka9q")
+        if not ka9q_bin:
+            status_widget.update(
+                "[red]ka9q binary not found in sigmond's venv — "
+                "use the in-screen Deep-dive panel instead.[/]")
+            return
+        if not self._status_dns:
+            status_widget.update(
+                "[yellow]Cannot launch ka9q TUI — no status_dns "
+                "configured[/]")
+            return
+        cmd = [ka9q_bin, "tui", self._status_dns, "--ssrc", str(ssrc)]
+        try:
+            with self.app.suspend():
+                result = subprocess.run(cmd)
+        except Exception as exc:
+            status_widget.update(
+                f"[red]launch ka9q tui failed: {exc}[/]")
+            return
+        if result.returncode != 0:
+            status_widget.update(
+                f"[red]ka9q tui exited {result.returncode} "
+                f"(cmd: {' '.join(cmd)})[/]")
+        else:
+            status_widget.update(
+                f"[green]ka9q tui closed cleanly for ssrc={ssrc}[/]")
 
     def _selected_ssrc(self) -> Optional[int]:
         table = self.query_one("#radiod-channels", DataTable)
