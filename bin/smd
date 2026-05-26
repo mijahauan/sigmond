@@ -55,19 +55,25 @@ from pathlib import Path
 # Bootstrap step 1 — re-exec into sigmond's venv Python if we're not
 # already there.
 #
-# Why: install.sh builds /opt/sigmond/venv with sigmond installed
-# editable plus its declared extras (`tui`, …).  Our shebang resolves
-# to the system interpreter, which doesn't see those packages — so any
-# feature behind an extra (smd tui's textual, …) fails with
-# `ModuleNotFoundError`.  Re-exec into
-# the venv interpreter so smd always runs with sigmond's full dependency
-# closure available.
+# Why: install.sh builds <repo>/venv with sigmond installed editable
+# plus its declared extras (`tui`, …) — including ka9q-python which
+# rules like rule_ka9q_python_compat import.  Our shebang resolves
+# to the system interpreter, which doesn't see those packages, so
+# any feature behind an extra fails with `ModuleNotFoundError`.
+# Re-exec into the venv interpreter so smd always runs with sigmond's
+# full dependency closure available.
+#
+# Derived from this script's location (repo-relative) rather than a
+# hardcoded /opt/sigmond/venv — the post-consolidation venv lives at
+# /opt/git/sigmond/sigmond/venv per RADIOD-IDENTIFICATION-era
+# consolidation work, but smd shouldn't be tied to a specific FHS
+# layout.  See sigmond commit `cb23292` (the consolidation).
 #
 # Skipped when:
 #   * the venv doesn't exist yet (install.sh hasn't run / dev checkout)
 #   * we're already running from the venv (no infinite re-exec loop)
 #   * SIGMOND_NO_VENV_REEXEC=1 is set (escape hatch for debugging)
-_VENV_ROOT = Path('/opt/sigmond/venv')
+_VENV_ROOT = Path(__file__).resolve().parent.parent / 'venv'
 _VENV_PY = _VENV_ROOT / 'bin' / 'python'
 # sys.prefix is the *interpreter*-side signal of "am I running in this
 # venv?" — the bin/python symlink that uv creates points at the system
