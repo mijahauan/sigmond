@@ -1,12 +1,25 @@
 """ka9q-watch screen — TUI surface for `smd watch ka9q`.
 
 Read-only check (no sudo, no mutation): shells out to
-``smd watch ka9q --json`` and renders the structured report.
+``smd watch ka9q --json`` and renders the structured report.  Two
+independent sub-reports surface here:
 
-Severity colors:
-    green  — pass (no upstream commits, or upstream advanced but no header touched)
-    yellow — warn (header changed, but no stream-critical field affected)
-    red    — fail (a stream-critical field was removed or its TLV value shifted)
+* ``upstream_drift`` — what's between the ka9q-python pin
+  (``KA9Q_RADIO_COMMIT`` in setup.cfg) and the live ka9q-radio
+  ``origin/main``.  Lists every commit between them with a flag
+  for whether the commit touched a stream-critical header, plus
+  per-header field-level deltas when a header DID change.
+
+* ``installed_vs_pin`` — the SHA of the radiod binary currently
+  installed on the host vs the SHA ka9q-python's RTP parser was
+  written against.  Warns when the installed radiod has advanced
+  past the pin without ka9q-python keeping pace (RTP parsers
+  can silently mis-frame).
+
+Severity colors apply to both sub-reports:
+    green  — pass
+    yellow — warn
+    red    — fail
 """
 
 from __future__ import annotations
@@ -100,32 +113,57 @@ class Ka9qWatchScreen(Vertical):
         color: $text-muted;
         margin-top: 1;
     }
+    Ka9qWatchScreen .kw-section {
+        text-style: bold;
+        margin-top: 1;
+        margin-bottom: 0;
+    }
+    Ka9qWatchScreen #kw-installed {
+        margin-bottom: 1;
+    }
     """
 
     def compose(self):
-        yield Static("ka9q-watch — upstream ka9q-radio drift", classes="kw-title")
-        yield Static("[dim]loading…[/]", id="kw-summary")
-        yield Static("", id="kw-pins")
+        yield Static("ka9q-watch — upstream ka9q-radio drift",
+                     classes="kw-title", markup=True)
 
-        commits = DataTable(id="kw-commits", cursor_type="row", zebra_stripes=True)
+        # upstream_drift: pin vs origin/main
+        yield Static("Pin vs origin/main", classes="kw-section")
+        yield Static("[dim]loading…[/]", id="kw-summary", markup=True)
+        yield Static("", id="kw-pins", markup=True)
+
+        commits = DataTable(id="kw-commits", cursor_type="row",
+                            zebra_stripes=True)
         commits.add_columns("H", "Commit", "Subject")
         yield commits
 
-        deltas = DataTable(id="kw-deltas", cursor_type="row", zebra_stripes=True)
+        deltas = DataTable(id="kw-deltas", cursor_type="row",
+                           zebra_stripes=True)
         deltas.add_columns("Sev", "Header", "Change", "Why it matters")
         yield deltas
 
+        # installed_vs_pin: SHA of /usr/local/sbin/radiod vs the pin
+        yield Static("Installed radiod vs pin", classes="kw-section")
+        yield Static("", id="kw-installed", markup=True)
+
         with Horizontal(id="kw-actions"):
-            yield Button("Refresh (no fetch)", id="kw-refresh", variant="primary")
-            yield Button("Refresh + git fetch", id="kw-fetch",   variant="warning")
+            yield Button("Refresh (no fetch)", id="kw-refresh",
+                         variant="primary")
+            yield Button("Refresh + git fetch", id="kw-fetch",
+                         variant="warning")
 
         yield Static(
-            "[dim]Read-only check — no sudo required.  Compares the pinned "
-            "ka9q-radio commit (ka9q_radio_compat) against origin/main.  "
-            "Red rows indicate stream-critical fields whose value or "
-            "presence changed upstream — RTP delivery to clients would "
-            "break if ka9q-python advanced its pin without code changes.[/]",
-            id="kw-hint",
+            "[dim]Read-only check — no sudo required.  "
+            "Pin-vs-upstream compares KA9Q_RADIO_COMMIT in "
+            "ka9q-python's setup.cfg against ka9q-radio's "
+            "origin/main; red rows are stream-critical field "
+            "shifts where RTP delivery to clients would break "
+            "if ka9q-python advanced its pin without code "
+            "changes.  Installed-vs-pin compares the SHA of the "
+            "running radiod binary on this host against the pin — "
+            "warns when the host has advanced past the pin so "
+            "the RTP parser may silently mis-frame.[/]",
+            id="kw-hint", markup=True,
         )
 
     def on_mount(self) -> None:
@@ -155,34 +193,43 @@ class Ka9qWatchScreen(Vertical):
         pins    = self.query_one("#kw-pins",    Static)
         commits = self.query_one("#kw-commits", DataTable)
         deltas  = self.query_one("#kw-deltas",  DataTable)
+        installed = self.query_one("#kw-installed", Static)
         commits.clear()
         deltas.clear()
 
         if result.report is None:
-            summary.update(f"[red]✘ checker failed (exit {result.returncode})[/]")
+            summary.update(
+                f"[red]✘ checker failed (exit {result.returncode})[/]")
             pins.update(result.stderr.strip()[:400] or "(no stderr)")
+            installed.update("")
             return
 
-        rep = result.report
-        sev = rep.get("severity", "fail")
+        # `smd watch ka9q --json` returns
+        #   {"upstream_drift": {...}, "installed_vs_pin": {...}}
+        # since commit f44c51b.  Read both sub-reports.
+        drift = result.report.get("upstream_drift") or {}
+        sev = drift.get("severity", "fail")
         badge = _SEV_BADGE.get(sev, sev)
-        summary.update(f"{badge}  {rep.get('summary', '(no summary)')}")
+        summary.update(f"{badge}  {drift.get('summary', '(no summary)')}")
 
-        pin = rep.get("pin", "")
-        up  = rep.get("upstream_sha") or ""
-        ref = rep.get("upstream_ref") or "?"
+        pin = drift.get("pin", "") or ""
+        up  = drift.get("upstream_sha") or ""
+        ref = drift.get("upstream_ref") or "?"
+        pin_s = pin[:12] if pin else "(none)"
+        up_s  = up[:12] if up else "(none)"
         pins.update(
-            f"pin: [bold]{pin[:12]}[/]   upstream: [bold]{up[:12]}[/] ({ref})"
+            f"pin: [bold]{pin_s}[/]   upstream: [bold]{up_s}[/] ({ref})"
         )
 
-        for c in rep.get("commits") or []:
+        for c in drift.get("commits") or []:
             mark = "[yellow]H[/]" if c.get("touches_headers") else " "
-            commits.add_row(mark, c["sha"][:12], c["subject"])
+            commits.add_row(mark, c.get("sha", "")[:12],
+                            c.get("subject", ""))
 
-        for d in rep.get("header_deltas") or []:
+        for d in drift.get("header_deltas") or []:
             for ch in d.get("changes", []):
                 csev = ch.get("severity", "warn")
-                badge = _SEV_BADGE.get(csev, csev)
+                cbadge = _SEV_BADGE.get(csev, csev)
                 kind = ch.get("kind", "?")
                 name = ch.get("name", "?")
                 if kind == "added":
@@ -193,5 +240,23 @@ class Ka9qWatchScreen(Vertical):
                     chg = f"~{name}: {ch.get('pin')} → {ch.get('head')}"
                 else:
                     chg = f"?{name}"
-                deltas.add_row(badge, f"{d['header']} ({d['enum']})",
+                deltas.add_row(cbadge,
+                               f"{d.get('header', '?')} ({d.get('enum', '?')})",
                                chg, ch.get("reason", ""))
+
+        # Second sub-report: installed radiod vs pin.
+        ivp = result.report.get("installed_vs_pin") or {}
+        if ivp:
+            ibadge = _SEV_BADGE.get(ivp.get("severity", "warn"),
+                                    ivp.get("severity", "warn"))
+            inst = (ivp.get("installed_sha") or "")[:12] or "(unknown)"
+            pin2 = (ivp.get("pin_sha") or "")[:12] or "(unknown)"
+            path = ivp.get("installed_path", "?")
+            installed.update(
+                f"{ibadge}  {ivp.get('summary', '')}\n"
+                f"installed: [bold]{inst}[/]  "
+                f"({path})\n"
+                f"pin:       [bold]{pin2}[/]"
+            )
+        else:
+            installed.update("[dim](no installed-vs-pin section)[/]")
