@@ -9108,14 +9108,31 @@ def cmd_psk_watch(args) -> int:
         return 1
     log_dir = Path('/var/log/psk-recorder')
     # psk-recorder's per-mode spot logs are `<radiod_id>-ft8.log` and
-    # `<radiod_id>-ft4.log`, written by the in-process ChTailer.  The
-    # daemon's own stdout goes to the journal (StandardOutput=journal
-    # in the systemd unit), so there is no `<radiod_id>.log` to tail.
+    # `<radiod_id>-ft4.log`, written by the in-process ChTailer.
+    # Post-Phase-6 (RADIOD-IDENTIFICATION.md §3.1) radiod_id is the
+    # mDNS status name (e.g. `bee1-status.local`), NOT the systemd
+    # template instance suffix (reporter_id, e.g. `AC0G-B1`).  When
+    # the operator passes `--instance AC0G-B1` we need to translate
+    # reporter_id → radiod_id before forming the log path; otherwise
+    # we look for `AC0G-B1-ft8.log` which never exists.  The TUI
+    # Activity screen passes `--instance` verbatim from its dropdown,
+    # which made this the default failure mode on the Activity screen
+    # post-migration.  Reading via the per-instance config preserves
+    # strict semantics: the operator's `--instance` says "this
+    # reporter", and we honour that by tailing exactly that
+    # reporter's logs.
+    # The daemon's own stdout goes to the journal
+    # (StandardOutput=journal in the systemd unit), so there is no
+    # `<radiod_id>.log` to tail.
     if instance:
-        ft8_log = log_dir / f'{instance}-ft8.log'
-        ft4_log = log_dir / f'{instance}-ft4.log'
+        radiod_id = _radiod_status_from_per_instance_config(
+            'psk-recorder', instance,
+        ) or instance
+        ft8_log = log_dir / f'{radiod_id}-ft8.log'
+        ft4_log = log_dir / f'{radiod_id}-ft4.log'
         if not (ft8_log.exists() or ft4_log.exists()):
-            _err(f'no per-mode log for {instance!r} in {log_dir}.  '
+            _err(f'no per-mode log for instance={instance!r} '
+                 f'(radiod_id={radiod_id!r}) in {log_dir}.  '
                  f'Looked for {ft8_log.name}, {ft4_log.name}.')
             return 1
     else:
