@@ -215,7 +215,6 @@ Debugging                      [diagnose + watch when something looks wrong]
     Environment                (declared vs observed peers)
     Diag: net                  (IGMP + multicast)
     ka9q-watch                 (pin vs upstream compat)
-    RAC tunnel                 (remote-access for vendor debug)
 
 Routine monitoring             [day-to-day "is it working" surfaces]
     Overview                   (landing)
@@ -233,6 +232,11 @@ Routine monitoring             [day-to-day "is it working" surfaces]
     GPSDO live                 (per-device PLL / GPS / antenna)
     ka9q-radio live            (per-radiod channels + SNR)
     KiwiSDR live               (per-KiwiSDR status)
+    RAC tunnel                 (vendor reverse-tunnel state — operators
+                                want to see "is the support session
+                                up?" at the same beat as the other
+                                live-state surfaces, not only when
+                                something looks broken)
 ```
 
 ### Screens that span categories — resolved
@@ -240,7 +244,7 @@ Routine monitoring             [day-to-day "is it working" surfaces]
 | Screen | Resolution | Reason |
 |---|---|---|
 | `sdr_inventory` | **Installation** | The label-write workflow is what makes it load-bearing; routine browsing of "which SDRs are here" is already in `overview` / `radiod`. |
-| `rac` | **Debugging** | RAC is a vendor reverse-tunnel for support sessions, not a routinely-touched config. |
+| `rac` | **Monitoring** | RAC's screen is "is the vendor reverse-tunnel up right now?" — a live-state read the operator wants alongside the other Monitoring surfaces.  Mutations (start/stop the tunnel) are rare and gate the same screen. |
 | `fft_wisdom` | **Installation** | One-time per host (hours-long planning on RX-888). The "status" view is rare enough that surfacing it in Installation is fine. |
 | `lifecycle` | **Maintenance** | Start/stop/restart is the most frequently invoked maintenance action; Overview already covers monitoring of running/not-running. |
 | `client_config` | **Maintenance** | View is already in `config_show`; this screen is the edit path. |

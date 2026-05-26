@@ -49,6 +49,7 @@ class ComponentTree(Tree):
         monitoring.add_leaf("\u25c9 ka9q-radio live",   data={"screen": "radiod"})
         monitoring.add_leaf("\u25b6 KiwiSDR live",      data={"screen": "kiwisdr"})
         monitoring.add_leaf("\u2316 Receiver channels", data={"screen": "receiver_channels"})
+        monitoring.add_leaf("\u21c6 RAC tunnel",        data={"screen": "rac"})
 
         maintenance = self.root.add("Maintenance", expand=True)
         maintenance.add_leaf("\u21bb Lifecycle",        data={"screen": "lifecycle"})
@@ -68,7 +69,6 @@ class ComponentTree(Tree):
         debugging.add_leaf("\u2316 Environment",        data={"screen": "environment"})
         debugging.add_leaf("\u2726 Diag: net",          data={"screen": "diag_net"})
         debugging.add_leaf("\u25ce ka9q-watch",         data={"screen": "ka9q_watch"})
-        debugging.add_leaf("\u21c6 RAC tunnel",         data={"screen": "rac"})
 
         installation = self.root.add("Installation", expand=False)
         installation.add_leaf("\u2630 Topology",          data={"screen": "topology"})
