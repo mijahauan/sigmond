@@ -1,7 +1,7 @@
-"""ka9q-watch screen — TUI surface for `smd ka9q-watch`.
+"""ka9q-watch screen — TUI surface for `smd watch ka9q`.
 
 Read-only check (no sudo, no mutation): shells out to
-``smd ka9q-watch --json`` and renders the structured report.
+``smd watch ka9q --json`` and renders the structured report.
 
 Severity colors:
     green  — pass (no upstream commits, or upstream advanced but no header touched)
@@ -40,7 +40,7 @@ class _RunResult:
 
 
 def _run(no_fetch: bool) -> _RunResult:
-    cmd = [_smd_binary(), "ka9q-watch", "--json"]
+    cmd = [_smd_binary(), "watch", "ka9q", "--json"]
     if no_fetch:
         cmd.append("--no-fetch")
     try:

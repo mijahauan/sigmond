@@ -3,7 +3,7 @@
 Read-only modes: per-component `journalctl --follow` or `tail -f` of
 inventory file-logs.  Streams subprocess output live into a RichLog
 widget.  Mutation mode: set CLIENT_LOG_LEVEL via `sudo smd log
-<client> --level <LEVEL>`, gated by a confirm modal.
+set-level <client> <level>`, gated by a confirm modal.
 """
 
 from __future__ import annotations
@@ -234,7 +234,7 @@ class LogsScreen(Vertical):
             self._set_status("[yellow]Pick a log level first[/]")
             return
         level = str(level)
-        cmd = [_smd_binary(), 'log', comp, '--level', level]
+        cmd = [_smd_binary(), 'log', 'set-level', comp, level]
         confirm_and_run(
             self.app,
             title=f"Set {comp} log level to {level}?",

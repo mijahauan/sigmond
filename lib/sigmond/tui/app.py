@@ -288,7 +288,7 @@ class SigmondApp(App):
             "component, then use the buttons to change its policy.\n\n"
             "Changes are written to /etc/sigmond/topology.toml "
             "(requires write permission — run sudo smd tui if needed).\n\n"
-            "CLI equivalent: `smd list` (status); `sudo smd list --apply` "
+            "CLI equivalent: `smd list` (status); `sudo smd component update` "
             "(pull + reapply per policy).",
         )
 
@@ -561,7 +561,7 @@ class SigmondApp(App):
             "Press 'Stop' before switching components.  The log "
             "pane caps at 2000 lines.\n\n"
             "To change log level, use the CLI for now:\n"
-            "  smd log <component> --level DEBUG",
+            "  smd log set-level <component> DEBUG",
         )
 
     def action_show_lifecycle(self) -> None:
@@ -896,7 +896,7 @@ class SigmondApp(App):
             "delivery to clients.\n\n"
             "Refresh — re-run with cached refs.\n"
             "Refresh + git fetch — pull latest from upstream first.\n\n"
-            "CLI equivalent: `smd ka9q-watch`.",
+            "CLI equivalent: `smd watch ka9q`.",
         )
 
     # The old action_show_update mounted a duplicate UpdateScreen.  The

@@ -772,7 +772,7 @@ class ComponentDetailModal(ModalScreen):
             self.app.push_screen(
                 UpdateOutputModal(
                     title=f"Updating {row.name}",
-                    cmd=['sudo', smd, 'list', '--apply', '--components', row.name],
+                    cmd=['sudo', smd, 'component', 'update', '--components', row.name],
                 ),
                 _after_modal,
             )
@@ -1239,7 +1239,7 @@ class ComponentsScreen(Vertical):
         smd = _smd_binary()
         names = [r.name for r in targets]
         names_csv = ','.join(names)
-        cmd = ['sudo', smd, 'list', '--apply', '--components', names_csv]
+        cmd = ['sudo', smd, 'component', 'update', '--components', names_csv]
         skipped = len(self._selected) - len(targets)
         skipped_note = (
             f"\n\n[dim]{skipped} other selected row(s) skipped (dirty / up-to-date / missing).[/]"
