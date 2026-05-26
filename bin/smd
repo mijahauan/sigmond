@@ -6791,6 +6791,37 @@ def cmd_storage_trim(args) -> int:
     return 0
 
 
+def _watch_preflight(target_label: str, unit_pattern: str,
+                     hint: str = '') -> int:
+    """Check that at least one service matching ``unit_pattern`` is
+    active.  Emit an informative error and return non-zero if not, so
+    the watch handler can exit early instead of producing a silent
+    empty stream.
+
+    Returns 0 on at-least-one-active, 1 if none active.  Always best-
+    effort: a missing systemctl returns 0 (let the watch try its
+    thing).  ``hint`` is appended to the error message — usually
+    "(smd start <client>)" or similar.
+    """
+    try:
+        r = subprocess.run(
+            ['systemctl', 'list-units', '--no-legend', '--no-pager',
+             '--type=service', '--state=active', unit_pattern],
+            capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        return 0  # systemctl absent → don't block; watch may still work
+    active = [l for l in r.stdout.splitlines() if l.strip()]
+    if active:
+        return 0
+    msg = (f'{target_label}: no active service matching '
+           f'{unit_pattern!r} on this host.')
+    if hint:
+        msg += f'  {hint}'
+    _err(msg)
+    return 1
+
+
 def _radiod_status_from_per_instance_config(client: str, instance: str) -> Optional[str]:
     """Return the canonical radiod status (mDNS multicast name) for an
     instance, or None on any failure.
@@ -7078,6 +7109,12 @@ def cmd_verifier_watch(args) -> int:
     else:
         unit_pattern = f'wspr-recorder@{instance}.service'
 
+    if _watch_preflight(
+            'verifier-watch', unit_pattern,
+            hint='Verifiers run inside wspr-recorder.  Start one with '
+                 '`smd start wspr-recorder`.') != 0:
+        return 1
+
     backlog_min = max(0, int(getattr(args, 'backlog', 60) or 0))
 
     import re as _re
@@ -7266,6 +7303,26 @@ def cmd_uploads_watch(args) -> int:
     from the log payload so the operator can answer "is my call
     actually being reported?" without checking three web UIs.
     """
+    # Both wspr-recorder and psk-recorder run their hs-uploader
+    # in-process; ``wd-upload-hs@*`` is wsprdaemon-client legacy.
+    # If none of the three has an active service, fail fast.
+    def _any_active(pattern: str) -> bool:
+        try:
+            r = subprocess.run(
+                ['systemctl', 'list-units', '--no-legend', '--no-pager',
+                 '--type=service', '--state=active', pattern],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            return True   # can't probe → don't block
+        return bool([l for l in r.stdout.splitlines() if l.strip()])
+    if not any(_any_active(p) for p in
+               ('wspr-recorder@*', 'psk-recorder@*', 'wd-upload-hs@*')):
+        _err('uploads-watch: no active uploader on this host '
+             '(wspr-recorder@*, psk-recorder@*, wd-upload-hs@* '
+             'all inactive).')
+        return 1
+
     backlog_min = max(0, int(getattr(args, 'backlog', 10) or 0))
 
     import re as _re
@@ -7503,6 +7560,12 @@ def cmd_wspr_watch(args) -> int:
         unit_pattern = 'wspr-recorder@*'
     else:
         unit_pattern = f'wspr-recorder@{instance}.service'
+
+    if _watch_preflight(
+            'wspr-watch', unit_pattern,
+            hint='Start a recorder with `smd start wspr-recorder` '
+                 'or pass --instance <reporter-id> to scope.') != 0:
+        return 1
 
     n_recent = int(getattr(args, 'recent', 0) or 0)
     verbose = bool(getattr(args, 'verbose', False))
@@ -8144,17 +8207,14 @@ def cmd_wspr_watch(args) -> int:
             bands_n = int(bands_n_s)
             write_ms = int(write_ms_s)
 
-            # Suppress no-spot cycle commits.  These fire when late
-            # band-period batches (e.g. W5 bands finishing 3 min
-            # after a cycle whose W2 bands have already committed
-            # and flushed) report 0 spots — sometimes with a handful
-            # of noise rows from the late bands.  Both shapes (0/0/0
-            # and 0/N/M with no decodes) carry no operator-relevant
-            # information beyond what the earlier real-data commit
-            # already showed.  The underlying noise rows still reach
-            # the uploader via pending_uploads — display-only filter.
-            if spots_n == 0:
-                continue
+            # Render every cycle, including 0-spot commits.  These
+            # fire on closed-band cycles (band quiet, no decodes) and
+            # on late band-period reflushes; suppressing them used to
+            # hide regression cases where ALL recent cycles are zero
+            # (band closed, recorder confused, etc.) and the operator
+            # saw an empty watch with no way to distinguish "alive but
+            # quiet" from "dead".  Mark zero-spot cycles compactly so
+            # they don't dominate the display.
 
             counts_part = ''
             if inline_bands_s is not None:
@@ -8961,6 +9021,13 @@ def cmd_psk_watch(args) -> int:
     fact 192 = sum of the last ~3 polls (each ~60 spots).
     """
     instance = getattr(args, 'instance', None)
+    unit_pattern = (f'psk-recorder@{instance}.service' if instance
+                    else 'psk-recorder@*')
+    if _watch_preflight(
+            'psk-watch', unit_pattern,
+            hint='Start a recorder with `smd start psk-recorder` '
+                 'or pass --instance <reporter-id> to scope.') != 0:
+        return 1
     log_dir = Path('/var/log/psk-recorder')
     # psk-recorder's per-mode spot logs are `<radiod_id>-ft8.log` and
     # `<radiod_id>-ft4.log`, written by the in-process ChTailer.  The
