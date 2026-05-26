@@ -6791,6 +6791,42 @@ def cmd_storage_trim(args) -> int:
     return 0
 
 
+def _radiod_status_from_per_instance_config(client: str, instance: str) -> Optional[str]:
+    """Return the canonical radiod status (mDNS multicast name) for an
+    instance, or None on any failure.
+
+    Phase 6 (RADIOD-IDENTIFICATION.md §3.1) makes the radiod's mDNS
+    status name the directory key for client spool/data trees, while
+    systemd template instances still use the reporter_id
+    (e.g. ``AC0G-B1``).  Watch handlers that need to address the
+    spool tree must translate the systemd instance to the radiod
+    status by reading the per-instance config.
+
+    ``client`` is the directory name under /etc (e.g.
+    ``"hfdl-recorder"``).  ``instance`` is the systemd template
+    instance (e.g. ``"AC0G-B1"``).  Returns the first
+    ``[[radiod]] status`` value found, which is what
+    contract/inventory uses as the spool key.
+    """
+    cfg_path = Path(f'/etc/{client}/{instance}.toml')
+    if not cfg_path.exists():
+        return None
+    try:
+        import tomllib as _tomllib
+        with open(cfg_path, 'rb') as f:
+            cfg = _tomllib.load(f)
+    except (OSError, _tomllib.TOMLDecodeError):
+        return None
+    blocks = cfg.get('radiod') or []
+    if isinstance(blocks, dict):
+        blocks = [blocks]
+    for block in blocks:
+        status = (block or {}).get('status')
+        if isinstance(status, str) and status.strip():
+            return status.strip()
+    return None
+
+
 def _psk_watch_cycle_loop(
     log_path: Path, ft8_log: Path, ft4_log: Path,
     *, max_lines_per_mode: Optional[int],
@@ -7262,55 +7298,76 @@ def cmd_uploads_watch(args) -> int:
 
     sudo_prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
 
-    # --- WSPR side: journalctl follower ----------------------------------
+    # Both wspr-recorder and psk-recorder now run their hs-uploader
+    # in-process and log shipped batches to the recorder's own
+    # journal stream.  Legacy ``wd-upload-hs@*`` units (wsprdaemon-
+    # client style external uploader) emit the same line shape but
+    # are absent on most sigmond-only hosts — including them in the
+    # ``-u`` filter would make journalctl exit 1 with
+    # "Failed to add filter for units: No data available" whenever
+    # no such unit has ever logged.  Test each pattern with
+    # ``--quiet --lines=0`` first and only include the ones that
+    # have data.
     since_arg = ['--since', f'{backlog_min} min ago'] if backlog_min > 0 \
         else ['--since', 'now']
-    try:
-        jproc = subprocess.Popen(
-            [*sudo_prefix, 'journalctl', '-f',
-             '-u', 'wd-upload-hs@*',
-             '-o', 'cat', *since_arg],
-            stdout=subprocess.PIPE,
-        )
-    except FileNotFoundError as exc:
-        _err(f'journalctl not available: {exc}')
-        return 1
 
-    # --- PSK side: file tail follower ------------------------------------
-    # psk-recorder writes to /var/log/psk-recorder/<radiod_id>.log; the
-    # SAME shipped events appear in the per-mode files too but the main
-    # log is the canonical surface.  Glob accepts all configured
-    # radiod_ids on this host.
-    _PSK_LOG_GLOB = '/var/log/psk-recorder/*-rx888.log'
-    psk_log_paths = sorted(Path('/var/log/psk-recorder').glob('*.log'))
-    # Exclude the per-mode files — they contain decode_ft8 output, not
-    # uploader lines, so they'd just be noise on the tail.
-    psk_log_paths = [
-        p for p in psk_log_paths
-        if not (p.name.endswith('-ft8.log') or p.name.endswith('-ft4.log'))
-    ]
-    pproc = None
-    if psk_log_paths:
-        # `tail -F` follows by name (handles log rotation) and accepts
-        # multiple files.  Backlog from `--backlog MIN` is deliberately
-        # NOT replayed for the PSK side: the file log has no embedded
-        # timestamps, so we can't accurately label old batches — every
-        # backlog line would carry the same wall_now stamp.  WSPR
-        # backlog through journalctl IS accurately timestamped and DOES
-        # replay.  PSK batches arrive every few minutes so live-only is
-        # enough to confirm "PSK reporter is being fed".
+    def _journal_has_data(unit_pattern: str) -> bool:
         try:
-            pproc = subprocess.Popen(
-                ['tail', '-F', '-n', '0', *map(str, psk_log_paths)],
+            r = subprocess.run(
+                [*sudo_prefix, 'journalctl', '-u', unit_pattern,
+                 '-n', '1', '--no-pager', '--quiet'],
+                capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:
+            return False
+        return r.returncode == 0 and bool(r.stdout.strip())
+
+    # --- WSPR side: journalctl follower (recorder + optional legacy) -----
+    wspr_units: list = []
+    for pat in ('wspr-recorder@*', 'wd-upload-hs@*'):
+        if _journal_has_data(pat):
+            wspr_units.extend(['-u', pat])
+    if not wspr_units:
+        _warn('no wspr upload journal data found (wspr-recorder@* '
+              'and wd-upload-hs@* both empty)')
+        jproc = None
+    else:
+        try:
+            jproc = subprocess.Popen(
+                [*sudo_prefix, 'journalctl', '-f', *wspr_units,
+                 '-o', 'cat', *since_arg],
                 stdout=subprocess.PIPE,
             )
         except FileNotFoundError as exc:
-            _err(f'tail not available: {exc}')
+            _err(f'journalctl not available: {exc}')
+            return 1
+
+    # --- PSK side: journalctl follower -----------------------------------
+    # psk-recorder's systemd unit writes stdout to the journal
+    # (StandardOutput=journal); the in-process hs-uploader logs
+    # ``psk-uploader-hs: shipped ft8=N ft4=M …`` lines there.
+    # Pre-Phase-6 we tailed /var/log/psk-recorder/<radiod_id>.log,
+    # but the daemon never wrote to a file in the first place.
+    pproc = None
+    if _journal_has_data('psk-recorder@*'):
+        try:
+            pproc = subprocess.Popen(
+                [*sudo_prefix, 'journalctl', '-f',
+                 '-u', 'psk-recorder@*',
+                 '-o', 'cat', *since_arg],
+                stdout=subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            _err(f'journalctl not available: {exc}')
 
     # --- merged read loop ------------------------------------------------
     import select as _select
-    assert jproc.stdout is not None
-    j_fd = jproc.stdout.fileno()
+    if jproc is None and pproc is None:
+        _err('no upload journal data on this host — neither '
+             'wspr-recorder@* nor psk-recorder@* (nor wd-upload-hs@*) '
+             'has ever logged.  Is anything running?')
+        return 1
+    j_fd = jproc.stdout.fileno() if (jproc and jproc.stdout) else None
     p_fd = pproc.stdout.fileno() if (pproc and pproc.stdout) else None
 
     j_buf = b''
@@ -7372,18 +7429,21 @@ def cmd_uploads_watch(args) -> int:
 
     try:
         while True:
-            fds = [j_fd] + ([p_fd] if p_fd is not None else [])
+            fds = ([j_fd] if j_fd is not None else []) + \
+                  ([p_fd] if p_fd is not None else [])
+            if not fds:
+                break    # both sides have died; nothing to wait on
             rlist, _w, _x = _select.select(fds, [], [], 1.0)
-            if j_fd in rlist:
+            if j_fd is not None and j_fd in rlist:
                 try:
                     chunk = os.read(j_fd, 65536)
                 except OSError:
                     chunk = b''
                 if not chunk:
-                    # journalctl died; bail
-                    break
-                j_buf += chunk
-                j_buf = _drain(j_buf, _emit_wspr)
+                    j_fd = None  # WSPR-side journalctl died; carry on
+                else:
+                    j_buf += chunk
+                    j_buf = _drain(j_buf, _emit_wspr)
             if p_fd is not None and p_fd in rlist:
                 try:
                     chunk = os.read(p_fd, 65536)
@@ -8340,7 +8400,16 @@ def cmd_hfdl_watch(args) -> int:
             _err(f'unexpected unit name: {unit}')
             return 1
 
-    data_dir = Path(f'/var/lib/hfdl-recorder/{instance}')
+    # Phase 6 (RADIOD-IDENTIFICATION.md §3.1): hfdl-recorder keys its
+    # spool tree on the radiod's mDNS status name, NOT on the systemd
+    # template instance.  Resolve via the per-instance config; fall
+    # back to the systemd-instance directory for pre-Phase-6 layouts
+    # so an unmigrated host still tails its old data.
+    radiod_status = _radiod_status_from_per_instance_config(
+        'hfdl-recorder', instance)
+    data_dir = (Path(f'/var/lib/hfdl-recorder/{radiod_status}')
+                if radiod_status
+                else Path(f'/var/lib/hfdl-recorder/{instance}'))
     if not data_dir.is_dir():
         _err(f'no data directory at {data_dir} — wrong instance?')
         return 1
@@ -8636,7 +8705,16 @@ def cmd_codar_watch(args) -> int:
                 _err(f'unexpected unit name: {unit}')
                 return 1
 
-    data_dir = Path(f'/var/lib/codar-sounder/{instance}')
+    # Phase 6 (RADIOD-IDENTIFICATION.md §3.1): codar-sounder keys its
+    # spool tree on the radiod's mDNS status name, NOT on the systemd
+    # template instance.  Resolve via the per-instance config; fall
+    # back to the systemd-instance directory for pre-Phase-6 layouts
+    # so an unmigrated host still tails its old data.
+    radiod_status = _radiod_status_from_per_instance_config(
+        'codar-sounder', instance)
+    data_dir = (Path(f'/var/lib/codar-sounder/{radiod_status}')
+                if radiod_status
+                else Path(f'/var/lib/codar-sounder/{instance}'))
     if not data_dir.is_dir():
         _err(f'no data directory at {data_dir} — wrong instance?')
         return 1
