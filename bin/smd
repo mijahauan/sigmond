@@ -11789,6 +11789,16 @@ def main() -> int:
     p.add_argument('instance', nargs='?', default=None,
                    help='optional instance name for multi-source clients '
                         '(e.g. radiod-0).  Single-instance is the default.')
+    p.add_argument('--non-interactive', dest='non_interactive',
+                   action='store_true',
+                   help='accept all wizard defaults instead of prompting '
+                        "(radiod wizard's non_interactive code path was "
+                        'previously unreachable via the CLI).  Use when '
+                        'running from a non-TTY context or for unattended '
+                        'installs.')
+    p.add_argument('--reconfig', action='store_true',
+                   help='overwrite the existing radiod@<id>.conf instead '
+                        'of erroring out.')
 
     p = config_sub.add_parser('edit',
                               help="invoke a client's config edit flow, "
