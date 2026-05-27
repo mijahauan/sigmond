@@ -381,22 +381,32 @@ fi
 ok "Python: $($PYTHON3 --version)"
 
 # ─── FHS system directories ───────────────────────────────────────────────────
-# /var/lib/sigmond holds the environment cache, lifecycle locks, and net-diag
-# JSON.  `smd environment probe` and other discovery operations run as the
-# operator (smd self-elevates per-operation, but discovery probes don't need
-# root), so the directory must be writable to anyone in the sigmond group.
-# Mode 2770 + sigmond:sigmond + setgid: humans in the group can read/write,
-# new files inherit the group automatically, the world sees nothing.  Without
-# this, save_cache() silently swallows PermissionError and the operator's
-# probes never persist — which then mis-informs every preflight check.
+# /var/lib/sigmond holds the SQLite local sink (sink.db) plus the environment
+# cache, lifecycle locks, and net-diag JSON.  Producers run as non-root users
+# (pskrec, hf-timestd, etc.) but share the `sigmond` group; mode 2775
+# root:sigmond + setgid lets every group member write while keeping the dir
+# world-readable so operators can `sqlite3 sink.db` read-only without joining
+# the group.  Matches lib/sigmond/storage_migrate.py SINK_DIR_MODE/SINK_GROUP
+# — without this match, the producer-side writer falls back to silent noop
+# and `smd storage migrate-to-sqlite` is the only thing that re-applies the
+# perms (it shouldn't be load-bearing for a greenfield install).
+#
+# /var/log/sigmond stays group-only (2770 sigmond:sigmond) — no need to
+# expose logs to non-members.
 info "Creating system directories…"
-$SUDO mkdir -p \
-    /etc/sigmond \
-    /var/lib/sigmond \
-    /var/log/sigmond
-$SUDO chmod 755 /etc/sigmond
-$SUDO chown sigmond:sigmond /var/lib/sigmond /var/log/sigmond
-$SUDO chmod 2770 /var/lib/sigmond /var/log/sigmond
+$SUDO install -d -m 755                        /etc/sigmond
+$SUDO install -d -m 2775 -o root    -g sigmond /var/lib/sigmond
+$SUDO install -d -m 2770 -o sigmond -g sigmond /var/log/sigmond
+
+# Pre-create sink.db so the first producer to flush doesn't end up owning
+# it.  Without this, default umask (0022) means the first race-winner's
+# UID owns the file mode 0644, and other sigmond-group producers hit
+# "attempt to write a readonly database" until a human chmods.  Observed
+# on bee1 2026-05-12 — see lib/sigmond/storage_migrate.py:500-512.
+if [[ ! -f /var/lib/sigmond/sink.db ]]; then
+    $SUDO install -m 0664 -o root -g sigmond /dev/null /var/lib/sigmond/sink.db
+    ok "sink.db pre-created at /var/lib/sigmond/sink.db"
+fi
 # Post-consolidation (2026-05-26) the prod venv lives at
 # /opt/git/sigmond/sigmond/venv (inside the repo), so the legacy
 # /opt/sigmond/ tree is no longer needed.  Greenfield installs
@@ -522,6 +532,41 @@ ok "Venv ready at $VENV_DIR"
 # ka9q-python was placed at /opt/git/sigmond/ka9q-python near the top of this
 # script; uv resolves it via [tool.uv.sources] in pyproject.toml during the
 # sigmond[tui] install above, so no separate editable install is needed here.
+
+# ─── sigmond systemd units + helper scripts ─────────────────────────────────
+# Ship the unit files that smd's scheduled verbs depend on (storage-trim
+# janitors, decode-health collector).  Without these, PSK retention silently
+# fails (sink.db grows unbounded) and decode trend collection never runs.
+#
+# Per-target trim units are shipped for backwards compatibility; the unified
+# sigmond-storage-trim-all.timer covers every retention policy in one pass
+# and is the only one enabled here.  Decode-health is installed but not
+# enabled — operators turn it on once psk-recorder is producing log lines
+# worth scraping.
+info "Installing sigmond systemd units → /etc/systemd/system/"
+for _unit in "$REPO_DIR"/systemd/sigmond-*.service "$REPO_DIR"/systemd/sigmond-*.timer; do
+    [[ -f "$_unit" ]] || continue
+    $SUDO install -m 0644 "$_unit" /etc/systemd/system/
+done
+unset _unit
+ok "sigmond systemd units installed"
+
+# Helper script invoked by sigmond-decode-health-collect.service.  Symlinked
+# from the repo (same pattern as bin/smd) so a `git pull` updates the script
+# without re-running install.sh.
+info "Installing sigmond-decode-health-collect → /usr/local/sbin/"
+$SUDO chmod a+x "$REPO_DIR/scripts/sigmond-decode-health-collect.py"
+$SUDO ln -sf "$REPO_DIR/scripts/sigmond-decode-health-collect.py" \
+        /usr/local/sbin/sigmond-decode-health-collect
+ok "sigmond-decode-health-collect symlink installed"
+
+$SUDO systemctl daemon-reload
+# Enable just the unified trim timer.  ConditionPathExists=/var/lib/sigmond/sink.db
+# in the service unit keeps it inactive until a producer writes — and even
+# with sink.db pre-created, `smd storage trim --all --yes` is a no-op on an
+# empty db.  Safe to enable on greenfield.
+$SUDO systemctl enable sigmond-storage-trim-all.timer
+ok "sigmond-storage-trim-all.timer enabled (15-min cadence)"
 
 # ─── smd symlink ──────────────────────────────────────────────────────────────
 info "Installing smd → $INSTALL_SMD"
