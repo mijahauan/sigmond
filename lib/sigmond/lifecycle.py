@@ -145,26 +145,48 @@ def _expand_template(
     """
     units: list[UnitRef] = []
 
-    # Discover configured instances from env files
+    # Discover configured instances from env files.
+    # /etc/<component>/ for service-user-owned components (e.g. hf-gps-tec)
+    # is mode 0750; an unprivileged operator running `smd tui` can't even
+    # stat its children.  Python 3.12+ (and Debian's backport in 3.11.2)
+    # re-raises PermissionError from Path.exists() instead of swallowing
+    # it, which used to crash the Lifecycle screen for any component with
+    # a locked-down config dir.  Treat PermissionError the same as
+    # "directory not present" — instance discovery falls back to the
+    # systemctl-based query below, which works without /etc read.
     env_dir = Path(f"/etc/{component}/env")
     configured = set()
-    if env_dir.exists():
-        for env_file in env_dir.glob("*.env"):
-            instance_name = env_file.stem
-            configured.add(instance_name)
+    try:
+        env_exists = env_dir.exists()
+    except PermissionError:
+        env_exists = False
+    if env_exists:
+        try:
+            for env_file in env_dir.glob("*.env"):
+                instance_name = env_file.stem
+                configured.add(instance_name)
+        except PermissionError:
+            pass
 
     # Discover configured instances from a conf_dir (e.g. /etc/radio for radiod@)
     # Matches files like "radiod@<instance>.conf" and extracts <instance>.
     if conf_dir:
         base = template.split('@')[0]  # "radiod@.service" -> "radiod"
         conf_path = Path(conf_dir)
-        if conf_path.exists():
-            for cf in conf_path.glob(f"{base}@*.conf"):
-                if cf.is_file() and not cf.is_symlink():
-                    # "radiod@kfs-rx888-omni.conf" -> "kfs-rx888-omni"
-                    instance_name = cf.stem[len(base) + 1:]
-                    if instance_name:
-                        configured.add(instance_name)
+        try:
+            conf_exists = conf_path.exists()
+        except PermissionError:
+            conf_exists = False
+        if conf_exists:
+            try:
+                for cf in conf_path.glob(f"{base}@*.conf"):
+                    if cf.is_file() and not cf.is_symlink():
+                        # "radiod@kfs-rx888-omni.conf" -> "kfs-rx888-omni"
+                        instance_name = cf.stem[len(base) + 1:]
+                        if instance_name:
+                            configured.add(instance_name)
+            except PermissionError:
+                pass
 
     # Discover configured instances from per-instance TOML files at
     # /etc/<component>/<instance>.toml.  This is the per-instance
@@ -175,16 +197,23 @@ def _expand_template(
     # We filter those legacy template-name files out so they don't
     # masquerade as instance configs.
     etc_dir = Path(f"/etc/{component}")
-    if etc_dir.exists():
+    try:
+        etc_exists = etc_dir.exists()
+    except PermissionError:
+        etc_exists = False
+    if etc_exists:
         legacy_names = {
             "config.toml",
             f"{component}-config.toml",
         }
-        for cfg in etc_dir.glob("*.toml"):
-            if cfg.is_file() and cfg.name not in legacy_names:
-                stem = cfg.stem
-                if stem:
-                    configured.add(stem)
+        try:
+            for cfg in etc_dir.glob("*.toml"):
+                if cfg.is_file() and cfg.name not in legacy_names:
+                    stem = cfg.stem
+                    if stem:
+                        configured.add(stem)
+        except PermissionError:
+            pass
 
     # Discover known instances from systemctl.  Use `list-units`
     # (without --all) + `list-unit-files` together:
