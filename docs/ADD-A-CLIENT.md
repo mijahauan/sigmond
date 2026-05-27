@@ -232,6 +232,20 @@ diverging keys).
 
 ## 7. Verify the drop-in
 
+One-shot lint of every drop-in surface:
+
+```bash
+smd diag drop-in your-client
+```
+
+Walks repo presence → `deploy.toml` → contract subcommands →
+`[client_features]` → catalog + topology → end-to-end
+ContractAdapter view, prints green/yellow/red per check, exits
+non-zero if anything is red.  Use this after each edit to the
+client repo to confirm sigmond still picks it up everywhere.
+
+The individual probes, if you want to walk them by hand:
+
 ```bash
 # operator-callable contract surfaces work without sudo
 your-client version    --json
@@ -246,8 +260,9 @@ smd tui                                        # appears in Activity / Verifier
 
 If `smd config show` reports your client as `not installed` but
 `smd list` agrees it's installed, your `inventory --json` probably
-isn't exiting 0 on the operator's UID — go re-read §4's operator-
-callable rule.
+isn't exiting 0 on the operator's UID — re-read §4's operator-
+callable rule (`smd diag drop-in` catches this and points you at
+the fix).
 
 ---
 

@@ -145,6 +145,11 @@ try:
         HFTIMESTD_AFFINITY_UNITS as _HFTIMESTD_AFFINITY_UNITS,
         AFFINITY_UNITS as _AFFINITY_UNITS,
     )
+    from sigmond.diag_drop_in import (
+        run_checks  as _diag_drop_in_run_checks,
+        render      as _diag_drop_in_render,
+        has_failure as _diag_drop_in_has_failure,
+    )
     _HAS_SIGMOND_LIB = True
 except ImportError:
     _HAS_SIGMOND_LIB = False
@@ -4819,6 +4824,32 @@ def cmd_diag_net(args) -> int:
         if line:
             _info(f'  {line}.')
     print()
+    return 0
+
+
+def cmd_diag_drop_in(args) -> int:
+    """`smd diag drop-in <client>` — lint a single client's drop-in
+    surface (repo present, deploy.toml parses, contract subcommands
+    callable, [client_features] declarations sane, catalog/topology
+    pickup, end-to-end ContractAdapter view).  Exits non-zero if any
+    check is fail-status; warn/info don't block."""
+    if not _HAS_SIGMOND_LIB:
+        _err('sigmond lib not importable — install sigmond first')
+        return 1
+    client = args.client
+    _heading(f'drop-in lint: {client}')
+    checks = _diag_drop_in_run_checks(client)
+    print(_diag_drop_in_render(checks))
+    print()
+    if _diag_drop_in_has_failure(checks):
+        n_fail = sum(1 for c in checks if c.status == 'fail')
+        _err(f'{n_fail} drop-in check(s) failed for {client}')
+        return 1
+    n_warn = sum(1 for c in checks if c.status == 'warn')
+    if n_warn:
+        _info(f'{n_warn} warning(s) — review above, but not blocking')
+    else:
+        _ok(f'{client}: all drop-in checks passed')
     return 0
 
 
@@ -11222,6 +11253,30 @@ def main() -> int:
     p.add_argument('--json', action='store_true',
                    help='emit full report as JSON')
 
+    p_di = diag_sub.add_parser(
+        'drop-in',
+        help='lint a single client\'s drop-in surface (repo / deploy.toml '
+             '/ contract subcommands / [client_features] / catalog / topology)',
+        description=(
+            'Walk every surface a contract-conformant client is expected '
+            'to expose and report green/yellow/red per check.  Use after '
+            'adding or modifying a client to confirm sigmond will pick '
+            'it up everywhere — `smd install`, `smd list`, the TUI '
+            'Activity / Verifier / Config screens.  Exits non-zero if '
+            'any check is fail-status; warn/info are informational.'
+        ),
+        epilog=(
+            'Examples:\n'
+            '  smd diag drop-in psk-recorder\n'
+            '  smd diag drop-in your-new-client\n'
+            '\n'
+            'See docs/ADD-A-CLIENT.md for the full checklist.\n'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_di.add_argument('client', metavar='CLIENT',
+                      help='client name (catalog key, e.g. psk-recorder)')
+
     # public-ip — quick outbound-IP lookup
     p_pip = sub.add_parser(
         'public-ip',
@@ -11798,6 +11853,8 @@ def main() -> int:
             return cmd_diag_cpu_freq(args)
         if diag_cmd == 'net':
             return cmd_diag_net(args)
+        if diag_cmd == 'drop-in':
+            return cmd_diag_drop_in(args)
         return cmd_diag(args)
 
     if args.command == 'psk-watch':
