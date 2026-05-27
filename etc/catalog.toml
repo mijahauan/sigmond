@@ -86,6 +86,18 @@ repo            = "https://github.com/mijahauan/hs-uploader"
 # `smd install hs-uploader` still works thanks to find_install_script's post-clone
 # discovery (the cloned repo carries its own install.sh).
 
+[client.callhash]
+kind            = "library"                           # source-only dep: sibling Python pkg
+description     = "WSPR/FST4W callsign-hash resolution library (wspr-recorder + psk-recorder dep)"
+repo            = "https://github.com/mijahauan/callhash"
+# No install_script: wspr-recorder and psk-recorder declare callhash in their
+# pyproject.toml [tool.uv.sources] as `path = "../callhash", editable = true`.
+# Sigmond must clone it to /opt/git/sigmond/callhash before invoking either
+# recorder's install.sh, otherwise `uv sync` fails with
+# `Distribution not found at: file:///opt/git/sigmond/callhash`.  Observed on
+# B4-100 greenfield 2026-05-27: wspr-recorder install failed at uv-sync until
+# callhash was manually cloned.
+
 # ---------------------------------------------------------------------------
 # Deprecations
 #
