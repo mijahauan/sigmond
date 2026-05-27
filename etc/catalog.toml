@@ -36,7 +36,7 @@ description     = "WSPR/FST4W audio recorder (period-aligned WAVs)"
 repo            = "https://github.com/mijahauan/wspr-recorder"
 uses            = ["ka9q-python"]
 requires        = ["ka9q-python", "ka9q-radio"]
-contract        = "0.6"
+contract        = "0.7"
 install_script  = "/opt/git/sigmond/wspr-recorder/install.sh"
 
 [client.psk-recorder]
@@ -45,7 +45,7 @@ description     = "FT4/FT8 spot recorder for PSKReporter"
 repo            = "https://github.com/mijahauan/psk-recorder"
 uses            = ["ka9q-python"]
 requires        = ["ka9q-python", "ka9q-radio"]
-contract        = "0.6"
+contract        = "0.7"
 install_script  = "/opt/git/sigmond/psk-recorder/scripts/install.sh"
 
 [client.hf-timestd]
@@ -54,7 +54,7 @@ description     = "HF time-standard analyzer (WWV/WWVH/CHU/BPM)"
 repo            = "https://github.com/mijahauan/hf-timestd"
 uses            = ["ka9q-python"]
 requires        = ["ka9q-python", "ka9q-radio"]
-contract        = "0.6"
+contract        = "0.7"
 install_script  = "/opt/git/sigmond/hf-timestd/scripts/install.sh"
 topology_alias  = "grape"
 
@@ -64,7 +64,7 @@ description     = "RM3100 magnetometer recorder + PSWS uploader (non-radiod, §1
 repo            = "https://github.com/mijahauan/mag-recorder"
 uses            = []
 requires        = ["mag-usb", "hs-uploader"]          # C-source dep + sibling pkg for uv editable install
-contract        = "0.6"
+contract        = "0.7"
 start_priority  = 200                                 # parallel with decoder chain
 # No install_script: install via `smd install mag-recorder` (deploy.toml drives the steps).
 # No topology_alias: avoid the deprecated alias surface for a brand-new client.
