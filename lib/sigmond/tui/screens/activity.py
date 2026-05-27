@@ -33,24 +33,28 @@ def _smd_binary() -> str:
 # Targets matching `smd watch --help` (CLI-V2-SPEC.md §3 Observation).
 # Order intentional: recorder activity first, then meta-watchers.
 WATCH_TARGETS = [
-    ("wspr",     "WSPRnet upload events (per-batch start/done)"),
-    ("psk",      "PSK Reporter ft8/ft4 cycles + flushes"),
-    ("hfdl",     "HFDL per-band frame counts + GS/aircraft"),
-    ("codar",    "CODAR per-station soundings + SNR rollup"),
-    ("mag",      "RM3100 magnetometer sample rollup + daily PSWS upload"),
-    ("ka9q",     "ka9q-radio upstream drift check"),
-    ("uploads",  "All upload activity (WSPRnet + wsprdaemon.org + PSK Reporter)"),
-    ("verifier", "wsprnet upload-then-verify audit (lost / in-flight / delivered)"),
+    ("wspr",       "WSPRnet upload events (per-batch start/done)"),
+    ("psk",        "PSK Reporter ft8/ft4 cycles + flushes"),
+    ("hfdl",       "HFDL per-band frame counts + GS/aircraft"),
+    ("codar",      "CODAR per-station soundings + SNR rollup"),
+    ("hf-gps-tec", "hf-gps-tec PRN-beacon detection records (per freq/window)"),
+    ("mag",        "RM3100 magnetometer sample rollup + daily PSWS upload"),
+    ("ka9q",       "ka9q-radio upstream drift check"),
+    ("uploads",    "All upload activity (WSPRnet + wsprdaemon.org + PSK Reporter)"),
+    ("verifier",   "wsprnet upload-then-verify audit (lost / in-flight / delivered)"),
 ]
 
 # Per-recorder targets map to a templated client.  Meta targets
 # (ka9q / uploads / verifier) have no instance dimension.  mag is
 # the singleton non-radiod client — no instance dropdown either.
+# hf-gps-tec is per-instance like the other recorders; its watch
+# target name and catalog client name are the same.
 _TARGET_TO_CLIENT = {
-    "wspr":  "wspr-recorder",
-    "psk":   "psk-recorder",
-    "hfdl":  "hfdl-recorder",
-    "codar": "codar-sounder",
+    "wspr":       "wspr-recorder",
+    "psk":        "psk-recorder",
+    "hfdl":       "hfdl-recorder",
+    "codar":      "codar-sounder",
+    "hf-gps-tec": "hf-gps-tec",
 }
 
 # Targets that accept `-v` / `--verbose` (per-cycle or per-window
@@ -58,7 +62,7 @@ _TARGET_TO_CLIENT = {
 # watches (ka9q / uploads / verifier) don't have a verbose mode —
 # their event stream is already the canonical detail.
 _VERBOSE_CAPABLE_TARGETS = frozenset({
-    "wspr", "psk", "hfdl", "codar", "mag",
+    "wspr", "psk", "hfdl", "codar", "hf-gps-tec", "mag",
 })
 
 # Sentinel value for the "no instance filter" choice in the instance
