@@ -30,40 +30,49 @@ def _smd_binary() -> str:
     return found or '/usr/local/sbin/smd'
 
 
-# Targets matching `smd watch --help` (CLI-V2-SPEC.md §3 Observation).
-# Order intentional: recorder activity first, then meta-watchers.
-WATCH_TARGETS = [
-    ("wspr",       "WSPRnet upload events (per-batch start/done)"),
-    ("psk",        "PSK Reporter ft8/ft4 cycles + flushes"),
-    ("hfdl",       "HFDL per-band frame counts + GS/aircraft"),
-    ("codar",      "CODAR per-station soundings + SNR rollup"),
-    ("hf-gps-tec", "hf-gps-tec PRN-beacon detection records (per freq/window)"),
-    ("mag",        "RM3100 magnetometer sample rollup + daily PSWS upload"),
-    ("ka9q",       "ka9q-radio upstream drift check"),
-    ("uploads",    "All upload activity (WSPRnet + wsprdaemon.org + PSK Reporter)"),
-    ("verifier",   "wsprnet upload-then-verify audit (lost / in-flight / delivered)"),
+# Meta-watchers — not per-client, so they don't (and can't) declare
+# themselves via the drop-in `[client_features.watch]` block.  Keep
+# hardcoded; merged below with the per-client list.
+_META_WATCH_TARGETS = [
+    ("ka9q",     "ka9q-radio upstream drift check"),
+    ("uploads",  "All upload activity (WSPRnet + wsprdaemon.org + PSK Reporter)"),
+    ("verifier", "wsprnet upload-then-verify audit (lost / in-flight / delivered)"),
 ]
 
-# Per-recorder targets map to a templated client.  Meta targets
-# (ka9q / uploads / verifier) have no instance dimension.  mag is
-# the singleton non-radiod client — no instance dropdown either.
-# hf-gps-tec is per-instance like the other recorders; its watch
-# target name and catalog client name are the same.
-_TARGET_TO_CLIENT = {
-    "wspr":       "wspr-recorder",
-    "psk":        "psk-recorder",
-    "hfdl":       "hfdl-recorder",
-    "codar":      "codar-sounder",
-    "hf-gps-tec": "hf-gps-tec",
-}
 
-# Targets that accept `-v` / `--verbose` (per-cycle or per-window
-# mode showing every spot/frame/sample, no cap).  The meta-target
-# watches (ka9q / uploads / verifier) don't have a verbose mode —
-# their event stream is already the canonical detail.
-_VERBOSE_CAPABLE_TARGETS = frozenset({
-    "wspr", "psk", "hfdl", "codar", "hf-gps-tec", "mag",
-})
+def _build_target_tables() -> tuple[list[tuple[str, str]], dict[str, str], frozenset[str]]:
+    """Resolve (WATCH_TARGETS, _TARGET_TO_CLIENT, _VERBOSE_CAPABLE_TARGETS)
+    from per-client `[client_features.watch]` declarations plus the
+    hardcoded meta-watcher set.
+
+    This is the drop-in seam: every contract-conformant client whose
+    deploy.toml ships a `[client_features.watch]` block appears in the
+    Activity dropdown automatically — no edits here required for a new
+    client.  See lib/sigmond/client_features.py.
+
+    Resolved once at module import (TUI restart picks up new clients);
+    if the loader fails for any reason we degrade to the meta-only set.
+    """
+    targets: list[tuple[str, str]] = []
+    target_to_client: dict[str, str] = {}
+    verbose_capable: set[str] = set()
+    try:
+        from ...client_features import load_watch_features
+        for f in load_watch_features():
+            targets.append((f.verb, f.description))
+            if f.per_instance:
+                target_to_client[f.verb] = f.client
+            if f.verbose:
+                verbose_capable.add(f.verb)
+    except Exception:
+        # Loader is best-effort; fall back to meta-only rather than
+        # crash the whole TUI on a malformed deploy.toml somewhere.
+        pass
+    targets.extend(_META_WATCH_TARGETS)
+    return targets, target_to_client, frozenset(verbose_capable)
+
+
+WATCH_TARGETS, _TARGET_TO_CLIENT, _VERBOSE_CAPABLE_TARGETS = _build_target_tables()
 
 # Sentinel value for the "no instance filter" choice in the instance
 # dropdown.  Selecting this means we don't pass --instance to smd watch.
