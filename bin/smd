@@ -8445,7 +8445,7 @@ def cmd_wspr_watch(args) -> int:
                 # without compressing them.  Shorter names get
                 # trailing spaces so the next column lines up.
                 rx_part = f' rx={short:<16}'
-            reporter_part = (f' reporter={resolved_reporter}'
+            reporter_part = (f' reporter={_display_reporter(resolved_reporter)}'
                              if resolved_reporter else '')
             cycle_text = (
                 f'[{hms}] cycle UTC {hh}:{mm}{reporter_part}{rx_part}  '
@@ -9807,7 +9807,7 @@ def cmd_mag_watch(args) -> int:
             r = max(vals) - min(vals)
             return f'±{r/2:>6.0f}'
         rid = last.get('reporter_id')
-        rid_part = f'  reporter={rid}' if rid else ''
+        rid_part = f'  reporter={_display_reporter(rid)}' if rid else ''
         now_str = _dt.datetime.now().strftime('%H:%M:%S')
         print(
             f'[{now_str}] win {int(WIN_SEC)}s  samples={n:>3d} '

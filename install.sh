@@ -499,11 +499,22 @@ else
     fi
 fi
 
+# uv-managed Python install dir.  See scripts/install/ensure_uv.sh
+# for the full rationale: uv's default ~/.local/share/uv/python/
+# resolves to /root/.local/... under sudo, which non-root service
+# users can't traverse.  /opt/uv/python is shared + world-readable.
+# Sourced helpers (consumer install.sh files) export the same value;
+# the wrapper-via-`env` calls below propagate it past sudoers'
+# env_reset.
+UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/opt/uv/python}"
+$SUDO install -d -m 0755 "$UV_PYTHON_INSTALL_DIR" 2>/dev/null || true
+
 # Helpers that use uv when available, plain pip/venv otherwise.
 _venv_create() {
     local target="$1"
     if [[ -n "$UV" ]]; then
-        $SUDO "$UV" venv --python "$PYTHON3" --clear "$target"
+        $SUDO env "UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR" \
+            "$UV" venv --python "$PYTHON3" --clear "$target"
     else
         $SUDO "$PYTHON3" -m venv --clear "$target"
         $SUDO "$target/bin/pip" install --quiet --upgrade pip
@@ -512,7 +523,8 @@ _venv_create() {
 _pip_install() {
     local target="$1"; shift
     if [[ -n "$UV" ]]; then
-        $SUDO "$UV" pip install --quiet --python "$target/bin/python" "$@"
+        $SUDO env "UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR" \
+            "$UV" pip install --quiet --python "$target/bin/python" "$@"
     else
         $SUDO "$target/bin/pip" install --quiet "$@"
     fi

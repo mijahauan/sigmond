@@ -29,7 +29,31 @@
 # See sigmond/CLAUDE.md "Fleet upgrade pattern" for the surrounding
 # convention (uv editable installs, uv.lock-pinned syncs, etc.).
 
+# Place uv-managed Pythons in a world-readable shared location so
+# service users (wsprrec, pskrec, etc.) can execute the venv
+# interpreter.  The default `~/.local/share/uv/python/` resolves
+# to `/root/.local/share/uv/python/` when uv runs under sudo, and
+# /root is mode 0700 — every per-client venv ends up with a python
+# symlink to a path the service user can't traverse, so the
+# systemd unit fails at ExecStart.  Putting managed Pythons in
+# /opt/uv/python (mode 0755) avoids the trap.  Exported here so
+# every caller that sources this helper (sigmond install.sh and
+# every per-client install.sh) sees the same value.
+export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/opt/uv/python}"
+
 _ensure_uv() {
+    # Ensure the shared-Python dir exists; uv refuses to install into
+    # a missing parent and the directory must be world-readable so
+    # service users can traverse it.  Creating it here keeps the
+    # invariant in one place (sourced before any uv call) and
+    # avoids per-client divergence.
+    if [[ ! -d "$UV_PYTHON_INSTALL_DIR" ]]; then
+        if [[ $EUID -eq 0 ]]; then
+            install -d -m 0755 "$UV_PYTHON_INSTALL_DIR" 2>/dev/null || true
+        else
+            sudo install -d -m 0755 "$UV_PYTHON_INSTALL_DIR" 2>/dev/null || true
+        fi
+    fi
     if command -v uv >/dev/null 2>&1; then
         printf '[INFO]  uv %s at %s\n' \
             "$(uv --version 2>/dev/null | awk '{print $2}')" \
