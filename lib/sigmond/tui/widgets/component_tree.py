@@ -53,17 +53,28 @@ class ComponentTree(Tree):
         monitoring.add_leaf("\u21c6 RAC tunnel",        data={"screen": "rac"})
         monitoring.add_leaf("\u2b22 Resources",         data={"screen": "resources"})
 
+        # Installation: everything that happens before a component can
+        # run on this host \u2014 pin a version, build/install, configure
+        # per-instance, tune host policy (CPU / FFT wisdom).  Workflow
+        # ordering is install \u2192 configure \u2192 enable; the screens here
+        # follow that same arc top to bottom.
+        installation = self.root.add("Installation", expand=True)
+        installation.add_leaf("\u2630 Topology",          data={"screen": "topology"})
+        installation.add_leaf("\u2691 Software versions", data={"screen": "components"})
+        installation.add_leaf("\u2795 Install",           data={"screen": "install"})
+        installation.add_leaf("\u229e SDR inventory",     data={"screen": "sdr_inventory"})
+        installation.add_leaf("\u2699 Configuration",     data={"screen": "configuration"})
+        installation.add_leaf("\u2699 CPU affinity",      data={"screen": "cpu_affinity"})
+        installation.add_leaf("\u21f5 CPU frequency",     data={"screen": "cpu_freq"})
+        installation.add_leaf("\u2a09 FFT Wisdom",        data={"screen": "fft_wisdom"})
+
+        # Maintenance: ongoing operational changes once components are
+        # running \u2014 lifecycle verbs, apply config edits, per-instance
+        # source assignment, save/restore the host's overall config.
         maintenance = self.root.add("Maintenance", expand=True)
         maintenance.add_leaf("\u21bb Lifecycle",        data={"screen": "lifecycle"})
         maintenance.add_leaf("\u21c4 Apply",            data={"screen": "apply"})
-        maintenance.add_leaf("\u2699 Configuration",    data={"screen": "configuration"})
-        # Legacy screens kept while the consolidated Configuration screen
-        # (above) is in prototype.  Remove once the operator confirms.
-        maintenance.add_leaf("\u2699 Client config (legacy)",    data={"screen": "client_config"})
-        maintenance.add_leaf("\u2261 Config view (legacy)",      data={"screen": "config_show"})
         maintenance.add_leaf("\u2604 Sources",          data={"screen": "sources"})
-        maintenance.add_leaf("\u2699 CPU affinity",     data={"screen": "cpu_affinity"})
-        maintenance.add_leaf("\u21f5 CPU frequency",    data={"screen": "cpu_freq"})
         maintenance.add_leaf("\u2193 Backup",           data={"screen": "backup"})
         maintenance.add_leaf("\u2191 Restore",          data={"screen": "restore"})
 
@@ -73,14 +84,6 @@ class ComponentTree(Tree):
         debugging.add_leaf("\u2714 Validate",           data={"screen": "validate"})
         debugging.add_leaf("\u2726 Diag: net",          data={"screen": "diag_net"})
         debugging.add_leaf("\u25ce ka9q-watch",         data={"screen": "ka9q_watch"})
-
-        installation = self.root.add("Installation", expand=False)
-        installation.add_leaf("\u2630 Topology",          data={"screen": "topology"})
-        installation.add_leaf("\u2691 Software versions", data={"screen": "components"})
-        installation.add_leaf("\u2795 Install",           data={"screen": "install"})
-        installation.add_leaf("\u229e SDR inventory",     data={"screen": "sdr_inventory"})
-        installation.add_leaf("\u25ab Instances",         data={"screen": "instance"})
-        installation.add_leaf("\u2a09 FFT Wisdom",        data={"screen": "fft_wisdom"})
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         data = event.node.data
