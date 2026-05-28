@@ -359,24 +359,122 @@ class ConfigurationScreen(Vertical):
     # ------------------------------------------------------------------
 
     def _do_edit(self) -> None:
-        from ..mutation import confirm_and_run
+        """Route the operator into the right edit surface.
+
+        Preference order:
+          1. In-TUI Textual wizard — when the client implements the JSON
+             config-roundtrip contract (CLIENT-CONTRACT §14:
+             ``config show --json --defaults`` + ``config apply --json -``).
+             Polished, consistent look-and-feel under sigmond; doesn't
+             suspend the TUI.  Probed via a short ``config show --json``
+             call with the per-instance config path.
+          2. Whiptail / $EDITOR via ``sudo smd config edit`` — fall back
+             when the client doesn't expose the contract yet (most
+             pre-existing clients today).  TUI suspends, the client's
+             own wizard owns the terminal.
+
+        The probe runs synchronously against the selected client with a
+        5s timeout — cheap enough to do inline with the click.
+        """
         sel = self._selected()
         if sel is None:
             self._set_last("[yellow]select a row first[/]")
             return
         client, reporter = sel
+
+        # Per-instance config-file path the wizard / fallback edits.
+        try:
+            from ...instance import instance_paths
+            paths = instance_paths(client, reporter)
+            config_path = str(paths.config)
+        except Exception:
+            config_path = None
+
+        # Probe for the JSON contract.  Routing to the wizard wins when
+        # both the binary is on PATH and `config show --json` returns
+        # exit 0 + JSON-shaped stdout.
+        try:
+            from ...catalog import find_client_binary
+            client_bin = find_client_binary(client)
+        except Exception:
+            client_bin = None
+
+        if (client_bin and config_path
+                and self._client_supports_json_contract(client_bin, config_path)):
+            self._open_textual_wizard(client, client_bin, config_path)
+            return
+
+        # Fall back to whiptail.
+        from ..mutation import confirm_and_run
         cmd = [_smd_binary(), 'config', 'edit', client, reporter]
         confirm_and_run(
             self.app,
             title=f"Edit {client}@{_display(reporter)}?",
             body=(
+                f"{client} doesn't expose the JSON config-roundtrip "
+                f"contract yet, so we fall back to its native wizard.\n\n"
                 f"Run [bold]sudo smd config edit {client} {reporter}[/]\n\n"
-                "The TUI suspends so the client's edit wizard (whiptail "
-                "or its $EDITOR fallback) owns the terminal.  Returns "
-                "here with the exit code when the editor exits."
+                "The TUI suspends so the client's whiptail wizard (or its "
+                "$EDITOR fallback) owns the terminal.  Returns here with "
+                "the exit code when the editor exits."
             ),
             cmd=cmd, sudo=True,
             on_complete=self._after_mutation,
+        )
+
+    @staticmethod
+    def _client_supports_json_contract(client_bin: str,
+                                       config_path: str) -> bool:
+        """Quick probe: does `<binary> config show --json --config <path>`
+        succeed?  Lightweight — we only need to know whether the contract
+        is wired, not parse the output here.  5s timeout matches the
+        diag-drop-in lint's tolerance for Python-heavy clients with
+        slow cold-start imports."""
+        try:
+            r = subprocess.run(
+                [client_bin, 'config', 'show', '--json',
+                 '--config', config_path],
+                capture_output=True, text=True,
+                timeout=5.0, check=False,
+                stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if r.returncode != 0:
+            return False
+        # JSON shape sanity — stdout should start with `{`.  Whitespace
+        # / log noise from older clients gets stripped first.
+        return r.stdout.lstrip().startswith("{")
+
+    def _open_textual_wizard(self, client: str, client_bin: str,
+                             config_path: str) -> None:
+        """Push the in-TUI Textual config wizard for one (client, instance).
+
+        The wizard is a ModalScreen — it dismisses with True on a
+        successful Save (operator chose Save AND the client's
+        ``config apply`` accepted the payload) or False on Cancel /
+        Escape.  We refresh the instance table either way to pick up
+        any side effects.
+        """
+        from .textual_wizard import TextualConfigWizardScreen
+
+        def _after_wizard(saved: bool) -> None:
+            tag = _display(config_path.rsplit("/", 1)[-1].removesuffix(".toml"))
+            if saved:
+                self._set_last(
+                    f"[green]✔ saved via in-TUI wizard[/]  {client} @ {tag}")
+            else:
+                self._set_last(
+                    f"[dim]cancelled in-TUI wizard[/]  {client} @ {tag}")
+            self._refresh()
+
+        self.app.push_screen(
+            TextualConfigWizardScreen(
+                client_name=client,
+                client_bin=client_bin,
+                config_path=config_path,
+            ),
+            _after_wizard,
         )
 
     def _do_remove(self) -> None:
