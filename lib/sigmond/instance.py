@@ -192,6 +192,65 @@ class Instance:
         return self.paths.reporter_id
 
 
+def _safe_exists(path: Path) -> bool:
+    """Path.exists() that swallows PermissionError.
+
+    `/etc/<client>/` for service-user-owned components (hf-gps-tec,
+    mag-recorder, hf-timestd, …) is mode 0750; an unprivileged
+    operator running `smd tui` can't stat its children.  Python 3.12+
+    (and Debian's 3.11.2 backport) re-raises PermissionError from
+    Path.exists() instead of returning False, which would crash
+    list_instances() rather than degrade.  Treat "can't tell" as
+    "yes" — the caller is enumerating files we found a different way
+    (e.g. by systemctl unit name), so the path is presumed present.
+    """
+    try:
+        return path.exists()
+    except PermissionError:
+        return True
+
+
+def _list_units_for_client(client: str) -> list[str]:
+    """systemctl-based fallback when /etc/<client>/ is unreadable.
+
+    Returns the reporter_id portion of every `<client>@<reporter>.service`
+    currently loaded or persistently enabled.  Works without any
+    /etc read access.
+    """
+    import subprocess
+    rids: set[str] = set()
+    pattern = f"{client}@*.service"
+    for sub_args in (
+        ["list-units", pattern, "--no-legend", "--no-pager", "--plain"],
+        ["list-unit-files", pattern, "--no-legend", "--no-pager"],
+    ):
+        try:
+            r = subprocess.run(
+                ["systemctl", *sub_args],
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode != 0:
+            continue
+        for line in (r.stdout or "").splitlines():
+            unit = line.split()[0] if line.split() else ""
+            if not unit.endswith(".service"):
+                continue
+            base = unit[: -len(".service")]
+            if "@" not in base:
+                continue
+            cli, _, rid = base.partition("@")
+            if cli != client or not rid:
+                continue
+            try:
+                validate_reporter_id(rid)
+            except InvalidReporterId:
+                continue
+            rids.add(rid)
+    return sorted(rids)
+
+
 def list_instances(catalog_clients: Optional[list[str]] = None) -> list[Instance]:
     """Walk /etc/<client>/<reporter_id>.toml across known clients.
 
@@ -204,35 +263,72 @@ def list_instances(catalog_clients: Optional[list[str]] = None) -> list[Instance
     `wspr-recorder-config.toml` shape) are silently skipped — those
     are pre-multi-instance deployments that haven't been migrated
     yet, handled by `smd instance migrate`.
+
+    Operator-callable: when /etc/<client>/ is service-user-owned
+    (mode 0750 — hf-gps-tec, mag-recorder, hf-timestd, …) the glob
+    silently returns nothing for an unprivileged caller.  In that
+    case we fall back to a systemctl unit enumeration so the operator
+    still sees their instances in `smd tui` Configuration without
+    needing root.
     """
     results: list[Instance] = []
     etc = Path("/etc")
 
     if catalog_clients is None:
-        client_dirs = [
-            p for p in etc.iterdir()
-            if p.is_dir() and not p.name.startswith(".")
-        ] if etc.exists() else []
+        try:
+            client_dirs = [
+                p for p in etc.iterdir()
+                if p.is_dir() and not p.name.startswith(".")
+            ] if etc.exists() else []
+        except (PermissionError, OSError):
+            client_dirs = []
     else:
         client_dirs = [etc / c for c in catalog_clients]
 
     for client_dir in client_dirs:
-        if not client_dir.is_dir():
+        try:
+            is_dir = client_dir.is_dir()
+        except (PermissionError, OSError):
+            is_dir = True   # presumed present; we'll fall back to systemctl below
+        if not is_dir:
             continue
         client = client_dir.name
-        for cfg in sorted(client_dir.glob("*.toml")):
+
+        # Primary path: glob /etc/<client>/*.toml.
+        rids_seen: set[str] = set()
+        try:
+            cfg_files = sorted(client_dir.glob("*.toml"))
+        except (PermissionError, OSError):
+            cfg_files = []
+        for cfg in cfg_files:
             stem = cfg.stem
             try:
                 validate_reporter_id(stem)
             except InvalidReporterId:
                 continue
+            rids_seen.add(stem)
             paths = instance_paths(client, stem)
             results.append(Instance(
                 paths=paths,
-                has_config=paths.config.exists(),
-                has_env=paths.env.exists(),
-                has_sources=paths.sources.exists(),
+                has_config=_safe_exists(paths.config),
+                has_env=_safe_exists(paths.env),
+                has_sources=_safe_exists(paths.sources),
             ))
+
+        # Fallback path: directory unreadable (or no .toml found yet but
+        # the operator may have units enabled via `smd instance add`'s
+        # systemd step).  systemctl works without /etc read access.
+        if not cfg_files:
+            for rid in _list_units_for_client(client):
+                if rid in rids_seen:
+                    continue
+                paths = instance_paths(client, rid)
+                results.append(Instance(
+                    paths=paths,
+                    has_config=_safe_exists(paths.config),
+                    has_env=_safe_exists(paths.env),
+                    has_sources=_safe_exists(paths.sources),
+                ))
 
     results.sort(key=lambda i: (i.client, i.reporter_id))
     return results
