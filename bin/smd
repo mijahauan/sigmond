@@ -10079,6 +10079,42 @@ def _check_catalog_client(client: str) -> bool:
         return True   # catalog unreadable — don't block instance ops
 
 
+def _normalize_reporter_arg(args, inst) -> bool:
+    """Accept the user's reporter ID in either slash or hyphen form,
+    mutate args.reporter_id in-place to the path-safe storage form.
+
+    Users type `AC0G/B1` (the WSPRnet/callsign form) or `AC0G-B1`
+    (the direct hyphen form).  Storage uses `=` for `/` so
+    `AC0G/B1` → `AC0G=B1`.  Hyphens are user-intentional (real
+    callsigns like `W1ABC-5`) and stay untouched.
+
+    Returns True on success.  On invalid input, logs an error via
+    `_err` and returns False — caller should `return 1`.
+    """
+    raw = args.reporter_id
+    try:
+        args.reporter_id = inst.parse_user_reporter_id(raw)
+    except inst.InvalidReporterId as exc:
+        _err(str(exc))
+        return False
+    return True
+
+
+def _display_reporter(reporter_id: str, inst=None) -> str:
+    """Render a stored reporter ID for user-facing strings.
+
+    Stored form may carry `=` where the user typed `/`; this reverts
+    it.  No-op for hyphen-only IDs.
+    """
+    if inst is None:
+        try:
+            from sigmond.instance import display_reporter_id
+        except ImportError:
+            return reporter_id
+        return display_reporter_id(reporter_id)
+    return inst.display_reporter_id(reporter_id)
+
+
 def cmd_instance_list(args) -> int:
     inst = _instance_module()
     if inst is None:
@@ -10100,7 +10136,7 @@ def cmd_instance_list(args) -> int:
         c = '✓' if i.has_config else '-'
         e = '✓' if i.has_env else '-'
         s = '✓' if i.has_sources else '-'
-        print(f'  {i.client:<22} {i.reporter_id:<18} '
+        print(f'  {i.client:<22} {_display_reporter(i.reporter_id, inst):<18} '
               f'{c:>7} {e:>5} {s:>8}')
     return 0
 
@@ -10109,17 +10145,20 @@ def cmd_instance_show(args) -> int:
     inst = _instance_module()
     if inst is None:
         return 1
+    if not _normalize_reporter_arg(args, inst):
+        return 1
     try:
         i = inst.get_instance(args.client, args.reporter_id)
     except inst.InvalidReporterId as exc:
         _err(str(exc))
         return 1
+    display_rid = _display_reporter(args.reporter_id, inst)
     if i is None:
-        _err(f'{args.client}@{args.reporter_id}: no per-instance files '
+        _err(f'{args.client}@{display_rid}: no per-instance files '
              f'(use `smd instance add` to create)')
         return 1
-    _heading(f'instance: {args.client}@{args.reporter_id}')
-    print(f'  reporter_id (WSPRnet form):  {inst.to_wsprnet_form(args.reporter_id)}')
+    _heading(f'instance: {args.client}@{display_rid}')
+    print(f'  reporter ID:  {display_rid}')
     print(f'  config:   {i.paths.config}  {"[ok]" if i.has_config else "[MISSING]"}')
     print(f'  env:      {i.paths.env}  {"[ok]" if i.has_env else "[MISSING]"}')
     print(f'  sources:  {i.paths.sources}  {"[ok]" if i.has_sources else "[MISSING]"}')
@@ -10154,8 +10193,11 @@ def cmd_instance_add(args) -> int:
     inst = _instance_module()
     if inst is None:
         return 1
+    if not _normalize_reporter_arg(args, inst):
+        return 1
     client = args.client
     reporter_id = args.reporter_id
+    display_rid = _display_reporter(reporter_id, inst)
     if not _check_catalog_client(client):
         _err(f'{client!r}: not a known client in the catalog '
              f'(run `smd component list --catalog`)')
@@ -10175,16 +10217,16 @@ def cmd_instance_add(args) -> int:
         _err(str(exc))
         return 1
     verb = '(dry-run) would create' if getattr(args, 'dry_run', False) else 'created'
-    _ok(f'{verb} instance {client}@{reporter_id}')
+    _ok(f'{verb} instance {client}@{display_rid}')
     _info(f'  config:   {paths.config}')
     _info(f'  env:      {paths.env}')
     _info(f'  sources:  {paths.sources}')
     if not getattr(args, 'dry_run', False):
         _info('')
         _info(f'next: wire sources and edit the config, then enable:')
-        _info(f'  smd sources add {client}@{reporter_id} <kind>:<id>')
-        _info(f'  smd instance edit {client} {reporter_id}')
-        _info(f'  sudo smd instance enable {client} {reporter_id}')
+        _info(f'  smd sources add {client}@{display_rid} <kind>:<id>')
+        _info(f'  smd instance edit {client} {display_rid}')
+        _info(f'  sudo smd instance enable {client} {display_rid}')
     return 0
 
 
@@ -10195,18 +10237,21 @@ def cmd_instance_remove(args) -> int:
     inst = _instance_module()
     if inst is None:
         return 1
+    if not _normalize_reporter_arg(args, inst):
+        return 1
     try:
         i = inst.get_instance(args.client, args.reporter_id)
     except inst.InvalidReporterId as exc:
         _err(str(exc))
         return 1
+    display_rid = _display_reporter(args.reporter_id, inst)
     if i is None:
-        _err(f'{args.client}@{args.reporter_id}: no per-instance files found')
+        _err(f'{args.client}@{display_rid}: no per-instance files found')
         return 1
     purge = getattr(args, 'purge', False)
     dry_run = getattr(args, 'dry_run', False)
     if not getattr(args, 'yes', False) and not dry_run:
-        _warn(f'about to remove {args.client}@{args.reporter_id} '
+        _warn(f'about to remove {args.client}@{display_rid} '
               f'{"(+ purge data/log dirs)" if purge else "(config + env + sources only)"}')
         try:
             ans = input('  proceed? [y/N] ')
@@ -10227,7 +10272,7 @@ def cmd_instance_remove(args) -> int:
     if not dry_run:
         _info('')
         _info(f'unit {i.paths.unit_name} is NOT touched; '
-              f'run `sudo smd instance disable {args.client} {args.reporter_id}` '
+              f'run `sudo smd instance disable {args.client} {display_rid}` '
               f'separately if needed')
     return 0
 
@@ -10237,6 +10282,8 @@ def cmd_instance_enable(args) -> int:
         return 1
     inst = _instance_module()
     if inst is None:
+        return 1
+    if not _normalize_reporter_arg(args, inst):
         return 1
     try:
         paths = inst.instance_paths(args.client, args.reporter_id)
@@ -10270,6 +10317,8 @@ def cmd_instance_disable(args) -> int:
     inst = _instance_module()
     if inst is None:
         return 1
+    if not _normalize_reporter_arg(args, inst):
+        return 1
     try:
         paths = inst.instance_paths(args.client, args.reporter_id)
     except inst.InvalidReporterId as exc:
@@ -10298,6 +10347,8 @@ def cmd_instance_edit(args) -> int:
     """
     inst = _instance_module()
     if inst is None:
+        return 1
+    if not _normalize_reporter_arg(args, inst):
         return 1
     try:
         paths = inst.instance_paths(args.client, args.reporter_id)
@@ -10362,27 +10413,28 @@ def cmd_instance_migrate(args) -> int:
     for c in candidates:
         print()
         _heading(f'{c.client}@{c.old_instance}')
-        prompt = (f'  new reporter ID (e.g. AC0G-B1) '
+        prompt = (f'  new reporter ID (e.g. AC0G/B1 or W1ABC-5) '
                   f'[blank to skip]: ')
         try:
-            reporter_id = input(prompt).strip()
+            raw_input_str = input(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             _info('aborted')
             return 1
-        if not reporter_id:
+        if not raw_input_str:
             _info(f'  skipped {c.client}@{c.old_instance}')
             skipped += 1
             continue
         try:
-            inst.validate_reporter_id(reporter_id)
+            reporter_id = inst.parse_user_reporter_id(raw_input_str)
         except inst.InvalidReporterId as exc:
             _err(f'  {exc}')
             skipped += 1
             continue
+        display_rid = _display_reporter(reporter_id, inst)
         confirm = input(
             f'  migrate {c.client}@{c.old_instance} → '
-            f'{c.client}@{reporter_id}? [y/N] '
+            f'{c.client}@{display_rid}? [y/N] '
         ).strip().lower()
         if confirm not in ('y', 'yes'):
             _info('  skipped')
@@ -11062,7 +11114,9 @@ def main() -> int:
              'reporter (requires root; does NOT enable the unit)')
     p_i_add.add_argument('client', help='client name')
     p_i_add.add_argument('reporter_id',
-                         help='reporter ID; must match [A-Z0-9][A-Z0-9-]*[A-Z0-9]')
+                         help='reporter ID (e.g. AC0G/B1 or W1ABC-5); '
+                              'slashes are stored as `=` internally and '
+                              're-displayed as `/`')
     p_i_add.add_argument('--force', action='store_true',
                          help='create only missing files; leave existing ones in place')
     p_i_add.add_argument('--dry-run', action='store_true',

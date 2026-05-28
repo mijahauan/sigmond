@@ -21,6 +21,12 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, RichLog, Select, Static, Switch
 from textual.worker import get_current_worker
 
+try:
+    from ...instance import display_reporter_id as _display_reporter_id
+except ImportError:
+    def _display_reporter_id(rid: str) -> str:
+        return rid.replace("=", "/")
+
 
 def _smd_binary() -> str:
     argv0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""

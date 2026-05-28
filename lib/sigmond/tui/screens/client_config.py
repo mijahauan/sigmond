@@ -31,6 +31,12 @@ from textual.worker import Worker, WorkerState
 from ..mutation import confirm_and_run
 from .textual_wizard import TextualConfigWizardScreen
 
+try:
+    from ...instance import display_reporter_id as _display_reporter_id
+except ImportError:
+    def _display_reporter_id(rid: str) -> str:
+        return rid.replace("=", "/")
+
 
 # Sentinel for the per-instance dropdown "no instance" value.
 _NO_INSTANCE = "__none__"

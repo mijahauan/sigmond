@@ -30,6 +30,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Select, Static
 from textual.worker import Worker, WorkerState
 
+from ...instance import display_reporter_id as _display_reporter_id
 from ...instance import list_instances
 
 
@@ -309,7 +310,9 @@ def _instance_options() -> list[tuple[str, str]]:
                    "hfdl-recorder", "codar-sounder"):
         try:
             for inst in list_instances(catalog_clients=[client]):
-                label = f"{client}@{inst.reporter_id}"
+                # Slash form for human-readable label; storage form in
+                # the value so downstream parsing stays path-safe.
+                label = f"{client}@{_display_reporter_id(inst.reporter_id)}"
                 value = f"{client}|{inst.reporter_id}"
                 options.append((label, value))
         except Exception:

@@ -35,8 +35,32 @@ from .paths import SIGMOND_CONF
 # ---------------------------------------------------------------------------
 # Reporter ID — path-safe by construction (MULTI-INSTANCE-ARCHITECTURE.md §3)
 # ---------------------------------------------------------------------------
+#
+# A reporter ID is the operator-meaningful identifier for one recording
+# station (e.g. WSPRnet would credit spots to `AI6VN/P` or `AC0G/B1`).
+# Sigmond stores the ID as path-safe ASCII so it can serve double duty
+# as a filename stem, systemd `%i`, and shell argv: the WSPRnet slash
+# is stored as `=` (a sentinel character no operator naturally enters
+# in a callsign-shaped name).  Hyphens are passed through verbatim
+# because real operators DO use hyphens — e.g. `W1ABC-5` (a member
+# identifier where the `-5` is intentional, not a slash) or
+# `KP4MD-RPI-4` (a hyphen-suffixed station name).  Translating those
+# back to `/5` or `/RPI-4` at display time would be incorrect; the
+# `=`-only convention avoids that ambiguity.
+#
+#   user types  →  stored as   →  displayed as
+#   AC0G/B1        AC0G=B1        AC0G/B1
+#   AC0G-B1        AC0G-B1        AC0G-B1
+#   W1ABC-5        W1ABC-5        W1ABC-5
+#   KP4MD-RPI-4    KP4MD-RPI-4    KP4MD-RPI-4
+#   AI6VN/P        AI6VN=P        AI6VN/P
+#
+# `=` is also the convention `hs-uploader/transports/wsprdaemon.py`
+# already uses for the per-rx tar path component
+# (`call.replace("/", "=")`), so the storage form lines up with what
+# wsprdaemon.org's gateway already expects.
 
-REPORTER_ID_REGEX = re.compile(r"^[A-Z0-9][A-Z0-9-]*[A-Z0-9]$")
+REPORTER_ID_REGEX = re.compile(r"^[A-Z0-9][A-Z0-9=-]*[A-Z0-9]$")
 
 
 class InvalidReporterId(ValueError):
@@ -46,10 +70,10 @@ class InvalidReporterId(ValueError):
 def validate_reporter_id(reporter_id: str) -> None:
     """Raise InvalidReporterId if `reporter_id` is not path-safe.
 
-    See MULTI-INSTANCE-ARCHITECTURE.md §3 for the format rule:
-    uppercase alphanumerics + ASCII hyphens; no leading/trailing
-    hyphen.  Min length 2 (the regex's `[A-Z0-9][A-Z0-9-]*[A-Z0-9]`
-    forces start and end chars to be non-hyphen alphanumerics).
+    Path-safe = uppercase alphanumerics, ASCII hyphens, and the `=`
+    sentinel (which represents a `/` in the user's original entry).
+    No leading or trailing separator; min length 2.  See module
+    docstring above for the storage/display invariant.
     """
     if not isinstance(reporter_id, str) or not reporter_id:
         raise InvalidReporterId(
@@ -59,23 +83,48 @@ def validate_reporter_id(reporter_id: str) -> None:
         raise InvalidReporterId(
             f"reporter ID {reporter_id!r} is not path-safe; "
             f"must match {REPORTER_ID_REGEX.pattern} "
-            f"(uppercase alphanumerics + hyphens; no leading/trailing "
-            f"hyphen; min length 2).  WSPRnet's slash form gets "
-            f"rendered only at upload time."
+            f"(uppercase alphanumerics, hyphens, `=`; no leading/"
+            f"trailing separator; min length 2).  Hint: enter the "
+            f"slash form (`AC0G/B1`) — sigmond stores it internally "
+            f"as `AC0G=B1` and re-displays the slash."
         )
 
 
-def to_wsprnet_form(reporter_id: str) -> str:
-    """Render a sigmond reporter ID into WSPRnet's slash form.
+def parse_user_reporter_id(user_input: str) -> str:
+    """Convert a user's reporter-ID entry into the path-safe storage form.
 
-    Mechanical: first hyphen becomes the slash; remaining hyphens
-    stay part of the suffix.  E.g.  `AC0G-B1` → `AC0G/B1`,
-    `KP4MD-RPI-4` → `KP4MD/RPI-4`.
+    Users may type the WSPRnet/callsign form with a forward slash
+    (e.g. `AC0G/B1`, `AI6VN/P`) or the direct storage form with
+    hyphens-only (e.g. `W1ABC-5`).  We uppercase, strip whitespace,
+    and substitute `/` with the `=` sentinel.  Hyphens — which are
+    legitimate in callsigns like `W1ABC-5` — are left alone.
 
-    Only used at the WSPRnet upload boundary; sigmond-internal
-    surfaces never see the slash form.
+    Raises InvalidReporterId if the result isn't path-safe.  Inverse
+    of `display_reporter_id`.
     """
-    return reporter_id.replace("-", "/", 1)
+    if not isinstance(user_input, str):
+        raise InvalidReporterId("reporter ID must be a string")
+    storage = user_input.strip().upper().replace("/", "=")
+    validate_reporter_id(storage)
+    return storage
+
+
+def display_reporter_id(reporter_id: str) -> str:
+    """Render a stored reporter ID for user-facing display.
+
+    The `=` sentinels in the stored form mark where the user
+    originally typed `/`; revert them.  Hyphens are user-intentional
+    and stay.  Inverse of `parse_user_reporter_id`.
+    """
+    return reporter_id.replace("=", "/")
+
+
+# Back-compat alias.  `to_wsprnet_form` previously did a mechanical
+# first-hyphen → slash conversion (which mis-translated hyphenated
+# callsigns like `W1ABC-5` → `W1ABC/5`).  The new convention stores
+# slashes as `=` and reverts them at display time, so this is now
+# identical to display_reporter_id.  Callers may use either name.
+to_wsprnet_form = display_reporter_id
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,12 @@ from textual.widgets import Button, Checkbox, Input, Label, RichLog, Select, Sta
 
 from ..mutation import confirm_and_run
 
+try:
+    from ...instance import display_reporter_id as _display_reporter_id
+except ImportError:
+    def _display_reporter_id(rid: str) -> str:
+        return rid.replace("=", "/")
+
 
 def _smd_binary() -> str:
     argv0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""

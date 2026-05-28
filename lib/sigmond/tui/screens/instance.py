@@ -23,6 +23,12 @@ from textual.widgets import Button, DataTable, Input, Label, RichLog, Static
 
 from ..mutation import confirm_and_run
 
+try:
+    from ...instance import display_reporter_id as _display
+except ImportError:
+    def _display(rid: str) -> str:
+        return rid.replace("=", "/")
+
 
 def _smd_binary() -> str:
     argv0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
@@ -121,7 +127,7 @@ class InstanceScreen(Vertical):
                         placeholder=" / ".join(_INSTANCE_CAPABLE_CLIENTS[:2]) + " / …")
             yield Label("Reporter")
             yield Input("", id="in-add-reporter",
-                        placeholder="e.g. AC0G-B1")
+                        placeholder="e.g. AC0G/B1 or W1ABC-5")
             yield Button("Add (dry-run)", id="in-add-dry",
                          variant="default")
             yield Button("Add", id="in-add-run", variant="success")
@@ -185,7 +191,10 @@ class InstanceScreen(Vertical):
             c = "✓" if i.has_config else "-"
             e = "✓" if i.has_env else "-"
             s = "✓" if i.has_sources else "-"
-            table.add_row(i.client, i.reporter_id, c, e, s,
+            # Display the slash form (user-facing); keep the row key
+            # in storage form (`=`-encoded) so downstream `smd instance
+            # remove` argv is path-safe.
+            table.add_row(i.client, _display(i.reporter_id), c, e, s,
                           key=f"{i.client}|{i.reporter_id}")
         self.query_one("#in-last", Static).update(
             f"[dim]{len(instances)} instance(s)[/]")
@@ -242,7 +251,7 @@ class InstanceScreen(Vertical):
                '--yes']
         confirm_and_run(
             self.app,
-            title=f"Remove instance {client}@{reporter}?",
+            title=f"Remove instance {client}@{_display(reporter)}?",
             body=("Removes per-instance config / env / sources files. "
                   "Does NOT stop or disable the systemd unit — run "
                   "`sudo smd instance disable` first if the unit is "
