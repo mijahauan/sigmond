@@ -143,8 +143,11 @@ class LifecycleScreenTests(unittest.IsolatedAsyncioTestCase):
                                 for c in app.query_one("#center").children))
 
     async def test_verb_button_builds_correct_argv(self):
+        """With the new multi-select model, Start fires only after the
+        operator has checked at least one row.  Verify the argv shape
+        for an instance-row selection (targets `systemctl` directly)."""
         from sigmond.tui.app import SigmondApp
-        from sigmond.tui.screens.lifecycle import LifecycleScreen
+        from sigmond.tui.screens.lifecycle import LifecycleScreen, _Row
 
         captured_argv = []
         fake_result = subprocess.CompletedProcess(args=[], returncode=0)
@@ -159,6 +162,22 @@ class LifecycleScreenTests(unittest.IsolatedAsyncioTestCase):
             for _ in range(3):
                 await pilot.pause()
 
+            # Find the mounted LifecycleScreen and inject a controlled
+            # row + check it.  Avoids depending on the test host's
+            # actual topology for this argv-shape assertion.
+            screen = next(c for c in app.query()
+                          if isinstance(c, LifecycleScreen))
+            screen._rows = [_Row(
+                key="psk-recorder@AC0G-B1.service",
+                display="psk-recorder@AC0G-B1",
+                kind="instance",
+                active="active",
+                unit="psk-recorder@AC0G-B1.service",
+                component="psk-recorder",
+                n_units=1, n_active=1,
+            )]
+            screen._checked = {"psk-recorder@AC0G-B1.service"}
+
             with patch("sigmond.tui.mutation.suspend_and_run_sudo",
                        side_effect=fake_runner):
                 app.query_one("#lc-start").press()
@@ -170,11 +189,13 @@ class LifecycleScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(captured_argv), 1,
                          f"expected one runner call; got {captured_argv}")
         argv = captured_argv[0]
-        # argv passed to suspend_and_run_sudo is the raw command; 'sudo'
-        # is prepended inside the runner.
-        self.assertTrue(argv[0].endswith('smd'),
-                        f"expected smd binary; got {argv[0]}")
-        self.assertEqual(argv[1], 'start')
+        # Instance-row actions target systemctl directly (not `smd start`),
+        # because single-unit actions don't need the cross-component
+        # lifecycle lock that `smd <verb>` exists to manage.
+        self.assertEqual(argv[0], 'systemctl', f"argv={argv}")
+        self.assertEqual(argv[1], 'start', f"argv={argv}")
+        self.assertEqual(argv[2], 'psk-recorder@AC0G-B1.service',
+                         f"argv={argv}")
 
 
 if __name__ == '__main__':
