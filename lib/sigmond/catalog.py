@@ -22,7 +22,8 @@ fields absent in a higher layer fall through unchanged.
 The shift from "first-file-wins, whole-entry-replacement" to layered
 sparse overlay was driven by silent drift: an operator file that
 predated a repo-side entry would shadow the whole catalog, hiding new
-clients (and source-only deps like mag-usb) until manually re-synced.
+clients (and source-only deps like callhash / hs-uploader) until
+manually re-synced.
 
 Tests pass an explicit ``path=`` to read a single file as-is; the
 discovery glob and overlay logic only fire for the no-arg call.

@@ -63,19 +63,15 @@ kind            = "client"
 description     = "RM3100 magnetometer recorder + PSWS uploader (non-radiod, §16 'other')"
 repo            = "https://github.com/mijahauan/mag-recorder"
 uses            = []
-requires        = ["mag-usb", "hs-uploader"]          # C-source dep + sibling pkg for uv editable install
+requires        = ["hs-uploader"]                     # sibling pkg for uv editable install
 contract        = "0.8"
 start_priority  = 200                                 # parallel with decoder chain
 # No install_script: install via `smd install mag-recorder` (deploy.toml drives the steps).
 # No topology_alias: avoid the deprecated alias surface for a brand-new client.
-
-[client.mag-usb]
-kind            = "library"                           # source-only dep: clone, no separate install
-description     = "USB driver for RM3100 magnetometers (built by mag-recorder/install.sh)"
-repo            = "https://github.com/wittend/mag-usb"
-# No install_script: mag-recorder's install.sh runs cmake/make against this checkout
-# and writes the binary to /usr/local/bin/mag-usb.  Sigmond auto-clones it as a
-# source-only dep before invoking mag-recorder's installer.
+# The `mag-usb` C binary is bundled inside mag-recorder (bin/mag-usb +
+# scripts/build-mag-usb.sh) per sigmond/docs/native-binaries.md — same
+# pattern as hfdl-recorder owning dumphfdl — and so is intentionally NOT
+# a separate catalog entry.
 
 [client.hs-uploader]
 kind            = "library"                           # source-only dep from the catalog's perspective

@@ -83,11 +83,11 @@ def _probe_sdr() -> Presence:
 
 def _probe_magnetometer() -> Presence:
     """RM3100 USB magnetometer presence — check the /dev node sigmond's
-    mag-recorder unit expects, plus the udev-named symlink the mag-usb
-    rules create."""
+    mag-recorder unit expects, plus the udev-named symlink the bundled
+    mag-usb rules create."""
     candidates = [
         Path("/dev/ttyMAG0"),
-        # udev-named alternates from mag-usb's rules (best-effort list).
+        # udev-named alternates from the bundled mag-usb rules (best-effort).
         Path("/dev/mag-rm3100"),
     ]
     for p in candidates:
@@ -146,7 +146,6 @@ def _lsusb_has(vid_pids: list[str]) -> Presence:
 _PROBES: dict[str, Callable[[], Presence]] = {
     "ka9q-radio":    _probe_sdr,
     "mag-recorder":  _probe_magnetometer,
-    "mag-usb":       _probe_magnetometer,
     "gpsdo-monitor": _probe_gpsdo,
 }
 

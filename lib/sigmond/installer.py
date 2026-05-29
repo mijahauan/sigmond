@@ -427,9 +427,10 @@ def _clone_source_only_deps(
     """Auto-clone source-only deps declared in ``entry.requires``.
 
     A "source-only dep" is a catalog entry with a ``repo`` URL but no
-    ``install_script`` — the consumer's install.sh builds against the
-    checkout (e.g. mag-recorder's install.sh runs cmake on
-    ``/opt/git/sigmond/mag-usb`` to produce ``/usr/local/bin/mag-usb``).
+    ``install_script`` — the consumer's install.sh / pyproject.toml
+    references the checkout directly (e.g. ``callhash`` and
+    ``hs-uploader`` are declared as ``[tool.uv.sources]`` editable
+    siblings by wspr-recorder / psk-recorder / mag-recorder).
     Sigmond's job is to ensure the source tree exists where the
     consumer expects it.
 

@@ -270,7 +270,7 @@ override the same keys from earlier layers; missing keys fall through:
 2. **Repo default** — `etc/catalog.toml` shipped with sigmond.  Adds
    entries that can't be discovered (`ka9q-radio` has no
    `/opt/git/sigmond/` checkout), source-only dep declarations
-   (`mag-usb`, `hs-uploader`), and `[deprecated.<name>]` blocks.
+   (`callhash`, `hs-uploader`), and `[deprecated.<name>]` blocks.
 3. **Operator override** — `/etc/sigmond/catalog.toml` (per-host).
    Should contain *only* the fields a host genuinely overrides —
    e.g. `repo = "git@my-fork:foo"`.
@@ -280,10 +280,10 @@ override the same keys from earlier layers; missing keys fall through:
 The pre-`7d172b4` design read the first existing file and replaced
 whole `CatalogEntry` objects.  An operator file that predated a new
 repo-side entry silently shadowed the whole catalog, so new clients
-(and source-only deps like `mag-usb`) stayed invisible until each
-host manually re-synced `/etc/sigmond/catalog.toml`.  Sparse overlay
-makes new repo entries propagate on `git pull` with zero per-host
-sync work.
+(and source-only deps like `callhash` / `hs-uploader`) stayed
+invisible until each host manually re-synced
+`/etc/sigmond/catalog.toml`.  Sparse overlay makes new repo entries
+propagate on `git pull` with zero per-host sync work.
 
 ### `[deprecated.<name>]` blocks
 

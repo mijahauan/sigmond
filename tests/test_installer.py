@@ -162,34 +162,36 @@ class TestInstallClient:
         """A consumer's `requires` entry that is a pure source dep
         (repo set, no install_script, not yet on disk) is cloned to
         /opt/git/sigmond/<dep> before the consumer's install.sh runs.
-        Mirrors the mag-recorder → mag-usb relationship.
+        Mirrors the wspr-recorder / psk-recorder / mag-recorder →
+        callhash / hs-uploader relationship (catalog entry with a repo
+        URL but no install_script).
 
         Pins GIT_BASE to tmp_path so the dep-already-on-disk check
-        doesn't see a real /opt/git/sigmond/mag-usb on a host where
-        mag-recorder is actually installed."""
+        doesn't see a real /opt/git/sigmond/<dep> on a host where the
+        consumer is actually installed."""
         monkeypatch.setattr('sigmond.installer.GIT_BASE', tmp_path)
         repo = tmp_path / 'mag-recorder'
         repo.mkdir()
         script = repo / 'install.sh'
         script.write_text('#!/bin/sh\n')
         entry = _entry(name='mag-recorder', install_script=None,
-                       requires=('mag-usb',))
+                       requires=('hs-uploader',))
         dep = CatalogEntry(
-            name='mag-usb', kind='library', description='C source dep',
-            repo='https://github.com/wittend/mag-usb',
+            name='hs-uploader', kind='library', description='Python source dep',
+            repo='https://github.com/mijahauan/hs-uploader',
             install_script=None,
         )
-        catalog = {'mag-recorder': entry, 'mag-usb': dep}
+        catalog = {'mag-recorder': entry, 'hs-uploader': dep}
         with mock.patch('sigmond.installer.clone_repo') as cr:
-            cr.side_effect = [repo, tmp_path / 'mag-usb']
+            cr.side_effect = [repo, tmp_path / 'hs-uploader']
             with mock.patch('sigmond.installer.subprocess.run') as m:
                 m.return_value = mock.Mock(returncode=0)
                 assert install_client(entry, catalog=catalog) is True
                 # clone_repo should have been called twice: once for the
                 # consumer (pull_if_exists=False, the default), then again
-                # for the mag-usb source dep.
+                # for the hs-uploader source dep.
                 cloned_names = [c.args[0].name for c in cr.call_args_list]
-                assert cloned_names == ['mag-recorder', 'mag-usb']
+                assert cloned_names == ['mag-recorder', 'hs-uploader']
 
     def test_no_catalog_script_discovers_in_repo(self, tmp_path):
         """mag-recorder pattern: catalog has no install_script, but the
