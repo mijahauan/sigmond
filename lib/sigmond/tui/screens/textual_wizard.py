@@ -283,6 +283,11 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
     TextualConfigWizardScreen .tw-input {
         width: 1fr;
     }
+    TextualConfigWizardScreen .tw-switch-state {
+        width: 14;
+        padding-top: 1;
+        padding-left: 1;
+    }
     TextualConfigWizardScreen .tw-hint {
         height: 1;
         color: $text 50%;
@@ -417,6 +422,58 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
         body = self._field_help.get(widget_id, "") if widget_id else ""
         footer.update(body if body else self._HELP_FOOTER_IDLE)
 
+    @staticmethod
+    def _switch_state_text(value: bool) -> str:
+        """Rendered text shown next to a boolean Switch.  Green ●
+        when enabled, red ○ when disabled — so the operator can see
+        at a glance which position means what, without having to
+        read help text or guess from the slider colour."""
+        return "[bold green]● Enabled[/]" if value else "[bold red]○ Disabled[/]"
+
+    @on(Switch.Changed)
+    def _on_switch_changed(self, event: Switch.Changed) -> None:
+        """Update the state-text sibling whenever a Switch toggles.
+
+        Each bool widget's state label is mounted with id
+        ``<switch_id>-state`` (see :meth:`_mount_leaf`); we look it
+        up via that convention and refresh its text.  Silently no-ops
+        for any Switch without the expected id (defensive — there are
+        no other Switches in the wizard today, but the wizard renders
+        client-supplied fields so anything can show up)."""
+        switch = getattr(event, "switch", None)
+        switch_id = getattr(switch, "id", None) if switch else None
+        if not switch_id:
+            return
+        try:
+            state_label = self.query_one(f"#{switch_id}-state", Static)
+        except Exception:
+            return
+        state_label.update(self._switch_state_text(event.value))
+
+    def _is_hidden(self, section: str, key: str) -> bool:
+        """Should the wizard hide this field?
+
+        help.toml authors mark invariant fields (e.g. ``[paths].dumphfdl``
+        — the binary lives at one canonical install path; operators
+        never edit it) with ``hidden = true``.  Hidden fields:
+
+        * are NOT rendered in the form (no row, no label, no widget),
+        * are NOT tracked in ``self._leaves`` (so save never emits
+          their key — the on-disk value survives untouched via
+          deep-merge),
+        * cause their parent section to disappear from the form if
+          they were that section's only scalars.
+
+        The principle (recorded in feedback memory): config files
+        should hold elements that vary per install or per instance;
+        invariants are code defaults, surfaced in config only when
+        an operator needs an emergency override knob.  Marking those
+        knobs ``hidden = true`` keeps the override available on disk
+        without polluting the operator-facing wizard.
+        """
+        entry = help_entry(self._help, section, key)
+        return bool(entry.get("hidden", False))
+
     def _load_data(self) -> tuple[Optional[dict], str]:
         return load_config_via_show(self._client_bin, self._config_path)
 
@@ -483,9 +540,13 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
             value = data[section_name]
             if isinstance(value, dict):
                 scalars = {k: v for k, v in value.items()
-                           if not isinstance(v, (dict, list))}
+                           if not isinstance(v, (dict, list))
+                           and not self._is_hidden(section_name, k)}
                 if not scalars:
-                    # Section exists but holds only sub-tables; skip in pilot.
+                    # Section exists but holds only sub-tables OR every
+                    # scalar in it is help.toml-hidden (e.g. an entire
+                    # ``[paths]`` block of install-canonical paths) —
+                    # don't render an empty header.
                     continue
                 scroll.mount(Static(f"[{section_name}]", classes="tw-section"))
                 for key in sorted(scalars.keys()):
@@ -555,7 +616,8 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
                 # Lists of scalars aren't a TOML idiom we expect here.
                 continue
             scalars = {k: v for k, v in block.items()
-                       if not isinstance(v, (dict, list))}
+                       if not isinstance(v, (dict, list))
+                       and not self._is_hidden(section_name, k)}
             nested = [k for k, v in block.items()
                       if isinstance(v, (dict, list))]
 
@@ -638,11 +700,22 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
         # placeholder is plain text.
         kind: str
         placeholder = ""
+        # Extra widgets appended to the row after the main editor.
+        # Currently only Switch uses this (to surface an inline
+        # Enabled/Disabled state label — Textual's bare Switch has no
+        # on/off labels and the slider colour alone isn't enough cue).
+        row_extras: tuple = ()
         if example is not None:
             placeholder = str(example)
         if isinstance(value, bool):
             kind = "bool"
             widget = Switch(value=value, id=widget_id)
+            row_extras = (Static(
+                self._switch_state_text(value),
+                id=f"{widget_id}-state",
+                classes="tw-switch-state",
+                markup=True,
+            ),)
         elif isinstance(value, int):
             kind = "int"
             widget = Input(
@@ -674,6 +747,7 @@ class TextualConfigWizardScreen(ModalScreen[bool]):
         scroll.mount(Horizontal(
             Static(display_label, classes="tw-label", markup=True),
             widget,
+            *row_extras,
             classes="tw-row",
         ))
         # Validator hint sits on its own dim line under the input,
