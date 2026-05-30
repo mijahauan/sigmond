@@ -30,6 +30,56 @@ Other design discussions in `docs/`:
 - `networking.md` — IGMP-snooping silent-failure mode and the
   igmp-querier mitigation.
 
+## CPU pinning & the Proxmox host
+
+Sigmond stations typically run as a **KVM guest on a Proxmox host**, and
+this shapes the CPU strategy in ways not visible from inside the guest:
+
+- **CPU frequency/governor control lives on the HOST, not the guest.**
+  The guest has no `cpufreq` at all (`/sys/.../cpufreq` is absent). Any
+  frequency work must be done on the Proxmox host.
+- **Each local radiod runs on a hyperthread sibling PAIR.** A radiod
+  instance's FFT and block threads share L1/L2 when placed on the two
+  logical CPUs of one physical core — a large efficiency win, and the
+  difference between clean capture and USB packet drops. So each *local*
+  radiod is pinned to its own sibling pair (first local radiod → the
+  first pair, a second → the next physical core's pair, etc.), and
+  everything else is kept off those cores.
+- **Decoder clients run on the remaining cores, never radiod's.**
+  wspr-recorder / psk-recorder / hfdl-recorder decode threads pollute
+  radiod's L3 and steal its cores if left unconfined — the standard
+  symptom is USB packet drops. They are pinned to the worker cores via
+  per-template `smd-cpu-affinity.conf` drop-ins, driven by
+  `AFFINITY_UNITS` in `lib/sigmond/cpu.py`. **If you add a new decoder
+  client, add it to `AFFINITY_UNITS`** or it silently runs on radiod's
+  cores (this exact regression hit wspr-recorder, which was missing from
+  the map).
+
+### How it's wired
+
+- **Host side** — `scripts/proxmox/bootstrap.sh` discovers the host's
+  hyperthread pairing and computes the layout (radiod pair, worker
+  cores, one HT pair reserved for the host), then `host-apply.sh`
+  renders `cpu-pin-VMID.sh.template` into a Proxmox **hookscript**
+  (`/var/lib/vz/snippets/cpu-pin-<VMID>.sh`, registered via
+  `qm config <VMID>` → `hookscript:`). On VM `post-start` the hookscript
+  (a) sets per-pCPU `scaling_max_freq` caps — radiod cores fast, worker
+  cores capped so the package can sustain radiod's clock under full
+  decode load — and (b) does **strict 1:1 vCPU→pCPU pinning**
+  (`taskset` per `CPU N/KVM` QEMU thread). The hookscript is the single
+  source of truth for host-side freq caps and pinning; **do not add a
+  separate systemd freq service** — it just duplicates the hookscript.
+- **Only "sequential" HT pairing is auto-configured.** bootstrap.sh
+  *dies* if the host's sibling layout isn't consecutive
+  (`{0,1},{2,3},…`), because the hookscript's identity vCPU→pCPU map only
+  preserves sibling pairs on such hosts. On a host where the sibling of
+  cpu0 is cpu8, configure manually per
+  `docs/proxmox/wsprdaemon-proxmox-cpu-clock-tuning.md`.
+
+Verify on a host: `cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list`
+(the real pairing), `qm config <VMID> | grep hookscript`, and the live
+per-vCPU pin via `taskset -pc <tid>` on the QEMU `CPU N/KVM` threads.
+
 ## Developer commands
 
 `smd` itself is stdlib-only at runtime, but the test suite and TUI need
