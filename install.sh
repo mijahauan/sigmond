@@ -577,8 +577,14 @@ $SUDO systemctl daemon-reload
 # in the service unit keeps it inactive until a producer writes — and even
 # with sink.db pre-created, `smd storage trim --all --yes` is a no-op on an
 # empty db.  Safe to enable on greenfield.
-$SUDO systemctl enable sigmond-storage-trim-all.timer
-ok "sigmond-storage-trim-all.timer enabled (15-min cadence)"
+# `enable --now` STARTS the timer immediately (not just at next boot).
+# Combined with the unit's OnActiveSec=10min, this guarantees a first
+# trim fire ~10 min after install — without it, a host installed but
+# never rebooted accumulates stale sink.db rows forever (the timer's
+# OnBootSec/OnUnitActiveSec have no anchor until reboot or a manual
+# service run).  Observed on B4-100 2026-05-30.
+$SUDO systemctl enable --now sigmond-storage-trim-all.timer
+ok "sigmond-storage-trim-all.timer enabled + started (15-min cadence)"
 
 # ─── smd symlink ──────────────────────────────────────────────────────────────
 info "Installing smd → $INSTALL_SMD"

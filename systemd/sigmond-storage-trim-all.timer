@@ -9,6 +9,16 @@ Description=Sigmond storage trim timer — all retention policies
 Documentation=https://github.com/mijahauan/sigmond
 
 [Timer]
+# OnActiveSec fires 10 min after the TIMER itself becomes active
+# (i.e. on `systemctl enable --now` at install time).  Without it,
+# a timer that has only OnBootSec + OnUnitActiveSec schedules NO next
+# fire until either the host reboots (OnBootSec anchor) or the service
+# runs once (OnUnitActiveSec anchor) — so on a host installed but never
+# rebooted, the trim never ran and sink.db grew unbounded.  Observed on
+# B4-100 2026-05-30: 42k stale rows accumulated over 3 days because the
+# timer had no anchor.  OnActiveSec guarantees a first fire after
+# install; OnUnitActiveSec then drives the recurring 15-min cadence.
+OnActiveSec=10min
 OnBootSec=10min
 OnUnitActiveSec=15min
 AccuracySec=5min
