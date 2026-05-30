@@ -48,6 +48,11 @@ AFFINITY_UNITS = {
     # polluting radiod's L3 cache and causing USB packet drops on
     # bee1 2026-05-09.  Adding them here lets `smd diag cpu-affinity
     # --apply` write the standard drop-in alongside everything else.
+    # wspr-recorder was missing from this list (regression: its decode
+    # threads ran on radiod's cores 0-1 — the exact contention this map
+    # exists to prevent, observed on B4-100 2026-05-30) — added so the
+    # standard non-radiod pin is written for it too.
+    'wspr-recorder@.service':            'other',
     'psk-recorder@.service':             'other',
     'hfdl-recorder@.service':            'other',
     # sigmond infra group
