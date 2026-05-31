@@ -83,6 +83,39 @@ Verify on a host: `cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_lis
 (the real pairing), `qm config <VMID> | grep hookscript`, and the live
 per-vCPU pin via `taskset -pc <tid>` on the QEMU `CPU N/KVM` threads.
 
+## Cross-process upload wake (notification vs. state)
+
+In a multi-receiver merge fleet each receiver
+(`wspr-recorder@B4-100`, `@bee1`, `@bee2`) is a **separate process**
+writing spots/noise into one shared `/var/lib/sigmond/sink.db`, but only
+the merge instance runs the uploader. Decoders signal "cycle committed"
+to the uploader through a **Unix datagram socket** —
+`/var/lib/sigmond/upload-wake.sock` (the `s`-type file, group-writable by
+`sigmond` so any recorder can send). See `wspr_recorder/upload_wake.py`
+(`notify()` = the ping, `WakeListener` = the answering thread;
+`WSPR_WAKE_DEBUG=1` traces send/receive), wired in `spot_sink.py`
+(`_on_per_rx_committed` calls `notify()` on every commit) and
+`hs_uploader_shim.py` (uploader binds the listener → sets the pump's wake
+Event).
+
+**The principle to preserve when touching this:** the socket is a
+**stateless edge trigger** — the datagram is a content-free `b"w"` from an
+*unbound* sender, so it carries **no identity and no count**; it only
+means "something changed, go look." The **shared `sink.db` is the source
+of truth.** On any wake the uploader *re-derives* completeness from the
+sink — it never tallies pings. "All N receivers done with cycle C" is a
+query (`wspr_completion.cycle_complete`): every `WD_MERGE_REPORTERS` name
+must have a noise row for C (noise is written last, so its presence ==
+that receiver is done). Because the trigger is decoupled from the truth,
+a **lost** ping (uploader restarting → ENOENT), a **duplicate** ping
+(fragmented commit), or **reordered** pings can't desync it; a 15 s
+polling backstop (`WSPR_PUMP_INTERVAL_SEC`) covers missed pings and
+`WD_MERGE_BACKSTOP_SEC` force-ships if a receiver dies. **Never** try to
+make the socket carry per-receiver state and count to N in memory — one
+lost/dup datagram would desync permanently and you'd lose the count
+across restarts. Treat notifications as hints; re-derive correctness from
+durable shared state.
+
 ## Developer commands
 
 `smd` itself is stdlib-only at runtime, but the test suite and TUI need
