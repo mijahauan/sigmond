@@ -580,7 +580,7 @@ def _build_onion(src_dir: Path) -> bool:
 # Pinned to a known-good commit (never a bare branch/HEAD) per
 # docs/native-binaries.md — bump _ONION_COMMIT when a newer onion is validated.
 _ONION_REPO   = 'https://github.com/davidmoreno/onion.git'
-_ONION_COMMIT = 'de8ea938342b36c28024fd8393ebc27b8442a161'   # master @ 2026-06-01
+_ONION_COMMIT = 'de8ea938342b36c28024fd8393ebc27b8442a161'   # master, build-validated 2026-06-01 (libonion.so.0.8.191)
 _ONION_SRC    = Path('/opt/git/sigmond/onion')      # sibling checkout (was /home/wsprdaemon/onion)
 
 # Build provenance for upstream C projects sigmond builds itself (the
