@@ -80,15 +80,16 @@ provenance moves out of the (un-ownable) upstream repo and into sigmond:
 | Component | Native dep | Source | Pinned? | Provenance? | Gap to close |
 |---|---|---|---|---|---|
 | `ka9q-radio` | radiod + `fobos` driver | `ka9q/ka9q-radio` (fobos in-tree) | tracks upstream | no | `fobos` disabled by default; `libfobos` is proprietary/external, so it stays opt-in |
-| `ka9q-web` | `onion` | `davidmoreno/onion` | **yes** — `_ONION_COMMIT` pinned | **yes** — `build-manifest/ka9q-web.toml` | ✓ migrated; remaining: a `smd diag` rule comparing installed vs pinned |
+| `ka9q-web` | `onion` | `davidmoreno/onion` | **yes** — `_ONION_COMMIT` pinned | **yes** — `build-manifest/ka9q-web.toml` | ✓ fully migrated (pin + manifest + `smd diag` drift check) |
 
 `onion` was the first migration: it is pinned (`_ONION_COMMIT`) and
 `_build_ka9q_web_with_onion` writes
 `/var/lib/sigmond/build-manifest/ka9q-web.toml` after each build. The
-remaining standardization work is a `smd diag` rule that compares the
-installed build manifest against the current pins (the upstream-built
-analogue of `install.sh`'s provenance check), and applying the same
-pin + manifest treatment to any future upstream-built dep. The
+`smd diag` now compares each installed build manifest against the current
+pins (`_diag_build_manifests` / `_expected_build_pins`) — the
+upstream-built analogue of `install.sh`'s provenance check — and warns
+with a rebuild hint on drift. The remaining work is applying the same
+pin + manifest + diag treatment to any future upstream-built dep. The
 principles are identical to mag-usb; only the storage location differs
 because we don't own the source repo.
 
