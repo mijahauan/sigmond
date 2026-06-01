@@ -658,6 +658,61 @@ def _write_build_manifest(component: str, upstreams: list, *, builder: str) -> N
         _warn(f'build manifest skipped (non-fatal): {exc}')
 
 
+def _expected_build_pins() -> dict:
+    """Upstream-built components that record a manifest, mapping
+    component -> {upstream_name: expected_pin_sha}.  An empty pin means the
+    upstream is intentionally unpinned (tracks upstream) and is not
+    drift-checked.  Extend as more upstream-built deps adopt the pin+manifest
+    pattern (docs/native-binaries.md)."""
+    return {
+        'ka9q-web': {'onion': _ONION_COMMIT},
+    }
+
+
+def _diag_build_manifests() -> int:
+    """Compare each installed build manifest against the current pins — the
+    upstream-built analogue of install.sh's provenance check.  Advisory:
+    returns the number of warnings but does not fail diag."""
+    import tomllib
+    expected = _expected_build_pins()
+    if not expected:
+        return 0
+    print()
+    _info('Build manifests (native deps vs pins):')
+    warns = 0
+    for component, pins in expected.items():
+        mf = _BUILD_MANIFEST_DIR / f'{component}.toml'
+        if not mf.exists():
+            _info(f'  {component}: no build manifest (not built here)')
+            continue
+        try:
+            data = tomllib.loads(mf.read_text())
+        except Exception as exc:
+            _warn(f'  {component}: manifest unreadable ({exc})')
+            warns += 1
+            continue
+        built = {u.get('name'): u for u in data.get('upstream', [])}
+        for dep, want in pins.items():
+            if not want:
+                continue                       # unpinned — nothing to check
+            u = built.get(dep)
+            if u is None:
+                _warn(f'  {component}: manifest missing upstream "{dep}"')
+                warns += 1
+                continue
+            have = (u.get('sha') or '').strip()
+            if not have:
+                _warn(f'  {component}: {dep} sha not recorded in manifest')
+                warns += 1
+            elif have.startswith(want) or want.startswith(have):
+                _ok(f'{component}: {dep} built at pinned {want[:12]}')
+            else:
+                _warn(f'  {component}: {dep} built at {have[:12]}, pin is now '
+                      f'{want[:12]} — rebuild: sudo smd install {component} --force')
+                warns += 1
+    return warns
+
+
 def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
     onion_url    = _ONION_REPO
     onion_commit = _ONION_COMMIT
@@ -4901,6 +4956,9 @@ def cmd_diag(args) -> int:
             _ok(f'network: {host} reachable')
         else:
             _warn(f'network: {host} unreachable')
+
+    # Build manifests vs pins (upstream-built native deps — onion, etc.)
+    _diag_build_manifests()
 
     # Client self-validation
     if _HAS_SIGMOND_LIB:
