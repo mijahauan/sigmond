@@ -25,7 +25,8 @@
 #   7. Adds the invoking user to the sigmond group (so they can edit
 #      /opt/git/sigmond/* as themselves)
 #   8. Writes a default /etc/sigmond/topology.toml (all components off)
-#   9. Copies /etc/sigmond/catalog.toml from the repo
+#   9. Reads catalog from repo etc/catalog.toml (sparse overlay; any
+#      /etc/sigmond/catalog.toml holds host-specific overrides only)
 #  10. Builds /opt/git/sigmond/sigmond/venv with sigmond[tui] (Textual + Rich)
 #  11. Symlinks bin/smd into /usr/local/bin/smd (on every user's PATH)
 #
@@ -642,7 +643,12 @@ PY
 if [[ -n "$to_clone" ]]; then
     while IFS=$'\t' read -r name url; do
         [[ -z "$name" || -z "$url" ]] && continue
-        if git clone --quiet --depth 1 "$url" "/opt/git/sigmond/$name" 2>/dev/null; then
+        # Use $SUDO: on a greenfield first-run the invoking user's freshly
+        # granted `sigmond` group membership is not yet active in this
+        # session, so an unprivileged clone into the setgid, sigmond-owned
+        # /opt/git/sigmond fails with EACCES.  Clone as root (mirrors the
+        # ka9q-python clone above); the $SUDO chown below restores ownership.
+        if $SUDO git clone --quiet --depth 1 "$url" "/opt/git/sigmond/$name" 2>/dev/null; then
             ok "  cloned $name"
         else
             warn "  $name: git clone $url failed (non-fatal)"
