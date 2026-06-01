@@ -54,6 +54,39 @@ Current sigmond clients:
 `iri2020` is a pip-installable git dep and is handled by `uv`; it doesn't
 fit this contract.
 
+## Upstream C projects sigmond builds itself
+
+`ka9q-radio` (radiod, plus the in-tree `fobos` driver) and `ka9q-web`
+(plus its `onion` library dependency) are a different case from the
+client binaries above: their source repos are **upstream** and not
+sigmond-owned (`ka9q/ka9q-radio`, `ka9q/ka9q-web`,
+`davidmoreno/onion`), so sigmond cannot commit a prebuilt binary +
+provenance sidecar *into* them. sigmond builds them from source on the
+host instead (`_install_radiod_native`, `_install_ka9q_web_native` in
+`bin/smd`).
+
+The mag-usb principles still apply — only the **location** of the pin and
+provenance moves out of the (un-ownable) upstream repo and into sigmond:
+
+| Principle | Client-binary case | Upstream-built case |
+|---|---|---|
+| Pin the source | `.provenance` `upstream.sha` committed in the client repo | a pinned commit SHA in sigmond (`_ONION_COMMIT`, ka9q-radio pin) — never a bare branch / HEAD |
+| Record provenance | `bin/<binary>.provenance` committed to git | written to `/var/lib/sigmond/build-manifest/<component>.toml` after the build |
+| Idempotent build | `scripts/build-<binary>.sh` | the `_install_*_native` / `_build_*` helpers (they sha-check before rebuilding) |
+| Verify on host | `install.sh` provenance check | surfaced in `smd diag` (cf. the `ka9q_python_compat` cross-repo pin rule) |
+
+### Current compliance
+
+| Component | Native dep | Source | Pinned? | Provenance? | Gap to close |
+|---|---|---|---|---|---|
+| `ka9q-radio` | radiod + `fobos` driver | `ka9q/ka9q-radio` (fobos in-tree) | tracks upstream | no | `fobos` disabled by default; `libfobos` is proprietary/external, so it stays opt-in |
+| `ka9q-web` | `onion` | `davidmoreno/onion` | **no** — `_ONION_COMMIT = ''` | no | pin to a known-good SHA + emit a build manifest |
+
+Closing these gaps — pinning `onion` to a known-good commit and emitting
+a build manifest from the `_build_*` helpers — is the standardization
+work tracked against this doc. The principles are identical to mag-usb;
+only the storage location differs because we don't own the source repo.
+
 ## The `.provenance` sidecar
 
 Every committed binary under `<repo>/bin/` MUST have a matching
