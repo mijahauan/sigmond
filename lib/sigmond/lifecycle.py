@@ -210,7 +210,16 @@ def _expand_template(
             for cfg in etc_dir.glob("*.toml"):
                 if cfg.is_file() and cfg.name not in legacy_names:
                     stem = cfg.stem
-                    if stem:
+                    # A *global* component-config file is not a per-instance
+                    # config.  Besides the two legacy names above, the global
+                    # config is conventionally named ``*-config.toml`` (e.g.
+                    # hf-timestd ships ``timestd-config.toml``).  Treating it
+                    # as an instance invents a phantom unit
+                    # (timestd-metrology@timestd-config) AND, by making
+                    # ``configured`` non-empty, falsely orphans the real
+                    # systemd-discovered instances (CHU_*/WWV_*/SHARED_*).
+                    # Instance names never end in ``-config``.
+                    if stem and stem != "config" and not stem.endswith("-config"):
                         configured.add(stem)
         except PermissionError:
             pass

@@ -117,6 +117,57 @@ units = ["psk-recorder@.service"]
         with pytest.raises(ValueError, match='not found'):
             resolve_units(['unknown-component'], ['other-component'])
 
+    def test_global_config_toml_not_an_instance(self, tmp_path, monkeypatch):
+        """A global ``*-config.toml`` must not be read as a per-instance config.
+
+        Regression: hf-timestd ships /etc/hf-timestd/timestd-config.toml, whose
+        stem was added to ``configured`` — inventing a phantom
+        ``timestd-metrology@timestd-config`` unit AND, by making ``configured``
+        non-empty, falsely flagging every real systemd-discovered channel
+        (CHU_*/WWV_*/SHARED_*) as orphaned.
+        """
+        component = 'hf-timestd'
+        deploy_toml = tmp_path / 'deploy.toml'
+        deploy_toml.write_text(
+            '[systemd]\ntemplated_units = ["timestd-metrology@.service"]\n'
+        )
+        etc_dir = tmp_path / 'etc'
+        etc_dir.mkdir()
+        (etc_dir / 'timestd-config.toml').write_text('# global config, not an instance')
+
+        monkeypatch.setattr('sigmond.lifecycle._find_deploy_toml',
+                            lambda comp: deploy_toml if comp == component else None)
+
+        def fake_path(p):
+            s = str(p)
+            if s == f'/etc/{component}':
+                return etc_dir              # real dir → real *.toml glob
+            if s.startswith('/etc/'):
+                m = mock.Mock(spec=Path)
+                m.exists.return_value = False
+                m.glob.return_value = []
+                return m
+            return Path(p)
+        monkeypatch.setattr('sigmond.lifecycle.Path', fake_path)
+
+        def fake_run(cmd, *a, **k):
+            if 'list-units' in cmd:
+                return mock.Mock(returncode=0, stdout=(
+                    '[{"unit": "timestd-metrology@CHU_14670.service"}, '
+                    '{"unit": "timestd-metrology@WWV_20000.service"}]'))
+            return mock.Mock(returncode=0, stdout=(
+                'timestd-metrology@CHU_14670.service enabled enabled\n'
+                'timestd-metrology@WWV_20000.service enabled enabled\n'))
+
+        with mock.patch('sigmond.lifecycle.subprocess.run', side_effect=fake_run):
+            units = resolve_units([component], [component])
+
+        names = {u.unit for u in units}
+        assert 'timestd-metrology@timestd-config.service' not in names  # no phantom
+        assert 'timestd-metrology@CHU_14670.service' in names
+        assert 'timestd-metrology@WWV_20000.service' in names
+        assert all(not u.orphaned for u in units)  # none falsely orphaned
+
 
 def _mock_path(path_str, env_dir=None):
     """Helper to mock Path for env dir existence checks.
