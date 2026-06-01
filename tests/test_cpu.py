@@ -25,14 +25,19 @@ from sigmond.cpu import (
     _is_kernel_thread,
     affinity_report_to_dict,
     build_affinity_report,
+    compute_affinity_plan,
     compute_host_cpu_layout,
     expand_template_instances,
     gather_capabilities,
+    is_split_l3,
+    l3_island_cpus_for,
     layout_shell_vars,
     parse_cmdline_cpu_param,
     parse_cpu_mask,
     parse_ht_pairs,
+    recommended_isolcpus,
 )
+from unittest import mock
 
 
 class ParseCpuMaskTests(unittest.TestCase):
@@ -443,6 +448,87 @@ class LayoutShellVarsTests(unittest.TestCase):
         out = layout_shell_vars(lay)
         self.assertIn('ISOLCPUS_RANGE="0-6,8-14"', out)
         self.assertIn('VCPU_TO_PCPU="0 8 1 9 2 10 3 11 4 12 5 13 6 14"', out)
+
+
+def _isle(level, cpus, ctype='Unified'):
+    return CacheIsland(level=level, cache_type=ctype, cpus=frozenset(cpus))
+
+
+# 5700U-style split L3: two 8-thread islands.
+SPLIT_L3 = [_isle(3, range(0, 8)), _isle(3, range(8, 16))]
+# Unified L3: one island over all 16 threads.
+UNIFIED_L3 = [_isle(3, range(0, 16))]
+
+
+class L3HelperTests(unittest.TestCase):
+    def test_l3_island_for_split(self):
+        # radiod on {0,1} owns the whole 0-7 island.
+        self.assertEqual(l3_island_cpus_for(SPLIT_L3, {0, 1}), set(range(8)))
+        # radiod on {8,9} owns the 8-15 island.
+        self.assertEqual(l3_island_cpus_for(SPLIT_L3, {8, 9}), set(range(8, 16)))
+
+    def test_l3_island_for_unified(self):
+        self.assertEqual(l3_island_cpus_for(UNIFIED_L3, {0, 1}), set(range(16)))
+
+    def test_l3_island_no_topology_returns_input(self):
+        self.assertEqual(l3_island_cpus_for([], {0, 1}), {0, 1})
+
+    def test_is_split_l3(self):
+        self.assertTrue(is_split_l3(SPLIT_L3, 16))
+        self.assertFalse(is_split_l3(UNIFIED_L3, 16))
+        self.assertFalse(is_split_l3([], 16))
+
+
+class CacheAwarePlanTests(unittest.TestCase):
+    """compute_affinity_plan must segregate other work off radiod's whole L3
+    island on a split-L3 host, and leave behaviour unchanged when unified."""
+
+    def _plan(self, l3, ca=None, instances=('radiod@rx.service',),
+              cores=None):
+        cores = cores or [{0, 1}, {2, 3}, {4, 5}, {6, 7},
+                          {8, 9}, {10, 11}, {12, 13}, {14, 15}]
+        with mock.patch('sigmond.cpu.get_physical_cores', return_value=cores), \
+             mock.patch('sigmond.cpu.get_radiod_instances',
+                        return_value=list(instances)):
+            return compute_affinity_plan(ca, l3_islands=l3, logical_cpus=16)
+
+    def test_split_excludes_whole_island(self):
+        plan = self._plan(SPLIT_L3)
+        self.assertTrue(plan.cache_split)
+        self.assertEqual(plan.radiod['radiod@rx.service'], {0, 1})
+        self.assertEqual(plan.radiod_l3_cpus, set(range(8)))
+        # Other work confined to the *other* island only.
+        self.assertEqual(plan.other_cpus, set(range(8, 16)))
+        # 2-7 share radiod's L3 → reserved idle, used by no one.
+        self.assertEqual(plan.reserved_idle_cpus, {2, 3, 4, 5, 6, 7})
+        self.assertEqual(recommended_isolcpus(plan), set(range(8)))
+
+    def test_unified_is_legacy_behaviour(self):
+        plan = self._plan(UNIFIED_L3)
+        self.assertFalse(plan.cache_split)
+        # Only radiod's own cores excluded; everything else available.
+        self.assertEqual(plan.other_cpus, set(range(16)) - {0, 1})
+        self.assertEqual(plan.reserved_idle_cpus, set())
+        self.assertEqual(recommended_isolcpus(plan), {0, 1})
+
+    def test_explicit_other_cpus_override_wins(self):
+        plan = self._plan(SPLIT_L3, ca={'other_cpus': '10-15'})
+        self.assertEqual(plan.other_cpus, {10, 11, 12, 13, 14, 15})
+
+    def test_cache_aware_opt_out(self):
+        plan = self._plan(SPLIT_L3, ca={'cache_aware': False})
+        # Segregation disabled → legacy: only radiod's cores excluded.
+        self.assertEqual(plan.other_cpus, set(range(16)) - {0, 1})
+        self.assertEqual(plan.reserved_idle_cpus, set())
+
+    def test_cache_aware_opt_out_string(self):
+        plan = self._plan(SPLIT_L3, ca={'cache_aware': 'false'})
+        self.assertEqual(plan.other_cpus, set(range(16)) - {0, 1})
+
+    def test_no_radiod_instances_no_segregation(self):
+        plan = self._plan(SPLIT_L3, instances=())
+        self.assertEqual(plan.radiod_l3_cpus, set())
+        self.assertEqual(plan.reserved_idle_cpus, set())
 
 
 if __name__ == '__main__':

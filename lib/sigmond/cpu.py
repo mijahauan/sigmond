@@ -87,6 +87,13 @@ class AffinityPlan:
     radiod: dict = field(default_factory=dict)   # {unit_name: cpu_set}
     other_cpus: set = field(default_factory=set)  # CPUs for non-radiod services
     physical_cores: list = field(default_factory=list)  # list[set], one per core
+    # Cache-topology awareness (split-L3 segregation).  On a processor whose
+    # L3 is split into multiple islands (e.g. AMD Zen CCXs), radiod owns the
+    # whole island its cores live in and ALL other work is pushed to the other
+    # island(s) so it can't evict radiod's FFT working set from its L3 slice.
+    cache_split: bool = False                        # host has a segregable split L3
+    radiod_l3_cpus: set = field(default_factory=set)  # full L3 island(s) radiod owns
+    reserved_idle_cpus: set = field(default_factory=set)  # in radiod's L3 but unused
 
 
 @dataclass
@@ -415,22 +422,89 @@ def get_radiod_cpus() -> set:
 # Plan computation
 # ---------------------------------------------------------------------------
 
+def l3_island_cpus_for(l3_islands: list, cpus: set) -> set:
+    """Union of all L3 islands containing any CPU in ``cpus``.
+
+    On a split-L3 processor (AMD Zen with multiple CCXs, some Intel hybrids)
+    this is the full set of logical CPUs that share an L3 slice with radiod —
+    i.e. the cores that, if they ran other work, would evict radiod's FFT
+    working set from its L3 half.  Returns ``set(cpus)`` unchanged when no
+    island covers them (host exposes no L3 topology).
+    """
+    owned: set = set()
+    for isle in l3_islands:
+        isle_cpus = set(getattr(isle, 'cpus', isle))
+        if isle_cpus & cpus:
+            owned |= isle_cpus
+    return owned or set(cpus)
+
+
+def is_split_l3(l3_islands: list, logical_cpus: int) -> bool:
+    """True when confining other work away from radiod's L3 half is meaningful.
+
+    A single unified L3 (one island spanning every CPU) returns False — there
+    is nothing to segregate, so the plan keeps its legacy behaviour.  More than
+    one island, where at least one is smaller than the whole host, is a split
+    L3 worth segregating.
+    """
+    real = [set(getattr(i, 'cpus', i)) for i in l3_islands]
+    real = [c for c in real if c]
+    if len(real) <= 1:
+        return False
+    return any(len(c) < logical_cpus for c in real)
+
+
+def recommended_isolcpus(plan: "AffinityPlan") -> set:
+    """CPUs to hand the kernel ``isolcpus=`` so the general scheduler keeps all
+    non-pinned work off radiod's cores.
+
+    On a split-L3 host this is radiod's *entire* L3 island, so every core
+    sharing radiod's L3 slice stays quiet (cores beyond radiod's own pin sit
+    idle by design — that is the cost of an uncontested L3 half).  Otherwise it
+    is just radiod's own cores.
+    """
+    if plan.cache_split and plan.radiod_l3_cpus:
+        return set(plan.radiod_l3_cpus)
+    out: set = set()
+    for cpus in plan.radiod.values():
+        out |= set(cpus)
+    return out
+
+
 def compute_affinity_plan(
     topology_cpu_affinity: Optional[dict] = None,
+    *,
+    l3_islands: Optional[list] = None,
+    logical_cpus: Optional[int] = None,
 ) -> AffinityPlan:
     """Compute the CPU affinity plan from hardware topology and running radiod instances.
 
     Args:
         topology_cpu_affinity: The ``[cpu_affinity]`` section from topology.toml,
             e.g. ``{'radiod_cpus': '', 'other_cpus': ''}``.  Empty strings or
-            None means auto-compute from hardware.
+            None means auto-compute from hardware.  Set ``cache_aware = false``
+            to disable split-L3 segregation (e.g. a host where the idle cores
+            in radiod's island are genuinely needed for other work).
+        l3_islands: L3 ``CacheIsland`` list; gathered from /sys when None.
+            Injectable for testing.
+        logical_cpus: total logical CPU count; ``os.cpu_count()`` when None.
 
     Returns:
         AffinityPlan with radiod per-instance assignments and other_cpus pool.
+
+    Split-L3 segregation: when the host's L3 is split into islands and
+    ``cache_aware`` is on, ``other_cpus`` excludes radiod's *whole* L3 island
+    rather than only its pinned cores — so no other Linux process shares
+    radiod's L3 slice.  ``recommended_isolcpus(plan)`` returns the matching
+    kernel ``isolcpus=`` set for full scheduler-level enforcement.
     """
     cores = get_physical_cores()
     instances = get_radiod_instances()
     ca = topology_cpu_affinity or {}
+    if logical_cpus is None:
+        logical_cpus = os.cpu_count() or 16
+    if l3_islands is None:
+        l3_islands = get_cache_islands(3)
 
     # Operator override: ``[cpu_affinity].radiod_cpus`` in topology.toml
     # gives radiod a specific CPU pool (e.g. an entire CCX so radiod's
@@ -457,16 +531,39 @@ def compute_affinity_plan(
     for cpus in radiod_plan.values():
         radiod_all.update(cpus)
 
+    all_cpus = set(range(logical_cpus))
+
+    cache_aware = ca.get('cache_aware', True)
+    if isinstance(cache_aware, str):
+        cache_aware = cache_aware.strip().lower() not in ('false', '0', 'no', 'off')
+
+    split = is_split_l3(l3_islands, logical_cpus)
+    radiod_l3 = l3_island_cpus_for(l3_islands, radiod_all) if radiod_all else set()
+    segregate = (split and cache_aware and bool(radiod_l3)
+                 and radiod_l3 != all_cpus)
+
     other_spec = ca.get('other_cpus', '').strip()
     if other_spec:
+        # Explicit operator pool always wins.
         other_cpus = parse_cpu_mask(other_spec)
+    elif segregate:
+        # Split-L3: keep ALL other work off radiod's entire L3 island so it
+        # cannot evict radiod's FFT working set from its L3 slice.
+        other_cpus = all_cpus - radiod_l3
     else:
-        other_cpus = set(range(os.cpu_count() or 16)) - radiod_all
+        other_cpus = all_cpus - radiod_all
+
+    # Cores inside radiod's L3 island that nothing is allowed to use — idle by
+    # design so radiod owns its L3 half outright.
+    reserved_idle = (radiod_l3 - radiod_all - other_cpus) if segregate else set()
 
     return AffinityPlan(
         radiod=radiod_plan,
         other_cpus=other_cpus,
         physical_cores=cores,
+        cache_split=split,
+        radiod_l3_cpus=radiod_l3,
+        reserved_idle_cpus=reserved_idle,
     )
 
 
@@ -1094,6 +1191,20 @@ def build_affinity_report(
             f"(isolated={sorted(isol)})"
         )
 
+    # Split-L3 segregation needs the kernel to keep all non-pinned work off
+    # radiod's *whole* L3 island, not just its pinned cores.  Recommend the
+    # matching isolcpus= set when the cmdline under-isolates the island.
+    if plan.cache_split and plan.radiod_l3_cpus:
+        want_isol = recommended_isolcpus(plan)
+        if not want_isol.issubset(isol):
+            leaky = sorted((plan.radiod_l3_cpus - isol) & want_isol)
+            warnings.append(
+                f"split L3: cpus {leaky} share radiod's L3 island but aren't "
+                f"isolated — other work there evicts radiod's L3 cache; set "
+                f"isolcpus={_cpus_to_range_str(sorted(want_isol))} "
+                f"(currently {_cpus_to_range_str(sorted(isol)) or 'none'})"
+            )
+
     # Foreign drop-in warnings, deduplicated by path.
     # Skip entirely when smd's own drop-in (smd-cpu-affinity.conf, which sorts
     # after 99-wdctl-cpu-affinity.conf) is already in place on every affected
@@ -1185,6 +1296,10 @@ def affinity_report_to_dict(report: AffinityReport) -> dict:
                                for unit, cpus in report.plan.radiod.items()},
             'other_cpus':     sorted(report.plan.other_cpus),
             'physical_cores': [sorted(c) for c in report.plan.physical_cores],
+            'cache_split':        report.plan.cache_split,
+            'radiod_l3_cpus':     sorted(report.plan.radiod_l3_cpus),
+            'reserved_idle_cpus': sorted(report.plan.reserved_idle_cpus),
+            'recommended_isolcpus': sorted(recommended_isolcpus(report.plan)),
         },
         'radiod_cpus': sorted(report.radiod_cpus),
         'units': [
