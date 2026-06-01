@@ -576,11 +576,86 @@ def _build_onion(src_dir: Path) -> bool:
 
 # onion (davidmoreno/onion) — ka9q-web's sole non-apt build dependency.  It is a
 # C library, NOT a Python package, so it cannot live in pyproject.toml; sigmond
-# owns the recipe in-tree rather than reading wsprdaemon-client/deps.conf.  Pin a
-# commit here if upstream ever breaks the build.
+# owns the recipe in-tree rather than reading wsprdaemon-client/deps.conf.
+# Pinned to a known-good commit (never a bare branch/HEAD) per
+# docs/native-binaries.md — bump _ONION_COMMIT when a newer onion is validated.
 _ONION_REPO   = 'https://github.com/davidmoreno/onion.git'
-_ONION_COMMIT = ''                                  # '' = upstream default branch
+_ONION_COMMIT = 'de8ea938342b36c28024fd8393ebc27b8442a161'   # master @ 2026-06-01
 _ONION_SRC    = Path('/opt/git/sigmond/onion')      # sibling checkout (was /home/wsprdaemon/onion)
+
+# Build provenance for upstream C projects sigmond builds itself (the
+# upstream-built analogue of native-binaries.md's committed .provenance
+# sidecar, which we can't write into a repo we don't own).
+_BUILD_MANIFEST_DIR = Path('/var/lib/sigmond/build-manifest')
+
+
+def _git_head(repo: Path) -> str:
+    r = _run(['git', '-c', f'safe.directory={repo}', '-C', str(repo),
+              'rev-parse', 'HEAD'])
+    return r.stdout.strip() if r.returncode == 0 else ''
+
+
+def _git_remote_url(repo: Path) -> str:
+    r = _run(['git', '-c', f'safe.directory={repo}', '-C', str(repo),
+              'remote', 'get-url', 'origin'])
+    return r.stdout.strip() if r.returncode == 0 else ''
+
+
+def _tool_version(argv: list) -> str:
+    try:
+        r = _run(argv)
+        out = (r.stdout or r.stderr or '').splitlines()
+        return out[0].strip().replace('"', "'") if (r.returncode == 0 and out) else ''
+    except Exception:
+        return ''
+
+
+def _write_build_manifest(component: str, upstreams: list, *, builder: str) -> None:
+    """Emit /var/lib/sigmond/build-manifest/<component>.toml recording what was
+    built and from which pinned upstream commits.  Best-effort: a manifest
+    write failure must never fail the install."""
+    import platform, datetime, tempfile
+    try:
+        try:
+            glibc = (os.confstr('CS_GNU_LIBC_VERSION') or '').split()[-1]
+        except Exception:
+            glibc = ''
+        lines = [
+            f'component = "{component}"',
+            f'built_at  = "{datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}"',
+            f'builder   = "{builder}"',
+            '',
+            '[build]',
+            f'arch  = "{platform.machine()}"',
+            f'glibc = "{glibc}"',
+            f'cmake = "{_tool_version(["cmake", "--version"])}"',
+            f'gcc   = "{_tool_version(["gcc", "--version"])}"',
+            f'make  = "{_tool_version(["make", "--version"])}"',
+        ]
+        for up in upstreams:
+            lines += [
+                '',
+                '[[upstream]]',
+                f'name = "{up["name"]}"',
+                f'url  = "{up["url"]}"',
+                f'ref  = "{up.get("ref", "")}"',
+                f'pin  = "{up.get("pin", "")}"',
+                f'sha  = "{up.get("sha", "")}"',
+            ]
+        content = '\n'.join(lines) + '\n'
+        _run(['mkdir', '-p', str(_BUILD_MANIFEST_DIR)], sudo=True)
+        with tempfile.NamedTemporaryFile('w', suffix='.toml', delete=False) as tf:
+            tf.write(content)
+            tf_path = tf.name
+        dest = _BUILD_MANIFEST_DIR / f'{component}.toml'
+        r = _run(['install', '-m', '644', tf_path, str(dest)], sudo=True)
+        Path(tf_path).unlink(missing_ok=True)
+        if r.returncode == 0:
+            _ok(f'build manifest: {dest}')
+        else:
+            _warn(f'build manifest write failed (non-fatal): {r.stderr.strip()}')
+    except Exception as exc:
+        _warn(f'build manifest skipped (non-fatal): {exc}')
 
 
 def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
@@ -594,32 +669,48 @@ def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
         if r.returncode != 0:
             _err(f'git clone onion failed: {r.stderr.strip()}')
             return False
-        if onion_commit:
-            _run(['git', '-C', str(onion_src), 'checkout', onion_commit])
+    if onion_commit and not _git_head(onion_src).startswith(onion_commit):
+        # Pin onion to the known-good commit (idempotent).  Fetch first in
+        # case an existing checkout predates the pin.
+        _run(['git', '-C', str(onion_src), 'fetch', '--quiet', '--tags', 'origin'])
+        r = _run(['git', '-C', str(onion_src), 'checkout', '--quiet', onion_commit])
+        if r.returncode != 0:
+            _err(f'onion: checkout {onion_commit[:12]} failed: {r.stderr.strip()}')
+            return False
 
     if not _build_onion(onion_src):
         return False
 
     binary = Path('/usr/local/sbin/ka9q-web')
     built  = src_dir / 'ka9q-web'
+    rebuilt = True
     if binary.exists() and built.exists():
         import hashlib
         def _sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
         if _sha(binary) == _sha(built):
             _ok('ka9q-web: already installed and current')
-            return True
+            rebuilt = False
 
-    nproc = str(os.cpu_count() or 2)
-    _info(f'Building ka9q-web (make -j{nproc}) ...')
-    r = _run(['make', f'-j{nproc}'], cwd=str(src_dir))
-    if r.returncode != 0:
-        _err(f'ka9q-web build failed: {r.stderr[-400:]}')
-        return False
-    r = _run(['make', 'install'], cwd=str(src_dir), sudo=True)
-    if r.returncode != 0:
-        _err(f'ka9q-web install failed: {r.stderr.strip()}')
-        return False
-    _ok('ka9q-web: built and installed')
+    if rebuilt:
+        nproc = str(os.cpu_count() or 2)
+        _info(f'Building ka9q-web (make -j{nproc}) ...')
+        r = _run(['make', f'-j{nproc}'], cwd=str(src_dir))
+        if r.returncode != 0:
+            _err(f'ka9q-web build failed: {r.stderr[-400:]}')
+            return False
+        r = _run(['make', 'install'], cwd=str(src_dir), sudo=True)
+        if r.returncode != 0:
+            _err(f'ka9q-web install failed: {r.stderr.strip()}')
+            return False
+        _ok('ka9q-web: built and installed')
+
+    _write_build_manifest('ka9q-web', [
+        {'name': 'ka9q-web', 'ref': 'master', 'pin': '',
+         'url': _git_remote_url(src_dir) or 'https://github.com/ka9q/ka9q-web',
+         'sha': _git_head(src_dir)},
+        {'name': 'onion', 'url': _ONION_REPO, 'ref': 'master',
+         'pin': _ONION_COMMIT, 'sha': _git_head(onion_src)},
+    ], builder='_build_ka9q_web_with_onion')
     return True
 
 
