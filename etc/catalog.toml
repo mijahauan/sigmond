@@ -94,6 +94,39 @@ repo            = "https://github.com/mijahauan/callhash"
 # B4-100 greenfield 2026-05-27: wspr-recorder install failed at uv-sync until
 # callhash was manually cloned.
 
+[client.hfdl-recorder]
+kind            = "client"
+description     = "HFDL (High Frequency Data Link) recorder — one dumphfdl subprocess per band"
+repo            = "https://github.com/mijahauan/hfdl-recorder"
+uses            = ["ka9q-python"]
+requires        = ["ka9q-python", "ka9q-radio"]
+contract        = "0.8"
+install_script  = "/opt/git/sigmond/hfdl-recorder/scripts/install.sh"
+# dumphfdl is bundled inside hfdl-recorder (scripts/build-dumphfdl.sh) — same
+# owns-its-native-binary pattern as mag-recorder/mag-usb — so it is
+# intentionally NOT a separate catalog entry.
+
+[client.codar-sounder]
+kind            = "client"
+description     = "Opportunistic ionospheric sounder using CODAR chirp transmissions"
+repo            = "https://github.com/mijahauan/codar-sounder"
+uses            = ["ka9q-python"]
+requires        = ["ka9q-python", "ka9q-radio"]
+contract        = "0.8"
+install_script  = "/opt/git/sigmond/codar-sounder/scripts/install.sh"
+start_priority  = 200                                 # parallel with decoder chain
+# Lifecycle + coordination passthrough are auto-discovered from the repo's
+# own deploy.toml [client] block once cloned.
+
+[client.hf-gps-tec]
+kind            = "client"
+description     = "HF PRN-coded beacon recorder for ionospheric specification"
+repo            = "https://github.com/mijahauan/hf-gps-tec"
+uses            = ["ka9q-python"]
+requires        = ["ka9q-python", "ka9q-radio"]
+contract        = "0.8"
+install_script  = "/opt/git/sigmond/hf-gps-tec/scripts/install.sh"
+
 # ---------------------------------------------------------------------------
 # Deprecations
 #
