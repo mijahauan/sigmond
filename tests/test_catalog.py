@@ -25,33 +25,51 @@ REPO_CATALOG = Path(__file__).resolve().parent.parent / 'etc' / 'catalog.toml'
 class TestLoadCatalog:
     def test_repo_default_loads(self):
         entries = load_catalog(REPO_CATALOG)
-        assert set(entries.keys()) == {
-            'radiod',
+        # The catalog grows over time, so assert the known components are
+        # *present* rather than pinning an exact set (which broke on every
+        # addition).  Adding a client should not break this sanity check;
+        # accidental removals/typos of a core entry still will.
+        expected = {
+            'ka9q-radio', 'ka9q-web',
             'wspr-recorder', 'psk-recorder', 'hf-timestd',
-            'mag-recorder',
+            'hfdl-recorder', 'codar-sounder', 'hf-gps-tec',
+            'mag-recorder', 'hs-uploader', 'callhash',
+            'gpsdo-monitor', 'igmp-querier', 'ka9q-update',
         }
+        missing = expected - set(entries.keys())
+        assert not missing, f'catalog missing expected entries: {missing}'
+        # Deprecated names must never surface as live entries.
+        assert 'wsprdaemon-client' not in entries
 
     def test_entry_fields_populated(self):
         entries = load_catalog(REPO_CATALOG)
         psk = entries['psk-recorder']
         assert psk.name == 'psk-recorder'
         assert psk.kind == 'client'
-        assert psk.contract == '0.6'
+        assert psk.contract == '0.8'
         assert psk.uses == ('ka9q-python',)
         assert psk.install_script == '/opt/git/sigmond/psk-recorder/scripts/install.sh'
         assert 'FT4' in psk.description or 'FT8' in psk.description
 
     def test_server_entry_has_no_contract_or_install_script(self):
         entries = load_catalog(REPO_CATALOG)
-        radiod = entries['radiod']
+        radiod = entries['ka9q-radio']
         assert radiod.kind == 'server'
         assert radiod.contract is None
         assert radiod.install_script is None
 
-    def test_every_client_uses_ka9q_python(self):
+    def test_radiod_clients_use_ka9q_python(self):
         entries = load_catalog(REPO_CATALOG)
-        clients = [e for e in entries.values() if e.kind == 'client']
-        for e in clients:
+        # Decode clients that subscribe to a radiod multicast declare
+        # ka9q-radio in `requires`; those must pull in ka9q-python.  Non-radiod
+        # clients (e.g. mag-recorder, a USB magnetometer recorder) legitimately
+        # do not use ka9q-python.
+        radiod_clients = [
+            e for e in entries.values()
+            if e.kind == 'client' and 'ka9q-radio' in e.requires
+        ]
+        assert radiod_clients, 'expected at least one radiod-subscribing client'
+        for e in radiod_clients:
             assert 'ka9q-python' in e.uses, f'{e.name} should use ka9q-python'
 
     def test_missing_file_raises(self, tmp_path):
