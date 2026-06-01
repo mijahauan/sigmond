@@ -2135,6 +2135,28 @@ def _ensure_radio_user() -> bool:
     return True
 
 
+def _ensure_fftw_dir() -> bool:
+    """Ensure /etc/fftw exists, owned by radio:radio.
+
+    radiod stores accumulated FFTW wisdom in /etc/fftw, and the upstream
+    radiod@.service hardens itself with `ReadWritePaths=/etc/fftw`.  systemd
+    refuses to set up the mount namespace if that path is missing, so radiod
+    dies at start with `226/NAMESPACE` before it ever runs.  Debian packaging
+    ships the directory; native (non-deb) installs must create it themselves —
+    same gap as the `radio` user above.
+    """
+    d = Path('/etc/fftw')
+    if d.is_dir():
+        return True
+    _info('creating FFTW wisdom dir: /etc/fftw')
+    if _run(['install', '-d', '-o', 'radio', '-g', 'radio', '-m', '0775',
+             str(d)], sudo=True).returncode != 0:
+        _err('failed to create /etc/fftw')
+        return False
+    _ok('/etc/fftw created')
+    return True
+
+
 def _install_radiod_native(catalog, *, force: bool = False) -> bool:
     """Install ka9q-radio natively under /opt/git/sigmond/ka9q-radio.
 
@@ -2165,6 +2187,8 @@ def _install_radiod_native(catalog, *, force: bool = False) -> bool:
     if not _install_radiod_deps():
         return False
     if not _ensure_radio_user():
+        return False
+    if not _ensure_fftw_dir():
         return False
     try:
         src_dir = _clone_repo(entry, pull_if_exists=True)
