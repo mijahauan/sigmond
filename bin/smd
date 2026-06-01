@@ -495,47 +495,6 @@ def _enabled_components(topology: dict, only: list = None) -> list:
     return sorted(enabled)
 
 
-# ---------------------------------------------------------------------------
-# Dependency management (reads wsprdaemon-client/deps.conf)
-# ---------------------------------------------------------------------------
-
-# Map each component to the deps.conf sections it needs
-COMPONENT_DEPS = {
-    'ka9q-radio':          ['ka9q-radio'],
-    'radiod':              ['ka9q-radio'],    # legacy alias
-    # FT mode decoders/uploaders moved to psk-recorder in v4 — wsprdaemon-
-    # client now strictly does WSPR (W2/F2/F5/F15/F30) over wsprd/jt9.
-    'wspr':                ['ka9q-python', 'wspr-recorder', 'kiwiclient'],
-    'wsprdaemon-client':   ['ka9q-python', 'wspr-recorder', 'kiwiclient'],
-    'ka9q-web':            ['ka9q-web'],
-    'grape':               [],   # legacy alias for hf-timestd
-    'hf-timestd':          [],   # manages itself
-    'psk-recorder':        [],   # manages itself
-    'wspr-recorder':       [],   # manages itself
-    'rac':                 [],
-}
-
-# Deps that require a C build step after cloning
-BUILD_STEPS = {
-    'ka9q-radio': '_build_ka9q_radio',
-    'ka9q-web':   '_build_ka9q_web_with_onion',
-}
-
-
-def _load_deps_conf(client_dir: Path, required: bool = True) -> configparser.ConfigParser:
-    candidates = [client_dir / 'deps.conf', Path('/opt/git/sigmond/wsprdaemon-client/deps.conf')]
-    for deps_file in candidates:
-        if deps_file.exists():
-            cfg = configparser.ConfigParser()
-            cfg.read(deps_file)
-            return cfg
-    # deps.conf belongs to the deprecated wsprdaemon-client; on a greenfield
-    # host it is legitimately absent.  Only surface an error for callers that
-    # actually need it (install paths); diagnostics pass required=False.
-    if required:
-        _err(f'deps.conf not found at {candidates[0]}')
-    return None
-
 
 def _ensure_venv(venv_dir: Path) -> bool:
     if venv_dir.exists():
@@ -545,98 +504,6 @@ def _ensure_venv(venv_dir: Path) -> bool:
     if r.returncode != 0:
         _err(f'venv creation failed: {r.stderr.strip()}')
         return False
-    return True
-
-
-def _install_git_dep(section: str, dcfg: configparser.ConfigParser) -> bool:
-    url        = dcfg.get(section, 'url', fallback='').strip()
-    pinned     = dcfg.get(section, 'commit', fallback='').strip()
-    install_to = dcfg.get(section, 'install_to', fallback='').strip()
-    use_latest = pinned.lower() == 'latest'
-
-    if not url or not install_to:
-        _err(f'[{section}] missing url or install_to in deps.conf')
-        return False
-
-    target = Path(install_to)
-
-    if not target.exists():
-        _info(f'Cloning {section} → {target} ...')
-        r = _run(['git', 'clone', url, str(target)])
-        if r.returncode != 0:
-            _err(f'git clone {section} failed: {r.stderr.strip()}')
-            return False
-        if not use_latest and pinned:
-            _run(['git', '-C', str(target), 'checkout', pinned])
-    elif use_latest:
-        _info(f'Pulling {section} to latest ...')
-        _run(['git', '-C', str(target), 'pull'])
-    else:
-        # Repo exists and a specific commit is pinned — fetch and checkout if needed.
-        r = _run(['git', '-c', f'safe.directory={target}',
-                  '-C', str(target), 'rev-parse', 'HEAD'])
-        current = r.stdout.strip()
-        if pinned and current and not current.startswith(pinned[:12]):
-            _info(f'{section}: at {current[:12]}, fetching pinned {pinned[:12]} ...')
-            _run(['git', '-C', str(target), 'fetch', '--tags', 'origin'])
-            r2 = _run(['git', '-C', str(target), 'checkout', pinned])
-            if r2.returncode != 0:
-                _err(f'{section}: checkout {pinned[:12]} failed: {r2.stderr.strip()}')
-                return False
-
-    r = _run(['git', '-c', f'safe.directory={target}',
-              '-C', str(target), 'rev-parse', 'HEAD'])
-    current = r.stdout.strip()
-    if use_latest:
-        _ok(f'{section}: {current[:12]} (latest)')
-    elif pinned and current and not current.startswith(pinned[:12]):
-        _warn(f'{section}: at {current[:12]}, want {pinned[:12]} — checkout failed?')
-    else:
-        _ok(f'{section}: {current[:12]}')
-
-    return True
-
-
-def _install_pypi_dep(section: str, dcfg: configparser.ConfigParser,
-                      venv_dir: Path) -> bool:
-    url    = dcfg.get(section, 'url', fallback='').strip()
-    commit = dcfg.get(section, 'commit', fallback='').strip()
-    use_latest = commit.lower() == 'latest'
-
-    pip = str(venv_dir / 'bin' / 'pip')
-    is_git = url.startswith('git+')
-    pkg_name = url.rstrip('/').split('/')[-1].replace('.git', '') if is_git else url
-
-    if use_latest:
-        _info(f'Upgrading {section} ({pkg_name}) to latest ...')
-        r = _run([pip, 'install', '--upgrade', url])
-        if r.returncode != 0:
-            _err(f'{section} upgrade failed: {r.stderr.strip()[-400:]}')
-            return False
-        ver_r = _run([pip, 'show', pkg_name])
-        installed_ver = next(
-            (l.split(':', 1)[1].strip() for l in ver_r.stdout.splitlines()
-             if l.startswith('Version:')), 'unknown')
-        _ok(f'{section}: {installed_ver} (latest)')
-        return True
-
-    r = _run([pip, 'show', pkg_name])
-    if r.returncode == 0:
-        installed_ver = next(
-            (l.split(':', 1)[1].strip() for l in r.stdout.splitlines()
-             if l.startswith('Version:')), 'unknown')
-        if installed_ver == commit or (is_git and commit[:8] in r.stdout):
-            _ok(f'{section}: {installed_ver}')
-            return True
-        _warn(f'{section}: have {installed_ver}, want {commit[:12]}')
-
-    spec = f'{url}@{commit}' if is_git else f'{url}=={commit}'
-    _info(f'Installing {section} ({spec}) ...')
-    r = _run([pip, 'install', spec])
-    if r.returncode != 0:
-        _err(f'{section} install failed: {r.stderr.strip()[-400:]}')
-        return False
-    _ok(f'{section}: installed')
     return True
 
 
@@ -754,18 +621,6 @@ def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
         return False
     _ok('ka9q-web: built and installed')
     return True
-
-
-def _collect_deps_for_components(components: list) -> list:
-    """Return deduplicated ordered list of dep section names needed."""
-    seen = set()
-    result = []
-    for comp in components:
-        for dep in COMPONENT_DEPS.get(comp, []):
-            if dep not in seen:
-                seen.add(dep)
-                result.append(dep)
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1844,6 +1699,19 @@ def _install_single_client(args) -> int:
             _info(f"{entry.name} is built natively by sigmond (apt deps + make install); "
                   f"use: smd install --components ka9q-radio --yes")
             return 1
+        # ka9q-web is built natively (onion + make install) — no install.sh.
+        if entry.name == 'ka9q-web':
+            if dry_run:
+                _heading('install ka9q-web')
+                _info(f'repo:   {entry.repo}')
+                _info('native: onion + make install (no install.sh)')
+                _info('(dry-run) would clone ka9q-web + onion and make install')
+                return 0
+            if _need_root('install'):
+                return 1
+            _netdiag_auto_refresh('install')
+            _heading('ka9q-web (onion + make install)')
+            return 0 if _install_ka9q_web_native(catalog, force=getattr(args, 'force', False)) else 1
         # Otherwise we expect to discover install.sh in the cloned repo
         # post-clone (the mag-recorder pattern).  install_client() handles
         # this fall-through; it needs a repo URL to clone from.
@@ -1935,6 +1803,7 @@ def _install_full_suite(args) -> int:
     # Classify components into catalog-driven vs. native C-build.
     catalog_queue = []    # CatalogEntry objects with install_script
     radiod_needed = False
+    ka9q_web_needed = False
     unknown = []
 
     # C projects without install_script — built natively by sigmond
@@ -1952,6 +1821,8 @@ def _install_full_suite(args) -> int:
             catalog_queue.append(entry)
         elif entry.name in C_BUILD_NAMES:
             radiod_needed = True
+        elif entry.name == 'ka9q-web':
+            ka9q_web_needed = True
         elif entry.kind in ('library', 'infra') and not entry.install_script:
             # Handled by sigmond itself (e.g. ka9q-python via venv, wd-rac via _install_frpc).
             pass
@@ -1962,13 +1833,15 @@ def _install_full_suite(args) -> int:
     _heading('install plan')
     if radiod_needed:
         _info('native:       radiod  (apt deps + make install)')
+    if ka9q_web_needed:
+        _info('native:       ka9q-web  (onion + make install)')
     for entry in catalog_queue:
         _info(f'catalog:      {entry.name:22s} → {entry.install_script}')
     for comp in unknown:
         _warn(f'unknown:      {comp} (not in catalog, skipping)')
 
     wd_rac_needed = 'wd-rac' in components
-    if not catalog_queue and not radiod_needed and not wd_rac_needed:
+    if not catalog_queue and not radiod_needed and not ka9q_web_needed and not wd_rac_needed:
         _warn('nothing to install')
         return 0
     if wd_rac_needed:
@@ -2001,6 +1874,12 @@ def _install_full_suite(args) -> int:
         if not _install_radiod_native(catalog, force=getattr(args, 'force', False)):
             errors += 1
 
+    # --- 2b. ka9q-web (C build, sigmond-native) ---
+    if ka9q_web_needed:
+        _heading('ka9q-web (onion + make install)')
+        if not _install_ka9q_web_native(catalog, force=getattr(args, 'force', False)):
+            errors += 1
+
     # --- 3. Catalog-driven clients ---
     for entry in catalog_queue:
         _heading(f'install {entry.name}')
@@ -2016,45 +1895,7 @@ def _install_full_suite(args) -> int:
             _err(f'{entry.name}: {exc}')
             errors += 1
 
-    # --- 4. deps.conf dependencies ---
-    client_dir = topology['client_dir']
-    dcfg = _load_deps_conf(client_dir)
-    if dcfg:
-        deps_needed = _collect_deps_for_components(components)
-        if deps_needed:
-            _heading('dependencies (deps.conf)')
-            venv_dir = Path('/opt/wsprdaemon/venv')
-            for dep in deps_needed:
-                if dep not in dcfg.sections():
-                    _warn(f'{dep}: not found in deps.conf — skipping')
-                    continue
-                dep_type = dcfg.get(dep, 'type', fallback='').strip()
-                if dep_type == 'git':
-                    if not _install_git_dep(dep, dcfg):
-                        errors += 1
-                    # Trigger build step if this dep needs one
-                    if dep in BUILD_STEPS:
-                        install_to = dcfg.get(dep, 'install_to', fallback='').strip()
-                        if install_to:
-                            build_fn = globals().get(BUILD_STEPS[dep])
-                            if build_fn and not build_fn(Path(install_to)):
-                                errors += 1
-                elif dep_type == 'pypi':
-                    # Skip pypi deps that are catalog-managed (already installed via smd catalog path).
-                    from sigmond.catalog import load_catalog as _lc, get_entry as _ge
-                    try:
-                        _cat = _lc()
-                        if _ge(dep, _cat) is not None:
-                            _ok(f'{dep}: managed by sigmond catalog — skipping deps.conf install')
-                            continue
-                    except Exception:
-                        pass
-                    if not _install_pypi_dep(dep, dcfg, venv_dir):
-                        errors += 1
-                else:
-                    _warn(f'{dep}: unknown type "{dep_type}" in deps.conf — skipping')
-
-    # --- 5. wd-rac (frpc tunnel) ---
+    # --- 4. wd-rac (frpc tunnel) ---
     if 'wd-rac' in components:
         _heading('wd-rac (Remote Access Channel)')
         if not _install_wd_rac(topology, dry_run, yes=yes):
@@ -2188,6 +2029,28 @@ def _install_radiod_native(catalog, *, force: bool = False) -> bool:
         return False
     _ensure_radiod_running()
     return True
+
+
+def _install_ka9q_web_native(catalog, *, force: bool = False) -> bool:
+    """Install ka9q-web natively under /opt/git/sigmond/ka9q-web.
+
+    ka9q-web is a C project (no install_script): clone it via the catalog,
+    then build its onion dependency + the binary via
+    _build_ka9q_web_with_onion (recipe and onion params owned in-tree — see
+    _ONION_REPO).  `force` is accepted for signature parity with
+    _install_radiod_native; the build self-checks freshness via sha256 and
+    rebuilds as needed.
+    """
+    entry = get_entry('ka9q-web', catalog)
+    if entry is None:
+        _err('ka9q-web not in catalog — cannot determine repo URL')
+        return False
+    try:
+        src_dir = _clone_repo(entry, pull_if_exists=True)
+    except RuntimeError as exc:
+        _err(f'ka9q-web clone failed: {exc}')
+        return False
+    return _build_ka9q_web_with_onion(src_dir)
 
 
 def _ensure_radiod_running() -> None:
@@ -4936,7 +4799,6 @@ def cmd_diag_drop_in(args) -> int:
 
 def cmd_diag(args) -> int:
     topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-    client_dir = topology['client_dir']
 
     _heading('diagnostics')
     errors = 0
@@ -4948,29 +4810,6 @@ def cmd_diag(args) -> int:
             _ok(f'network: {host} reachable')
         else:
             _warn(f'network: {host} unreachable')
-
-    # Deps commit check (deps.conf is legacy wsprdaemon-client only — absent
-    # on greenfield, so don't flag it as an error here).
-    dcfg = _load_deps_conf(client_dir, required=False)
-    if dcfg:
-        print()
-        _info('Dependency versions:')
-        for dep in dcfg.sections():
-            dep_type   = dcfg.get(dep, 'type', fallback='').strip()
-            pinned     = dcfg.get(dep, 'commit', fallback='').strip()
-            install_to = dcfg.get(dep, 'install_to', fallback='').strip()
-            if dep_type == 'git' and install_to:
-                r = _run(['git', '-c', f'safe.directory={install_to}',
-                          '-C', install_to, 'rev-parse', 'HEAD'])
-                current = r.stdout.strip()
-                if r.returncode != 0 or not current:
-                    _warn(f'{dep}: not installed at {install_to}')
-                    errors += 1
-                elif current.startswith(pinned[:12]):
-                    _ok(f'{dep}: {current[:12]}')
-                else:
-                    _warn(f'{dep}: have {current[:12]}, want {pinned[:12]}')
-                    errors += 1
 
     # Client self-validation
     if _HAS_SIGMOND_LIB:
