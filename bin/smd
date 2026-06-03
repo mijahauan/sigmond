@@ -7641,9 +7641,9 @@ def cmd_uploads_watch(args) -> int:
     Two log sources are followed and tagged:
 
       * `journalctl -u wd-upload-hs@*` → WSPRnet (+ wsprdaemon.org SFTP
-        when WD_SFTP_SERVERS is set).  Lines look like:
-            `wspr-uploader-hs: shipped wsprdaemon=N wsprnet=M
-                                       (total wsprdaemon=A wsprnet=B, work=W)`
+        when WD_SFTP_SERVERS is set).  One line per WSPR cycle, e.g.:
+            `wspr-uploader-hs: cycle=21:48 shipped wsprdaemon=199
+                  wsprnet=posted:75/added:74 ft8=312 ft4=0 tar=12.3kB`
 
       * `tail -F /var/log/psk-recorder/<id>.log` → PSK Reporter.  The
         uploader runs inside the recorder process and logs to a file,
@@ -7687,9 +7687,8 @@ def cmd_uploads_watch(args) -> int:
     # the async POST status is known, as "wsprnet=posted:61/added:60" — so
     # capture it as a token and parse below.
     wspr_re = _re.compile(
-        r'wspr-uploader-hs:\s+shipped\s+'
-        r'wsprdaemon=(\d+)\s+wsprnet=(\S+)\s+'
-        r'\(total\s+wsprdaemon=(\d+)\s+wsprnet=(\S+),\s+work=(\d+)\)'
+        r'wspr-uploader-hs:\s+cycle=(\S+)\s+shipped\s+'
+        r'wsprdaemon=(\d+)\s+wsprnet=(\S+)\s+ft8=(\d+)\s+ft4=(\d+)\s+tar=(\S+)'
     )
     psk_re = _re.compile(
         r'psk-uploader-hs:\s+shipped\s+'
@@ -7705,7 +7704,7 @@ def cmd_uploads_watch(args) -> int:
 
     _heading('Upload activity (WSPRnet + PSK Reporter)')
     _info('   stage: post-batch upload events → external services (WSPRnet, PSK Reporter)')
-    _info('   ▸ one line per shipped batch — every ~60 s for WSPR,')
+    _info('   ▸ one line per WSPR cycle (wsprnet/wsprdaemon/ft8/ft4 counts + tar size),')
     _info('     every few seconds during a busy FT8 minute for PSK')
     if backlog_min > 0:
         _info(f'   ▸ replaying last {backlog_min} min of history')
@@ -7801,36 +7800,25 @@ def cmd_uploads_watch(args) -> int:
         m = wspr_re.search(line)
         if not m:
             return False
-        wd_n, wn_n, wd_total, wn_total, work = m.groups()
-        wd_n_i = int(wd_n)
-        wn_n_i = _wn_count(wn_n)
-        # The uploader logs a 'shipped' summary every ~15s pump, almost all
-        # idle (wsprdaemon=0 wsprnet=0).  Collapse that flood: emit only
-        # batches that actually shipped — ~one line per WSPR cycle, per
-        # destination that shipped.
-        if wd_n_i == 0 and wn_n_i == 0:
-            return False
-        wd_total_i = int(wd_total)
-        wn_total_i = _wn_count(wn_total)
-        work_i = int(work)
+        cycle, wd_n, wn_tok, ft8_n, ft4_n, tar = m.groups()
+        wd = int(wd_n)
+        wn = _wn_count(wn_tok)
+        ft8 = int(ft8_n)
+        ft4 = int(ft4_n)
+        # One line per WSPR cycle — the uploader now logs only when a
+        # cycle ships (wsprdaemon and/or wsprnet had rows), so there's
+        # no idle-flood to collapse here.
         ts = ts_re.match(line)
         hms = ts.group(2) if ts else _datetime.datetime.now().strftime('%H:%M:%S')
-        if wn_n_i > 0:
-            print(
-                f'[{hms}] WSPRnet         '
-                f'+{wn_n_i:>4} spots   '
-                f'total={wn_total_i:>6}   '
-                f'batch={work_i}',
-                flush=True,
-            )
-        if wd_n_i > 0:
-            print(
-                f'[{hms}] wsprdaemon.org  '
-                f'+{wd_n_i:>4} spots   '
-                f'total={wd_total_i:>6}   '
-                f'batch={work_i}',
-                flush=True,
-            )
+        print(
+            f'[{hms}] cycle {cycle}   '
+            f'wsprnet {wn:>4}   '
+            f'wsprdaemon {wd:>4}   '
+            f'ft8 {ft8:>4}   '
+            f'ft4 {ft4:>4}   '
+            f'tar {tar}',
+            flush=True,
+        )
         return True
 
     def _emit_psk(line: str) -> bool:
