@@ -871,40 +871,92 @@ def _detect_rac_defaults() -> tuple[str, int]:
       [receiver:NAME]  call = <reporter-id>   ← first one becomes default rac_id
     """
     import configparser as _cp
+    rac_id, rac_number = '', -1
+
     wdconf = Path('/etc/wsprdaemon/wsprdaemon.conf')
-    if not wdconf.exists():
-        return '', -1
-
-    cfg = _cp.ConfigParser(
-        comment_prefixes=(';', '#'),
-        inline_comment_prefixes=(';', '#'),
-        strict=False,
-        interpolation=None,
-    )
-    try:
-        cfg.read(wdconf)
-    except Exception:
-        return '', -1
-
-    # rac_number from [general] rac =
-    rac_number = -1
-    if cfg.has_section('general'):
+    if wdconf.exists():
+        cfg = _cp.ConfigParser(
+            comment_prefixes=(';', '#'),
+            inline_comment_prefixes=(';', '#'),
+            strict=False,
+            interpolation=None,
+        )
         try:
-            rac_number = int(cfg.get('general', 'rac', fallback='').strip())
-        except (ValueError, TypeError):
+            cfg.read(wdconf)
+            # rac_number from [general] rac =
+            if cfg.has_section('general'):
+                try:
+                    rac_number = int(cfg.get('general', 'rac',
+                                             fallback='').strip())
+                except (ValueError, TypeError):
+                    pass
+            # rac_id from first [receiver:NAME] call =
+            for section in cfg.sections():
+                parts = section.split(':')
+                if parts[0] == 'receiver' and len(parts) == 2:
+                    call = cfg.get(section, 'call', fallback='').strip()
+                    if call:
+                        rac_id = call
+                        break
+        except Exception:
             pass
 
-    # rac_id from first [receiver:NAME] call =
-    rac_id = ''
-    for section in cfg.sections():
-        parts = section.split(':')
-        if parts[0] == 'receiver' and len(parts) == 2:
-            call = cfg.get(section, 'call', fallback='').strip()
-            if call:
-                rac_id = call
-                break
+    # Sigmond hosts have no wsprdaemon.conf — default the RAC ID to the
+    # reporter id of the first LOCAL receiver (NOT the merge-uploader's
+    # wsprnet identity).  (No rac_number source here — admin-assigned.)
+    if not rac_id:
+        rac_id = _first_local_receiver_reporter_id()
 
     return rac_id, rac_number
+
+
+def _first_local_receiver_reporter_id() -> str:
+    """Reporter id (e.g. ``AC0G/B4``) of the first local receiver.
+
+    'Local' = a radiod declared with ``host = localhost`` (or this host's
+    name) in /etc/sigmond/coordination.toml — i.e. a receiver physically
+    on this box, not a centrally-decoded remote like bee1/bee2.  Its
+    per-receiver reporter id is ``WD_RX_CALL`` (falling back to
+    ``WD_RECEIVER_CALL``) in /etc/wspr-recorder/env/<instance>.env.
+    Returns '' when nothing local can be resolved.
+    """
+    coord = Path('/etc/sigmond/coordination.toml')
+    if not coord.exists():
+        return ''
+    try:
+        import tomllib
+        with open(coord, 'rb') as f:
+            data = tomllib.load(f)
+    except Exception:
+        return ''
+
+    import socket
+    host_short = socket.gethostname().split('.')[0]
+    local_hosts = {'localhost', '127.0.0.1', '::1',
+                   socket.gethostname(), host_short}
+    env_dir = Path('/etc/wspr-recorder/env')
+
+    for inst, cfg in (data.get('radiod') or {}).items():
+        host = str((cfg or {}).get('host', '')).strip()
+        if host and host not in local_hosts:
+            continue   # remote receiver — skip
+        envf = env_dir / f'{inst}.env'
+        if not envf.exists():
+            continue
+        vals = {}
+        try:
+            for line in envf.read_text().splitlines():
+                line = line.strip()
+                if line.startswith('#') or '=' not in line:
+                    continue
+                k, _, v = line.partition('=')
+                vals[k.strip()] = v.strip().strip('"\'')
+        except OSError:
+            continue
+        rid = vals.get('WD_RX_CALL') or vals.get('WD_RECEIVER_CALL') or ''
+        if rid:
+            return rid
+    return ''
 
 
 _WD_USER    = 'wsprdaemon'
@@ -1155,7 +1207,19 @@ def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> b
     with _tf4.NamedTemporaryFile('w', suffix='.toml', delete=False) as tf:
         tf.write(content)
         tf_path = tf.name
-    r = _run(['install', '-m', '640', tf_path, str(_FRPC_CONFIG)], sudo=True)
+    # Group-own to `sigmond` (mode 0640) so operators can read it for
+    # `smd rac status` without sudo — frpc reads it as root (owner), and
+    # the only "secret" inside is the fleet-shared token that's already
+    # hardcoded in this script.  Fall back to root:root if the sigmond
+    # group is absent.
+    import grp as _grp
+    try:
+        _grp.getgrnam('sigmond')
+        install_cmd = ['install', '-m', '640', '-g', 'sigmond',
+                       tf_path, str(_FRPC_CONFIG)]
+    except KeyError:
+        install_cmd = ['install', '-m', '640', tf_path, str(_FRPC_CONFIG)]
+    r = _run(install_cmd, sudo=True)
     Path(tf_path).unlink(missing_ok=True)
     if r.returncode != 0:
         _err(f'frpc.toml write failed: {r.stderr.strip()}')
@@ -1270,40 +1334,54 @@ def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False) ->
     """Full wd-rac install: frpc binary + frpc.ini + systemd service."""
     rac_id, rac_number = _read_rac_topology(topology)
 
-    # Fall back to wsprdaemon.conf auto-detection when not explicitly configured.
+    # Fall back to auto-detection (wsprdaemon.conf, else the WSPR
+    # uploader's WD_RECEIVER_CALL) when not explicitly configured.
     if not rac_id or rac_number < 0:
         detected_id, detected_num = _detect_rac_defaults()
         if not rac_id and detected_id:
             rac_id = detected_id
-            _info(f'wd-rac: rac_id auto-detected from wsprdaemon.conf: {rac_id}')
+            _info(f'wd-rac: rac_id default detected: {rac_id}')
         if rac_number < 0 and detected_num >= 0:
             rac_number = detected_num
-            _info(f'wd-rac: rac_number auto-detected from wsprdaemon.conf: {rac_number}')
+            _info(f'wd-rac: rac_number detected: {rac_number}')
 
     # Interactive prompt when still missing and running in a real terminal.
     if (not rac_id or rac_number < 0) and not yes and sys.stdin.isatty():
         import readline  # noqa: F401 — enables line editing on input()
         print()
-        print('  wd-rac needs two values from the RAC administrator:')
-        if not rac_id:
+        print('  wd-rac needs a RAC ID and a RAC number '
+              '(the number is assigned by the RAC administrator).')
+        # RAC ID — always show the detected default; Enter accepts it.
+        default_id = rac_id
+        try:
+            prompt = (f'  RAC ID [{default_id}]: ' if default_id
+                      else '  RAC ID (e.g. AI6VN-0): ')
+            val = input(prompt).strip()
+            rac_id = val or default_id
+        except (EOFError, KeyboardInterrupt):
+            print()
+        # RAC number — required; loop until a valid integer or abort.
+        while rac_number < 0:
             try:
-                val = input('  RAC ID   (e.g. AI6VN-0, leave blank to skip): ').strip()
-                if val:
-                    rac_id = val
+                val = input('  RAC number (integer, required — '
+                            'Ctrl-C to abort): ').strip()
             except (EOFError, KeyboardInterrupt):
-                pass
-        if rac_number < 0:
+                print()
+                _err('wd-rac: aborted — RAC number is required')
+                return False
+            if not val:
+                _warn('  RAC number is required (it sets your ssh tunnel '
+                      'port); enter the integer from the admin email.')
+                continue
             try:
-                val = input('  RAC number (integer from admin email, leave blank to skip): ').strip()
-                if val:
-                    rac_number = int(val)
-            except (EOFError, KeyboardInterrupt, ValueError):
-                pass
+                rac_number = int(val)
+            except ValueError:
+                _warn(f'  "{val}" is not an integer — try again.')
 
     if not rac_id or rac_number < 0:
         _warn('wd-rac: rac_id or rac_number not set — tunnel will not be started')
-        _warn('  To configure: run  smd tui  and press  a  (RAC screen)')
-        _warn('  Or:           sudo smd install --components wd-rac  (prompts interactively)')
+        _warn('  To configure: run  smd rac install  (prompts interactively)')
+        _warn('  Or:           smd tui  and press  a  (RAC screen)')
 
     ok = True
     ok = _install_frpc(dry_run) and ok
@@ -1328,6 +1406,7 @@ def rac_status() -> dict:
         'rac_id':         '',
         'rac_number':     -1,
         'ssh_port':       -1,
+        'config_unreadable': False,
     }
     if result['frpc_installed']:
         r = _run([str(_FRPC_BIN), '--version'])
@@ -1346,6 +1425,10 @@ def rac_status() -> dict:
                     result['ssh_port']   = rp
                     result['rac_number'] = rp - _RAC_PORT_BASE if rp > 0 else -1
                     break
+        except PermissionError:
+            # Config exists but this (non-root) user can't read it —
+            # don't masquerade as "not configured".
+            result['config_unreadable'] = True
         except Exception:
             pass
 
@@ -1361,6 +1444,95 @@ def rac_status() -> dict:
             result['tunnel_ok'] = False
 
     return result
+
+
+def cmd_rac(args) -> int:
+    """Day-to-day lifecycle for the wd-rac (frpc) remote-access tunnel.
+
+    Subverbs: ``status`` (default), ``start``, ``stop``, ``restart`` —
+    thin wrappers over ``wd-rac.service``; and ``install``, which aliases
+    ``smd install --components wd-rac`` (download frpc, write frpc.toml,
+    keypair, register with the gateway, install the unit — same as the
+    TUI RAC screen).  The lifecycle verbs just bring an already-installed
+    tunnel up/down and report it.
+    """
+    action = getattr(args, 'rac_command', None) or 'status'
+    unit = f'{_RAC_SERVICE}.service'
+    unit_path = Path(f'/etc/systemd/system/{unit}')
+
+    if action == 'status':
+        st = rac_status()
+        _heading('wd-rac (frpc) remote-access tunnel')
+        if not st['frpc_installed']:
+            _warn('frpc binary not installed')
+            _info('provision with:  smd rac install')
+            return 0
+        _ok(f"frpc binary : {_FRPC_BIN} "
+            f"({st['frpc_version'] or 'unknown version'})")
+        if not st['config_exists'] or not unit_path.exists():
+            _warn(f'not configured on this host ({_FRPC_CONFIG} / {unit} missing)')
+            _info('provision with:  smd rac install'
+                  '   (or  smd tui  → RAC screen)')
+            return 0
+        rnum = st['rac_number']
+        frps_host = (_FRPS_URL_HAMSCI if isinstance(rnum, int)
+                     and 200 <= rnum <= 299 else _FRPS_URL)
+        _ok(f"config      : {_FRPC_CONFIG}")
+        if st.get('config_unreadable'):
+            _warn(f"            : not readable as {os.getenv('USER', 'this user')} "
+                  f"— re-run as root, or  smd rac install  to fix group perms")
+        else:
+            _info(f"rac_id      : {st['rac_id'] or '(unset)'}")
+            _info(f"rac_number  : {rnum if rnum >= 0 else '(unset)'}")
+            _info(f"ssh tunnel  : {frps_host}:"
+                  f"{st['ssh_port'] if st['ssh_port'] > 0 else '?'}")
+        if st['service_active']:
+            _ok(f"service     : {unit} active")
+            if st['tunnel_ok']:
+                _ok(f"gateway     : {_FRPS_URL}:{_FRPS_PORT} reachable")
+            else:
+                _warn(f"gateway     : {_FRPS_URL}:{_FRPS_PORT} UNREACHABLE "
+                      f"— service up but tunnel not established")
+        else:
+            _warn(f"service     : {unit} inactive  "
+                  f"(bring up with  smd rac start)")
+        r = _run(['systemctl', 'is-enabled', unit])
+        _info(f"boot        : {r.stdout.strip() or 'unknown'}")
+        return 0
+
+    if action == 'install':
+        # Alias for `smd install --components wd-rac` — call the native
+        # provisioner directly.  (wd-rac is NOT a catalog *client*, so the
+        # single-positional `smd component install wd-rac` path fails its
+        # get_entry() lookup; the working path is the frpc-native one.)
+        if _need_root('rac install'):
+            return 1
+        _netdiag_auto_refresh('install')
+        _heading('wd-rac (Remote Access Channel)')
+        topology = _load_topology(TOPOLOGY_PATH)
+        return 0 if _install_wd_rac(
+            topology,
+            getattr(args, 'dry_run', False),
+            yes=getattr(args, 'yes', False),
+        ) else 1
+
+    if action in ('start', 'stop', 'restart'):
+        if not unit_path.exists():
+            _err(f'{unit} is not installed on this host')
+            _info('provision the tunnel first:  smd rac install')
+            return 1
+        if _need_root(f'rac {action}'):
+            return 1
+        r = _run(['systemctl', action, unit])
+        if r.returncode != 0:
+            _err(f'systemctl {action} {unit} failed: {r.stderr.strip()}')
+            return 1
+        chk = _run(['systemctl', 'is-active', unit])
+        _ok(f'{unit}: {action} → {chk.stdout.strip() or "?"}')
+        return 0
+
+    _err(f'unknown rac action: {action}')
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -5056,7 +5228,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage sources public-ip completion component instance"
+    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier rac ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage sources public-ip completion component instance"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -5133,6 +5305,9 @@ _smd_complete() {
                     ;;
                 verifier)
                     COMPREPLY=($(compgen -W "report" -- "$cur"))
+                    ;;
+                rac)
+                    COMPREPLY=($(compgen -W "status start stop restart install" -- "$cur"))
                     ;;
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
@@ -11014,6 +11189,7 @@ def main() -> int:
               Diagnostics / debug:
                 diag       cpu-affinity | cpu-freq | net
                 verifier   wsprnet upload audit (report | rehabilitate)
+                rac        wd-rac tunnel lifecycle (status | start | stop | restart | install)
 
               Meta:
                 completion bash    emit bash tab-completion script
@@ -11690,6 +11866,45 @@ def main() -> int:
         help='sink.db path (default /var/lib/sigmond/sink.db)',
     )
 
+    p_rac = sub.add_parser(
+        'rac',
+        help='wd-rac (frpc) remote-access tunnel lifecycle '
+             '(status | start | stop | restart)',
+    )
+    rac_sub = p_rac.add_subparsers(dest='rac_command')
+    rac_sub.add_parser(
+        'status',
+        help='show frpc tunnel config + service + gateway reachability '
+             '(default when no subverb given)',
+    )
+    rac_sub.add_parser(
+        'start', help='start wd-rac.service (elevates automatically)',
+    )
+    rac_sub.add_parser(
+        'stop', help='stop wd-rac.service (elevates automatically)',
+    )
+    rac_sub.add_parser(
+        'restart', help='restart wd-rac.service (elevates automatically)',
+    )
+    p_rac_install = rac_sub.add_parser(
+        'install',
+        help='provision the tunnel (frpc binary + frpc.toml + keypair + '
+             'gateway registration + unit) — alias for '
+             '`smd install --components wd-rac`',
+    )
+    p_rac_install.add_argument(
+        '--dry-run', action='store_true',
+        help='show what would be done without making changes',
+    )
+    p_rac_install.add_argument(
+        '--yes', '-y', action='store_true',
+        help='accept defaults, no interactive prompts',
+    )
+    p_rac_install.add_argument(
+        '--force', '-f', action='store_true',
+        help='reinstall even if frpc appears current',
+    )
+
     p_storage = sub.add_parser('storage',
                                help='manage the local sink backend '
                                     '(SQLite default; remove leftover '
@@ -12130,6 +12345,9 @@ def main() -> int:
             return cmd_timestd_tune_storage(args)
         p_storage.print_help()
         return 0
+
+    if args.command == 'rac':
+        return cmd_rac(args)
 
     if args.command == 'verifier':
         verifier_cmd = getattr(args, 'verifier_command', None)
