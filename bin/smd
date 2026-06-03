@@ -7683,10 +7683,13 @@ def cmd_uploads_watch(args) -> int:
     import re as _re
     import datetime as _datetime
 
+    # wsprnet count is logged either as a plain int ("wsprnet=50") or, when
+    # the async POST status is known, as "wsprnet=posted:61/added:60" — so
+    # capture it as a token and parse below.
     wspr_re = _re.compile(
         r'wspr-uploader-hs:\s+shipped\s+'
-        r'wsprdaemon=(\d+)\s+wsprnet=(\d+)\s+'
-        r'\(total\s+wsprdaemon=(\d+)\s+wsprnet=(\d+),\s+work=(\d+)\)'
+        r'wsprdaemon=(\d+)\s+wsprnet=(\S+)\s+'
+        r'\(total\s+wsprdaemon=(\d+)\s+wsprnet=(\S+),\s+work=(\d+)\)'
     )
     psk_re = _re.compile(
         r'psk-uploader-hs:\s+shipped\s+'
@@ -7786,24 +7789,41 @@ def cmd_uploads_watch(args) -> int:
     j_buf = b''
     p_buf = b''
 
+    def _wn_count(tok: str) -> int:
+        """Parse a wsprnet count token: 'posted:61/added:60' → 60 (added,
+        what actually landed); plain '50'/'0' → that int."""
+        m2 = _re.search(r'added:(\d+)', tok)
+        if m2:
+            return int(m2.group(1))
+        return int(tok) if tok.isdigit() else 0
+
     def _emit_wspr(line: str) -> bool:
         m = wspr_re.search(line)
         if not m:
             return False
         wd_n, wn_n, wd_total, wn_total, work = m.groups()
-        wd_n_i, wn_n_i = int(wd_n), int(wn_n)
-        wd_total_i, wn_total_i = int(wd_total), int(wn_total)
+        wd_n_i = int(wd_n)
+        wn_n_i = _wn_count(wn_n)
+        # The uploader logs a 'shipped' summary every ~15s pump, almost all
+        # idle (wsprdaemon=0 wsprnet=0).  Collapse that flood: emit only
+        # batches that actually shipped — ~one line per WSPR cycle, per
+        # destination that shipped.
+        if wd_n_i == 0 and wn_n_i == 0:
+            return False
+        wd_total_i = int(wd_total)
+        wn_total_i = _wn_count(wn_total)
         work_i = int(work)
         ts = ts_re.match(line)
         hms = ts.group(2) if ts else _datetime.datetime.now().strftime('%H:%M:%S')
-        print(
-            f'[{hms}] WSPRnet         '
-            f'+{wn_n_i:>4} spots   '
-            f'total={wn_total_i:>6}   '
-            f'batch={work_i}',
-            flush=True,
-        )
-        if wd_n_i > 0 or wd_total_i > 0:
+        if wn_n_i > 0:
+            print(
+                f'[{hms}] WSPRnet         '
+                f'+{wn_n_i:>4} spots   '
+                f'total={wn_total_i:>6}   '
+                f'batch={work_i}',
+                flush=True,
+            )
+        if wd_n_i > 0:
             print(
                 f'[{hms}] wsprdaemon.org  '
                 f'+{wd_n_i:>4} spots   '
