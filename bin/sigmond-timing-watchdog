@@ -51,6 +51,7 @@ DT_WINDOW_MIN = int(os.environ.get("TWD_DT_WINDOW_MIN", "8"))
 K_WSPR        = int(os.environ.get("TWD_WSPR_WINDOWS", "3"))     # WSPR cycles to median over
 WSPR_PEER     = int(os.environ.get("TWD_WSPR_PEER_MIN", "3"))    # peer-median spots to call band open
 WSPR_FRAC     = float(os.environ.get("TWD_WSPR_FRAC", "0.25"))   # yield < frac*peer-median = collapsed
+WSPR_WARMUP   = int(os.environ.get("TWD_WSPR_WARMUP_SEC", "300"))# WSPR's 1st cycle takes ~4-5 min post-restart
 WSPR_LOOKBACK = os.environ.get("TWD_WSPR_LOOKBACK", "15 min ago")
 
 STATS_RE = re.compile(
@@ -280,9 +281,9 @@ def main():
                 print(f"timing-watchdog[wspr]: {i} WSPR yield {wyield[i]}<<peers "
                       f"{peer_wmed} seen once -> confirm next run"); continue
             warm=started_secs_ago(i,"wspr-recorder")
-            if warm<WARMUP:
+            if warm<WSPR_WARMUP:
                 print(f"timing-watchdog[wspr]: {i} flagged but {int(warm)}s since "
-                      f"start (<{WARMUP}) -> warming up"); continue
+                      f"start (<{WSPR_WARMUP}) -> warming up"); continue
             if now-acted_wspr.get(i,0)<COOLDOWN:
                 print(f"timing-watchdog[wspr]: {i} flagged but in cooldown "
                       f"({int(now-acted_wspr.get(i,0))}s/{COOLDOWN}s)"); continue
