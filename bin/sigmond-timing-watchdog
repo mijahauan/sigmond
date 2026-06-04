@@ -48,8 +48,9 @@ DT_WINDOW_MIN = int(os.environ.get("TWD_DT_WINDOW_MIN", "8"))
 # wspr detector (added 2026-06-04): a radiod restart can leave wspr-recorder
 # recording clean audio but decoding 0 WSPR spots (2-min window misaligned)
 # while FT8 rides through; WSPR does NOT always self-heal, so cover it too.
-K_WSPR        = int(os.environ.get("TWD_WSPR_WINDOWS", "3"))     # consecutive 0-spot WSPR cycles
-WSPR_PEER     = int(os.environ.get("TWD_WSPR_PEER_MIN", "3"))    # peer spots to call the band open
+K_WSPR        = int(os.environ.get("TWD_WSPR_WINDOWS", "3"))     # WSPR cycles to median over
+WSPR_PEER     = int(os.environ.get("TWD_WSPR_PEER_MIN", "3"))    # peer-median spots to call band open
+WSPR_FRAC     = float(os.environ.get("TWD_WSPR_FRAC", "0.25"))   # yield < frac*peer-median = collapsed
 WSPR_LOOKBACK = os.environ.get("TWD_WSPR_LOOKBACK", "15 min ago")
 
 STATS_RE = re.compile(
@@ -249,27 +250,35 @@ def main():
             sh(["systemctl","restart",f"psk-recorder@{i}"])
             acted_at[i]=now; acted=True
 
-    # --- detector 3: WSPR spots=0 while a peer decodes WSPR (wspr-recorder) ---
+    # --- detector 3: WSPR yield collapsed vs peers (wspr-recorder) ---
+    # Catches both dead (0) AND alive-but-degraded: a slow RTP-window drift
+    # decays an instance's WSPR toward 0 over ~10 min while FT8 rides through
+    # and a flat spots==0 test misses it (e.g. bee1 38,5,2,0). Peer-relative,
+    # so a quiet band (all receivers low) is suppressed; confirmed across 2 runs.
     winst=running_wspr_instances()
     acted_wspr=state.get("acted_wspr",{}) if isinstance(state.get("acted_wspr"),dict) else {}
     if winst:
-        wlatest={}; wbroken={}
+        wyield={}   # median WSPR spots over the last K_WSPR cycles
         for i in winst:
-            c=recent_wspr(i)
-            wlatest[i]=c[-1] if c else None
-            wtail=c[-K_WSPR:] if len(c)>=K_WSPR else []
-            wbroken[i]=(len(wtail)==K_WSPR and all(s==0 for s in wtail))
-        wspr_open=any((wlatest[i] or 0)>=WSPR_PEER for i in winst)
-        whealthy=[i for i in winst if not wbroken[i]]
-        wstr=", ".join(f"{i}:{wlatest[i] if wlatest[i] is not None else 'na'}" for i in winst)
+            c=recent_wspr(i)[-K_WSPR:]
+            wyield[i]=_median(c) if c else None
+        peer_wmed=_median([wyield[i] for i in winst if wyield[i] is not None])
+        wbad={}
+        for i in winst:
+            y=wyield[i]
+            wbad[i]=(y is not None and peer_wmed is not None
+                     and peer_wmed>=WSPR_PEER and y < WSPR_FRAC*peer_wmed)
+        wprev=set(state.get("wspr_prev",[]))   # require 2 consecutive runs
+        whealthy=[i for i in winst if not wbad[i]]
+        wstr=", ".join(f"{i}:{wyield[i] if wyield[i] is not None else 'na'}" for i in winst)
         print(f"timing-watchdog[wspr]: instances={winst} healthy={whealthy} "
-              f"band_open={wspr_open} spots=[{wstr}]")
+              f"peer_median={peer_wmed} yield=[{wstr}]")
         for i in winst:
-            if not wbroken[i]:
+            if not wbad[i]:
                 continue
-            if not wspr_open:
-                print(f"timing-watchdog[wspr]: {i} WSPR=0 x{K_WSPR} but no peer "
-                      "decoding -> dead band, NOT acting"); continue
+            if i not in wprev:
+                print(f"timing-watchdog[wspr]: {i} WSPR yield {wyield[i]}<<peers "
+                      f"{peer_wmed} seen once -> confirm next run"); continue
             warm=started_secs_ago(i,"wspr-recorder")
             if warm<WARMUP:
                 print(f"timing-watchdog[wspr]: {i} flagged but {int(warm)}s since "
@@ -277,11 +286,13 @@ def main():
             if now-acted_wspr.get(i,0)<COOLDOWN:
                 print(f"timing-watchdog[wspr]: {i} flagged but in cooldown "
                       f"({int(now-acted_wspr.get(i,0))}s/{COOLDOWN}s)"); continue
-            print(f"timing-watchdog[wspr]: {i} WSPR=0 x{K_WSPR} while peers decode -> "
-                  f"{'DRY-RUN ' if DRY_RUN else ''}re-anchor via wspr-recorder restart")
+            print(f"timing-watchdog[wspr]: {i} WSPR yield collapsed ({wyield[i]} vs "
+                  f"peer median {peer_wmed}) -> {'DRY-RUN ' if DRY_RUN else ''}"
+                  "re-anchor via wspr-recorder restart")
             if not DRY_RUN:
                 sh(["systemctl","restart",f"wspr-recorder@{i}"])
                 acted_wspr[i]=now
+        state["wspr_prev"]=[i for i in winst if wbad[i]]
     state["acted_wspr"]=acted_wspr
 
     state["acted"]=acted_at
