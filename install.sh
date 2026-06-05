@@ -662,6 +662,20 @@ else
     ok "  every catalog repo already cloned"
 fi
 
+# ─── git safe.directory for cloned repos ──────────────────────────────────────
+# Client builds run `uv sync` as root, which builds sibling path-deps
+# (callhash, ka9q-python, hs-uploader, …) whose setuptools-scm version
+# detection shells out to git.  Those repos are owned by `sigmond`, so a
+# root-run git aborts with "detected dubious ownership" and the build fails.
+# Trust every cloned repo system-wide (mirrors installer.py's clone_repo).
+info "Marking /opt/git/sigmond repos as git safe.directory (system-wide)…"
+for _repo in /opt/git/sigmond/*/; do
+    _repo="${_repo%/}"
+    [[ -d "$_repo/.git" ]] || continue
+    $SUDO git config --system --get-all safe.directory 2>/dev/null | grep -qxF "$_repo" \
+        || $SUDO git config --system --add safe.directory "$_repo"
+done
+
 # ─── done ─────────────────────────────────────────────────────────────────────
 echo
 echo -e "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════╗${NC}"
