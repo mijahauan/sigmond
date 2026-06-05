@@ -715,6 +715,54 @@ def _expected_build_pins() -> dict:
     }
 
 
+# SDR front-ends whose USB streaming requires SuperSpeed (USB 3.x, >= 5 Gb/s).
+# An RX888 at 129.6 Msps needs ~2 Gb/s; on a 480 Mbps USB-2 link radiod fails
+# to open it with a cryptic rx888_usb_init error, so flag it in diag first.
+_SUPERSPEED_SDR_VID = {'04b4': 'RX888 (Cypress FX3)'}
+_SDR_DFU_PIDS = {'00f3'}   # RX888 firmware-upgrade bootloader; not yet streamable
+
+
+def _diag_sdr_usb_link() -> int:
+    """Warn when a high-bandwidth SDR is enumerated on a non-SuperSpeed USB bus.
+    Reads /sys/bus/usb/devices/<dev>/speed for known SDR vendors; an RX888 on a
+    480 Mbps (USB 2.0) link can't stream and radiod fails to open it.  Advisory;
+    returns the number of warnings."""
+    import glob
+    found = []
+    for dev in sorted(glob.glob('/sys/bus/usb/devices/*')):
+        def _read(name):
+            try:
+                with open(os.path.join(dev, name)) as f:
+                    return f.read().strip()
+            except OSError:
+                return ''
+        vid = _read('idVendor').lower()
+        if vid not in _SUPERSPEED_SDR_VID:
+            continue
+        if _read('idProduct').lower() in _SDR_DFU_PIDS:
+            continue  # in DFU mode — bring-up handled by the rx888 udev/boot path
+        try:
+            speed = int(float(_read('speed') or 0))
+        except ValueError:
+            speed = 0
+        found.append((_SUPERSPEED_SDR_VID[vid], speed, _read('serial')))
+    if not found:
+        return 0
+    print()
+    _info('SDR USB link:')
+    warns = 0
+    for label, speed, serial in found:
+        tag = f' serial {serial}' if serial else ''
+        if speed >= 5000:
+            _ok(f'{label}: USB SuperSpeed ({speed} Mbps){tag}')
+        else:
+            _warn(f'{label}: on a {speed} Mbps USB-2 link{tag} — needs SuperSpeed '
+                  f'(>=5000 Mbps); radiod cannot open it.  Move it to a blue USB-3 '
+                  f'port with a USB-3 cable, then `lsusb -t` should show 5000M+.')
+            warns += 1
+    return warns
+
+
 def _diag_build_manifests() -> int:
     """Compare each installed build manifest against the current pins — the
     upstream-built analogue of install.sh's provenance check.  Advisory:
@@ -5283,6 +5331,10 @@ def cmd_diag(args) -> int:
 
     # Build manifests vs pins (upstream-built native deps — onion, etc.)
     _diag_build_manifests()
+
+    # SDR USB link speed (catch an RX888-class SDR on a USB-2 bus before radiod
+    # fails with a cryptic rx888_usb_init error).
+    _diag_sdr_usb_link()
 
     # Client self-validation
     if _HAS_SIGMOND_LIB:
