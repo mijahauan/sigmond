@@ -1,0 +1,30 @@
+# sigmond-wisdom.service — generate FFTW wisdom for ka9q-radio when absent.
+#
+# fftwf-wisdom finds the fastest FFT implementation by benchmarking each
+# candidate, so it needs an idle CPU and can take hours for the RX888's
+# rof3240000 forward transform.  This first-boot oneshot stops sigmond
+# services, runs the planner, installs /etc/fftw/wisdomf, then restarts
+# services — now on fast plans.  Enabled when ka9q-radio is installed; the
+# Condition* lines make it a no-op on every boot once wisdom exists (it
+# re-runs only if /etc/fftw/wisdomf is removed) and on hosts without the
+# planner (no ka9q-radio).
+[Unit]
+Description=Generate FFTW wisdom for ka9q-radio (one-time, when absent)
+Documentation=https://github.com/ka9q/ka9q-radio/blob/main/docs/FFTW3.md
+ConditionPathExists=!/etc/fftw/wisdomf
+ConditionFileIsExecutable=/usr/bin/fftwf-wisdom
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+# rof3240000 can take hours — never let systemd time it out.
+TimeoutStartSec=infinity
+# Stop services so FFTW benchmarks on an idle CPU; restart them after.
+ExecStartPre=-/usr/local/bin/smd stop
+ExecStart=/usr/local/bin/smd wisdom plan
+ExecStartPost=-/usr/local/bin/smd start
+
+[Install]
+WantedBy=multi-user.target

@@ -2499,6 +2499,24 @@ def _reload_udev_for_sdrs() -> None:
     _ok('udev rules reloaded + triggered')
 
 
+def _install_wisdom_service() -> None:
+    """Install + enable sigmond-wisdom.service — the first-boot oneshot that
+    generates FFTW wisdom when /etc/fftw/wisdomf is absent (then restarts
+    services).  Idempotent: the unit's Condition* lines make it a no-op once
+    wisdom exists.  fftwf-wisdom is hours-long, so we never run it inline —
+    the service handles it on the next boot (or `systemctl start
+    sigmond-wisdom` to trigger now)."""
+    src = Path(__file__).resolve().parent.parent / 'systemd' / 'sigmond-wisdom.service'
+    if not src.exists():
+        return
+    _run(['install', '-m', '0644', str(src),
+          '/etc/systemd/system/sigmond-wisdom.service'], sudo=True)
+    _run(['systemctl', 'daemon-reload'], sudo=True)
+    _run(['systemctl', 'enable', 'sigmond-wisdom.service'], sudo=True)
+    _ok('sigmond-wisdom.service enabled (generates FFTW wisdom on next boot '
+        'when absent; `systemctl start sigmond-wisdom` to run now)')
+
+
 def _install_radiod_native(catalog, *, force: bool = False) -> bool:
     """Install ka9q-radio natively under /opt/git/sigmond/ka9q-radio.
 
@@ -2542,6 +2560,8 @@ def _install_radiod_native(catalog, *, force: bool = False) -> bool:
     # Apply the just-installed SDR udev rules to already-connected devices
     # (loads RX888 firmware if it was plugged in before this install).
     _reload_udev_for_sdrs()
+    # First-boot wisdom generation (FFTW plans for radiod's transforms).
+    _install_wisdom_service()
     _ensure_radiod_running()
     return True
 
