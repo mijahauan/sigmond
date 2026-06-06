@@ -11,6 +11,8 @@ and the *host tuning* that make radiod run effectively.
   capacity).
 - Multi-client / multi-instance details: [`MULTI-INSTANCE-ARCHITECTURE.md`](MULTI-INSTANCE-ARCHITECTURE.md).
 - Native build deps: [`native-binaries.md`](native-binaries.md).
+- **Automating this runbook** (TUI-driven, profile-based bring-up) is specced in
+  [`install-orchestration-design.md`](install-orchestration-design.md).
 
 Throughout, the **worked example** is the first station this runbook was written
 from: host `sigma`, callsign **AC0G**, grid **EM38ww**, one RX888mk2, running
