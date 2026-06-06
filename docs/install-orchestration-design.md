@@ -186,7 +186,36 @@ Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remot
   gained `--non-interactive`.  §14 commons env bag was already wired.  All four
   DASI2 clients now drive non-interactively.
 
-## 10. Open questions / future
+## 10. Validation status
+
+Exercised on the AC0G / `sigma` host (local radiod enabled) on 2026-06-06.
+
+**Plan builder — unit tests** (`tests/test_bringup.py`, 7 tests, all pass):
+local vs remote branches, stage assignment (hf-timestd→Stage 2, mag→3b),
+the single hard checkpoint, the `--with-optional` toggle, the final validate,
+and `--non-interactive` appending the flag to config steps.
+
+**`smd bringup` dry-run — all flag paths exercised on the host:**
+
+| Invocation | Observed plan |
+|---|---|
+| `--profile dasi2 --dry-run` | LOCAL detected; full Stage 1 radiod stack (igmp/gpsdo/ka9q-radio → tuning → configure radiod → background wisdom → HARD `radiod configured`); Stage 2 hf-timestd; 3a wspr/psk; 3b mag; Stage 4 ⏳ wait-wisdom → start → validate |
+| `--remote-radiod bee3-status.local --dry-run` | REMOTE; Stage 1 collapses to a single note (no radiod stack, gpsdo, or wisdom); no hard gate; Stage 4 has **no** wisdom wait; client stages unchanged |
+| `--non-interactive --dry-run` | every `configure` step tagged `(non-interactive)`; install/tune/start/checkpoint steps unchanged |
+| `--with-optional --dry-run` | `install ka9q-web` added to Stage 1 (no configure step — it has no `[contract.config]`) |
+
+**Other:** `smd validate` remains 11/0/0 after all Phase A–C changes.
+hf-timestd's `setup-station.sh --non-interactive` was run for real against a
+temp `--config` path and produced a complete config with callsign / grid /
+location / status populated from the §14 env bag.
+
+**Not yet validated:** a real (non-dry) end-to-end `smd bringup` — the actual
+installs, config interviews, the ~30-min FFT-wisdom wait, and checkpoint probes
+have only been dry-run / unit-tested. Best run on a fresh or test host, not the
+live station. The TUI suspend→`smd bringup` path also needs a TTY to exercise
+live.
+
+## 11. Open questions / future
 
 - Remote-radiod discovery: mDNS browse for `*-status.local` vs operator-entered
   `status_dns`.
