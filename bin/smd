@@ -7630,6 +7630,13 @@ def _psk_watch_cycle_loop(
 
     # Separate each 15 s slot's block of receiver lines with a blank line.
     _prev_wall = [None]
+    # decode_ft8 (ka9q/ft8_lib) reports a fixed ~0.65 s dt offset vs
+    # WSJT-X/jt9 — verified 2026-06-05 by decoding the same on-time WAV with
+    # both (jt9 +0.17, decode_ft8 +0.82). The recording is on-time; this is a
+    # decoder-convention offset. Subtract it so the FT8 dt column reads true
+    # (matching WSPR and WSJT-X). Display-only; spot data/uploads untouched.
+    # FT4 carries its own offset and is left raw. Tunable via env.
+    _ft8_dt_cal = float(os.environ.get('PSK_WATCH_FT8_DT_CAL_SEC', '0.65'))
 
     try:
         while True:
@@ -7690,6 +7697,8 @@ def _psk_watch_cycle_loop(
                 # Average decoder dt for the cycle's spots (fixed-width so the
                 # column lines up; '----' when no spots to average).
                 _d8 = _avg_dt(ft8_lines)
+                if _d8 is not None:
+                    _d8 -= _ft8_dt_cal   # decode_ft8 → WSJT-X dt convention
                 _d4 = _avg_dt(ft4_lines)
                 ft8_dt_part = f' dt={_d8:+.2f}' if _d8 is not None else ' dt= ----'
                 ft4_dt_part = f' dt={_d4:+.2f}' if _d4 is not None else ''
