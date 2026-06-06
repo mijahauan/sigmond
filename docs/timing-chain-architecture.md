@@ -111,13 +111,13 @@ cascades into its neighbours.
     fusion/recorder aren't *feeding* their SHM units after restart (sysv_ipc is
     present; it's a pipeline-readiness matter, not a chrony/contract problem).
     Not blocking — GPS is the reference.
-  - **Repo durability still owed (hf-timestd):** install.sh installs the WRONG
-    refclock scheme (`TSL1` on SHM 0, colliding with gpsd) instead of
-    `config/chrony-timestd-refclocks.conf`; `timestd-fusion.service` still carries
-    the chrony stop/restart + `ipcrm` (only neutralized by a host drop-in); the
-    three inconsistent SHM schemes (FUSE/HPPS vs TSL1/2/3) should be reconciled to
-    the code's truth (FUSE=1, HPPS=2). Until fixed, a fresh hf-timestd install
-    reintroduces the cascade.
+  - **Repo durability DONE (hf-timestd `10a4df0`):** `timestd-fusion.service`
+    no longer stops/restarts chrony or `ipcrm`s the SHM (own-only recovery);
+    `check-chrony-reach.sh` is report-only (never restarts chrony);
+    `install.sh` installs `config/chrony-timestd-refclocks.conf` (FUSE=SHM1,
+    HPPS=SHM2) to `/etc/chrony/conf.d/` instead of the `TSL1`-on-SHM-0 append,
+    and no longer installs the backwards `chronyd-timestd-shm.conf` ordering
+    drop-in. A fresh hf-timestd install no longer reintroduces the cascade.
 - **Step 3 — the reconciler:** `smd timing` (validate + reconcile) replacing the
   per-component watchdogs as the single owner of chain recovery.
 - **Step 4 — observability:** wire the timing chain into `smd validate`.
