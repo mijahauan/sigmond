@@ -2114,6 +2114,152 @@ def cmd_remove(args) -> int:
 # smd install
 # ---------------------------------------------------------------------------
 
+def _detect_local_radiod() -> bool:
+    """True when this host runs (or is configured to run) radiod locally."""
+    try:
+        from sigmond.topology import load_topology
+        if load_topology().is_enabled('ka9q-radio'):
+            return True
+    except Exception:
+        pass
+    try:
+        from sigmond.coordination import load_coordination
+        from sigmond.paths import COORDINATION_PATH
+        if load_coordination(COORDINATION_PATH).local_radiods():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -> bool:
+    """Block until FFT wisdom exists (radiod won't start cleanly without it).
+
+    Returns True once present, False on timeout.  Re-launches the planner
+    service if it died before producing the file."""
+    import time
+    if wisdom_file.exists():
+        return True
+    _info(f'waiting for FFT wisdom ({wisdom_file}) — this can take ~30 min...')
+    waited = 0
+    while waited < timeout_s:
+        if wisdom_file.exists():
+            return True
+        state = _run(['systemctl', 'is-active', 'sigmond-wisdom.service'],
+                     capture=True).stdout.strip()
+        if state in ('failed', 'inactive'):
+            _run(['systemctl', 'start', '--no-block', 'sigmond-wisdom.service'],
+                 sudo=True)
+        time.sleep(poll_s)
+        waited += poll_s
+        if waited % 60 == 0:
+            _info(f'  ... still planning ({waited // 60} min elapsed)')
+    return wisdom_file.exists()
+
+
+def _bringup_probe(check: str, smd_bin: str):
+    """Run a lightweight checkpoint probe.  Returns (ok, detail)."""
+    if check == 'radiod-configured':
+        d = Path('/etc/radio')
+        confs = list(d.glob('radiod@*.conf')) if d.is_dir() else []
+        return (bool(confs), f"/etc/radio: {len(confs)} radiod conf(s)")
+    if check.startswith('configured:'):
+        name = check.split(':', 1)[1]
+        ok = Path(f'/etc/{name}').is_dir()
+        return (ok, f"/etc/{name} {'present' if ok else 'missing'}")
+    if check == 'validate':
+        r = _run([smd_bin, 'validate'], capture=False)
+        return (getattr(r, 'returncode', 1) == 0, 'see validate output above')
+    return (True, 'no probe')
+
+
+def cmd_bringup(args) -> int:
+    """Guided, contract-ordered station bring-up (install-orchestration Phase B).
+
+    Expands a catalog profile into the staged pipeline — install -> per-client
+    config interview -> background FFT wisdom -> start — and runs it with
+    checkpoints.  Pure plan-building lives in sigmond.bringup; this is the
+    executor.  Remote-radiod hosts skip the radiod stack and the wisdom wait.
+    """
+    from sigmond.catalog import load_profiles
+    from sigmond.bringup import build_plan, WISDOM_FILE
+
+    try:
+        profiles = load_profiles()
+    except Exception as exc:                       # noqa: BLE001
+        _err(f'could not load profiles: {exc}')
+        return 1
+    prof = profiles.get(args.profile)
+    if prof is None:
+        avail = ', '.join(sorted(profiles)) or '(none)'
+        _err(f"unknown profile '{args.profile}' — available: {avail}")
+        return 1
+
+    remote_dns = getattr(args, 'remote_radiod', None)
+    local = (remote_dns is None) and _detect_local_radiod()
+    smd_bin = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else 'smd'
+
+    plan = build_plan(prof, local_radiod=local, remote_status_dns=remote_dns,
+                      smd=smd_bin, with_optional=getattr(args, 'with_optional', False))
+
+    _heading(f'bringup: {prof.name}  ({"LOCAL" if local else "REMOTE"} radiod)')
+    if prof.description:
+        _info(prof.description)
+    cur = None
+    for st in plan.steps:
+        if st.stage != cur:
+            print()
+            _info(st.stage)
+            cur = st.stage
+        mark = {'checkpoint': '  ✓', 'wisdom': '  ⟳', 'wait-wisdom': '  ⏳',
+                'note': '  …', 'start': '  ▶'}.get(st.kind, '  •')
+        extra = ' [HARD]' if st.hard else (' (background)' if st.background else '')
+        print(f"{mark} {st.label}{extra}")
+    print()
+
+    if getattr(args, 'dry_run', False):
+        _info('(dry-run — no changes made)')
+        return 0
+
+    if _need_root('bringup'):
+        return 1
+
+    for st in plan.steps:
+        if st.kind == 'note':
+            _info(st.label)
+            continue
+        if st.kind == 'wait-wisdom':
+            if not _bringup_wait_wisdom(WISDOM_FILE):
+                _warn('FFT wisdom not ready — radiod may not start cleanly yet; '
+                      'continuing (it will start once wisdom finishes).')
+            continue
+        if st.kind == 'checkpoint':
+            ok, detail = _bringup_probe(st.check, smd_bin)
+            if ok:
+                _ok(f'{st.label} — {detail}')
+            elif st.hard:
+                _err(f'{st.label} FAILED — {detail}')
+                _err(f'aborting (hard checkpoint). Fix, then re-run: '
+                     f'{os.path.basename(smd_bin)} bringup --profile {prof.name}')
+                return 1
+            else:
+                _warn(f'{st.label} — {detail} (advisory; continuing)')
+            continue
+        # install / tune / config / wisdom / start
+        if st.kind == 'config':
+            _heading(st.label)
+        else:
+            _info(f'» {st.label}')
+        r = _run(st.argv, capture=False, sudo=False)
+        if getattr(r, 'returncode', 0) != 0 and not st.background:
+            _warn(f'step exited {r.returncode}: {" ".join(st.argv)}')
+
+    print()
+    _ok(f"bringup '{prof.name}' complete")
+    _info('verify anytime with: smd validate')
+    return 0
+
+
 def _install_profile(args) -> int:
     """smd install --profile <name>: enable + install a station bundle.
 
@@ -11672,6 +11818,18 @@ def main() -> int:
     def _add_apply_args(p):
         p.add_argument('--dry-run', action='store_true')
 
+    p_bringup = sub.add_parser(
+        'bringup', help='guided station bring-up from a catalog profile')
+    p_bringup.add_argument('--profile', required=True, metavar='NAME',
+                           help='catalog [profile.<name>] to bring up (e.g. dasi2)')
+    p_bringup.add_argument('--remote-radiod', metavar='STATUS_DNS', dest='remote_radiod',
+                           help='bind a remote radiod by status DNS instead of installing '
+                                'one locally (skips the radiod stack + FFT wisdom)')
+    p_bringup.add_argument('--with-optional', action='store_true', dest='with_optional',
+                           help='also install the profile optional add-ons (e.g. ka9q-web)')
+    p_bringup.add_argument('--dry-run', action='store_true',
+                           help='print the staged plan without running it')
+
     _add_install_args(sub.add_parser(
         'install', help='install and configure components '
                        '(alias for `smd software install`)'))
@@ -12635,6 +12793,7 @@ def main() -> int:
         'disable': cmd_disable,
         'remove':  cmd_remove,
         'install': cmd_install,
+        'bringup': cmd_bringup,
         'apply':   cmd_apply,
         'start':   cmd_start,
         'stop':    cmd_stop,

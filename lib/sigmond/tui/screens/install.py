@@ -109,6 +109,12 @@ class InstallScreen(Vertical):
                 for _pname in _profiles:
                     yield Button(f"Install {_pname} station",
                                  id=f"is-profile-{_pname}", variant="success")
+            yield Static("Guided bring-up (install \u2192 configure \u2192 start):",
+                         classes="is-title")
+            with Horizontal(id="is-bringups"):
+                for _pname in _profiles:
+                    yield Button(f"Bring up {_pname} (guided)",
+                                 id=f"is-bringup-{_pname}", variant="primary")
         yield Static("", id="is-last")
 
     def on_mount(self) -> None:
@@ -207,6 +213,23 @@ class InstallScreen(Vertical):
             cmd=cmd, sudo=True,
             on_complete=self._after_install,
         )
+
+    def _bringup_profile(self, pname: str) -> None:
+        # Bring-up is an interactive, multi-stage sequence (per-client config
+        # interviews + a long FFT-wisdom wait), so it can't run through the
+        # capture-and-modal mutation runner.  Suspend the TUI, hand the
+        # terminal to `smd bringup`, then resume and refresh.
+        smd = _smd_binary()
+        try:
+            with self.app.suspend():
+                subprocess.run(['sudo', smd, 'bringup', '--profile', pname])
+        except Exception as exc:                       # noqa: BLE001
+            self.app.notify(f"bringup failed to launch: {exc}",
+                            severity="error", timeout=8)
+            return
+        self.app.notify(f"bringup '{pname}' finished — review the terminal output",
+                        timeout=6)
+        self._refresh()
 
     def _install_profile(self, pname: str) -> None:
         try:
