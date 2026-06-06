@@ -169,9 +169,11 @@ Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remot
 
 ## 9. Phased implementation roadmap
 
-- **Phase A (small, high value):** `install.sh` substrate; `[profile.dasi2]` +
-  a one-shot "Install DASI2 station" action; nav reorder so Installation leads;
-  start-ordering fixes.
+- **Phase A (DONE, commit `c1d47e1`):** `install.sh` substrate (callhash,
+  hs-uploader); `[profile.<name>]` schema + `[profile.dasi2]` + `load_profiles()`;
+  `smd install --profile`; nav reorder so Installation leads + greenfield-aware
+  landing + profile-driven one-shot install buttons; start-ordering fixes
+  (igmp/gpsdo=0, hf-timestd=50).
 - **Phase B (medium):** the `smd bringup` engine — stage runner, local/remote
   branch, background wisdom, checkpoints — with a thin TUI flow over it.
 - **Phase C (config coverage):** ensure every DASI2 client exposes a clean
