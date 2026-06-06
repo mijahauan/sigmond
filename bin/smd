@@ -7514,6 +7514,8 @@ def _psk_watch_cycle_loop(
     for _lbl, _f8, _f4 in receivers:
         pos[(_lbl, 'ft8')] = _file_size(_f8)
         pos[(_lbl, 'ft4')] = _file_size(_f4)
+        pos[(_lbl, 'timing')] = _file_size(
+            _f8.with_name(_f8.name.replace('-ft8.log', '-timing.log')))
 
     import re as _re
     # Each spot line: "YYYY/MM/DD HH:MM:SS  SCORE  +DT  FREQ  ~  MSG"
@@ -7655,6 +7657,18 @@ def _psk_watch_cycle_loop(
                     ft8_log, pos[(label, 'ft8')])
                 pos[(label, 'ft4')], ft4_lines = _read_since(
                     ft4_log, pos[(label, 'ft4')])
+                # Timing-fault alarms: psk-recorder writes #TIMINGFAULT lines
+                # to <rid>-timing.log when it detects an anchor divergence (and
+                # re-anchors).  Surface them LOUD inline so the operator sees
+                # the fault and goes to investigate — recovery is never silent.
+                _timing_log = ft8_log.with_name(
+                    ft8_log.name.replace('-ft8.log', '-timing.log'))
+                pos[(label, 'timing')], _fault_lines = _read_since(
+                    _timing_log, pos.get((label, 'timing'), 0))
+                for _fl in _fault_lines:
+                    if _fl.startswith('#TIMINGFAULT'):
+                        print('  ⚠⚠ TIMING FAULT  '
+                              + _fl[len('#TIMINGFAULT'):].strip(), flush=True)
 
                 # Sort each mode by (time, freq).  Within one 15 s FT8
                 # window all FT8 timestamps are equal, so the sort is
