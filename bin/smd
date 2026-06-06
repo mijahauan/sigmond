@@ -7529,6 +7529,21 @@ def _psk_watch_cycle_loop(
     # (matching WSPR and WSJT-X). Display-only; spot data/uploads untouched.
     # FT4 carries its own offset and is left raw. Tunable via env.
     _ft8_dt_cal = float(os.environ.get('PSK_WATCH_FT8_DT_CAL_SEC', '0.65'))
+    # FT4 has its own decode_ft8 offset (~0.6, see psk-recorder ch_tailer).
+    _ft4_dt_cal = float(os.environ.get('PSK_WATCH_FT4_DT_CAL_SEC', '0.6'))
+
+    def _cal_spot_line(spot_line, cal):
+        """Subtract the decode_ft8 dt offset from a raw decoder spot line for
+        verbose display (reformats only the dt field; leaves the rest)."""
+        head, sep, msg = spot_line.partition('~')
+        parts = head.split()
+        if sep and len(parts) >= 4:
+            try:
+                parts[3] = f'{float(parts[3]) - cal:+.2f}'
+                return ' '.join(parts) + ' ~' + msg
+            except ValueError:
+                pass
+        return spot_line
 
     try:
         while True:
@@ -7592,6 +7607,8 @@ def _psk_watch_cycle_loop(
                 if _d8 is not None:
                     _d8 -= _ft8_dt_cal   # decode_ft8 → WSJT-X dt convention
                 _d4 = _avg_dt(ft4_lines)
+                if _d4 is not None:
+                    _d4 -= _ft4_dt_cal
                 ft8_dt_part = f' dt={_d8:+.2f}' if _d8 is not None else ' dt= ----'
                 ft4_dt_part = f' dt={_d4:+.2f}' if _d4 is not None else ''
 
@@ -7601,7 +7618,7 @@ def _psk_watch_cycle_loop(
                     print(f'─── slot UTC {wall}  rx={label} ──────────────────',
                           flush=True)
                     for line in ft8_show:
-                        print(f'  ft8: {line}', flush=True)
+                        print(f'  ft8: {_cal_spot_line(line, _ft8_dt_cal)}', flush=True)
                     if cap is not None and len(ft8_lines) > len(ft8_show):
                         print(f'  ft8: … ({len(ft8_lines) - len(ft8_show)} more)',
                               flush=True)
@@ -7617,7 +7634,7 @@ def _psk_watch_cycle_loop(
                         this_ts = m.group(1) if m else ''
                         if prev_ts and this_ts and this_ts != prev_ts:
                             print(flush=True)
-                        print(f'  ft4: {line}', flush=True)
+                        print(f'  ft4: {_cal_spot_line(line, _ft4_dt_cal)}', flush=True)
                         prev_ts = this_ts
                     if cap is not None and len(ft4_lines) > len(ft4_show):
                         print(f'  ft4: … ({len(ft4_lines) - len(ft4_show)} more)',
