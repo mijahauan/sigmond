@@ -7461,6 +7461,22 @@ def _psk_watch_cycle_loop(
                          key=lambda b: _BAND_ORDER.get(b, 99))
         return ' '.join(f'{b}:{counts[b]}' for b in ordered)
 
+    def _avg_dt(lines: list):
+        """Mean decoder dt (seconds) over a cycle's spot lines, or None.
+        Averaged over many spots the transmitters' own timing errors cancel,
+        so this approximates the recorder's slot-anchor offset from true UTC
+        plus any uncompensated chain delay (the 'why is dt ~0.8s' lens).
+        dt is the 4th whitespace field: 'YYYY/MM/DD HH:MM:SS SNR dt freq ~ msg'."""
+        dts = []
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    dts.append(float(parts[3]))
+                except ValueError:
+                    pass
+        return (sum(dts) / len(dts)) if dts else None
+
     # FT8 carries many bands, so render it with fixed-width per-band
     # columns: every band seen this session holds the same column in
     # canonical order, blank in cycles where it had no spots, so the FT8
@@ -7549,6 +7565,12 @@ def _psk_watch_cycle_loop(
                 ft4_bands = _bands_summary(ft4_lines)
                 ft8_bands_part = f' ({ft8_bands})' if ft8_bands else ''
                 ft4_bands_part = f' ({ft4_bands})' if ft4_bands else ''
+                # Average decoder dt for the cycle's spots (fixed-width so the
+                # column lines up; '----' when no spots to average).
+                _d8 = _avg_dt(ft8_lines)
+                _d4 = _avg_dt(ft4_lines)
+                ft8_dt_part = f' dt={_d8:+.2f}' if _d8 is not None else ' dt= ----'
+                ft4_dt_part = f' dt={_d4:+.2f}' if _d4 is not None else ''
 
                 if show_spots:
                     # Detail path (cap=N or no-cap with -v): per-spot dump
@@ -7580,15 +7602,15 @@ def _psk_watch_cycle_loop(
                     if not ft8_lines and not ft4_lines:
                         print('  (no decodes this cycle)', flush=True)
                     else:
-                        print(f'  → ft8 total={len(ft8_lines)}{ft8_bands_part}   '
-                              f'ft4 total={len(ft4_lines)}{ft4_bands_part}',
+                        print(f'  → ft8 total={len(ft8_lines)}{ft8_dt_part}{ft8_bands_part}   '
+                              f'ft4 total={len(ft4_lines)}{ft4_dt_part}{ft4_bands_part}',
                               flush=True)
                 else:
                     # Summary path (no args, cap=0): one line per rx/cycle.
                     print(
                         f'[{now_str}] slot UTC {wall}  rx={label:<22} '
-                        f'ft8={len(ft8_lines):>3}{ft8_bands_part}  '
-                        f'ft4={len(ft4_lines):>3}{ft4_bands_part}',
+                        f'ft8={len(ft8_lines):>3}{ft8_dt_part}{ft8_bands_part}  '
+                        f'ft4={len(ft4_lines):>3}{ft4_dt_part}{ft4_bands_part}',
                         flush=True,
                     )
     except KeyboardInterrupt:
