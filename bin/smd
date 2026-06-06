@@ -7461,6 +7461,50 @@ def _psk_watch_cycle_loop(
                          key=lambda b: _BAND_ORDER.get(b, 99))
         return ' '.join(f'{b}:{counts[b]}' for b in ordered)
 
+    # FT8 carries many bands, so render it with fixed-width per-band
+    # columns: every band seen this session holds the same column in
+    # canonical order, blank in cycles where it had no spots, so the FT8
+    # breakdown lines up vertically across cycles and receivers.  FT4
+    # (usually one band) keeps the compact _bands_summary above.
+    _BAND_CELL_W_FT8 = 9
+    _known_ft8_bands: list = []
+
+    def _note_ft8_bands(bands) -> None:
+        added = False
+        for b in bands:
+            if b and b != '??' and b not in _known_ft8_bands:
+                _known_ft8_bands.append(b)
+                added = True
+        if added:
+            _known_ft8_bands.sort(key=lambda b: _BAND_ORDER.get(b, 99))
+
+    def _bands_summary_ft8(lines: list) -> str:
+        counts: dict = {}
+        for line in lines:
+            b = _band(line)
+            counts[b] = counts.get(b, 0) + 1
+        if not counts:
+            return ''
+        _note_ft8_bands(counts.keys())
+        return ''.join(
+            (f'{b}:{counts[b]}'.ljust(_BAND_CELL_W_FT8) if b in counts
+             else ' ' * _BAND_CELL_W_FT8)
+            for b in _known_ft8_bands
+        )
+
+    # Pre-seed FT8 columns from each receiver's recent log tail so the
+    # fixed-width breakdown is aligned from the very first rendered cycle.
+    for _lbl, _f8, _f4 in receivers:
+        try:
+            _sz = _file_size(_f8)
+            _, _tail = _read_since(_f8, max(0, _sz - 65536))
+            _note_ft8_bands(_band(_l) for _l in _tail)
+        except Exception:
+            pass
+
+    # Separate each 15 s slot's block of receiver lines with a blank line.
+    _prev_wall = [None]
+
     try:
         while True:
             # Next fire: next 15 s UTC boundary + SETTLE.
@@ -7472,6 +7516,12 @@ def _psk_watch_cycle_loop(
             wall = time.strftime('%H:%M:%S', time.gmtime(next_boundary))
             now_str = time.strftime('%H:%M:%S')
             cap = max_lines_per_mode
+            # Blank line between consecutive slot blocks (one fire per
+            # 15 s FT8 cadence) so each slot's receiver lines read as a
+            # distinct block.
+            if _prev_wall[0] is not None and _prev_wall[0] != wall:
+                print(flush=True)
+            _prev_wall[0] = wall
 
             # One block (detail) or line (summary) per receiver, so a
             # multi-rx host shows EVERY FT upload — not just the
@@ -7495,7 +7545,7 @@ def _psk_watch_cycle_loop(
 
                 # Per-band counts come from the FULL list — the cap only
                 # affects what we PRINT, not what we COUNT.
-                ft8_bands = _bands_summary(ft8_lines)
+                ft8_bands = _bands_summary_ft8(ft8_lines)
                 ft4_bands = _bands_summary(ft4_lines)
                 ft8_bands_part = f' ({ft8_bands})' if ft8_bands else ''
                 ft4_bands_part = f' ({ft4_bands})' if ft4_bands else ''
@@ -8453,11 +8503,33 @@ def cmd_wspr_watch(args) -> int:
             counts[band] = counts.get(band, 0) + 1
         return counts
 
+    # Fixed-width per-band columns so the breakdown lines up vertically
+    # across cycles AND across receivers: every band seen this session
+    # holds the same column in canonical order, rendered blank in cycles
+    # where it had no spots.  Width holds "2200m:999" with a gap.
+    _BAND_CELL_W = 10
+    _known_bands: list = []  # canonical-ordered union of bands seen
+
+    def _note_bands(counts: dict) -> None:
+        added = False
+        for b in counts:
+            if b not in _known_bands:
+                _known_bands.append(b)
+                added = True
+        if added:
+            _known_bands.sort(key=_band_sort_key)
+
     def _format_band_counts(counts: dict) -> str:
         if not counts:
             return ''
-        ordered = sorted(counts, key=_band_sort_key)
-        return ' '.join(f'{b}m:{counts[b]}' for b in ordered)
+        _note_bands(counts)
+        # Emit EVERY known band so the closing ']' and each band column
+        # land at the same offset on every line; absent bands are spaces.
+        return ''.join(
+            (f'{b}m:{counts[b]}'.ljust(_BAND_CELL_W) if b in counts
+             else ' ' * _BAND_CELL_W)
+            for b in _known_bands
+        )
 
     def _format_spot(row) -> str:
         band, call, grid, snr_db, dt, drift, freq_hz, pwr = row
@@ -8571,6 +8643,25 @@ def cmd_wspr_watch(args) -> int:
         # extras list) prints inline under the cycle line and isn't
         # buffered here.
         pending.clear()
+
+    # Pre-seed the per-band columns from recent history so the fixed-width
+    # breakdown is aligned from the very first rendered line (without this
+    # the column set grows over the first cycle as new bands first appear,
+    # so the earliest lines render with fewer columns than later ones).
+    try:
+        _seed = subprocess.run(
+            [*sudo_prefix, 'journalctl', '--no-pager', '-o', 'cat',
+             '-u', unit_pattern, '--since', f'{max(backlog_min, 15)} min ago'],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        _seed_counts = {
+            tok.split(':')[0]: 1
+            for m in _re.finditer(r'bands=\[([^\]]*)\]', _seed.stdout or '')
+            for tok in m.group(1).split() if tok.split(':')[0]
+        }
+        _note_bands(_seed_counts)
+    except Exception:
+        pass
 
     try:
         while True:
