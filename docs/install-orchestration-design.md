@@ -2,7 +2,7 @@
 
 **Status:** Design (proposed). Captures the agreed model for turning a bare host
 into a running DASI2 station with `./install.sh` as the only CLI and the sigmond
-TUI driving everything after. Not yet implemented.
+TUI driving everything after. Phases A–C implemented (2026-06-06); see roadmap.
 
 Companion to the [greenfield runbook](greenfield-runbook.md) (the manual
 procedure this automates) and the [client contract](CLIENT-CONTRACT.md)
@@ -179,9 +179,12 @@ Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remot
   executor (local/remote branch, background wisdom + wisdom-gated start,
   checkpoint probes); TUI greenfield landing offers per-profile guided bring-up
   buttons (suspend → `smd bringup`); `tests/test_bringup.py` (6 tests).
-- **Phase C (config coverage):** ensure every DASI2 client exposes a clean
-  `--non-interactive` config path the engine can drive end-to-end; TUI surfaces
-  the commons defaults so no field is typed twice.
+- **Phase C (DONE, sigmond `33d53ba` + hf-timestd `6619100`):** `smd config
+  init/edit` forwards `--non-interactive` to the client entry point; `smd bringup
+  --non-interactive` threads it through every config step; checkpoint probes use
+  the client's `inventory --json` self-describe; hf-timestd's setup-station.sh
+  gained `--non-interactive`.  §14 commons env bag was already wired.  All four
+  DASI2 clients now drive non-interactively.
 
 ## 10. Open questions / future
 
