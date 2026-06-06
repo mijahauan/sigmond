@@ -35,6 +35,12 @@ procedure this automates) and the [client contract](CLIENT-CONTRACT.md)
 4. **Checkpoints punctuate the path** so failures surface early, not at the end.
 5. **Overlap the slow step.** FFT wisdom runs in the background while later
    configs proceed; only the *start* of local-radiod-bound services waits on it.
+6. **Environment-aware.** Read the host's actual hardware + topology and act
+   accordingly — install/configure/start only what the host can run, skip or
+   flag the rest. A client without its hardware (mag-recorder with no RM3100
+   magnetometer, gpsdo-monitor with no GPSDO) must not be scaffolded into a
+   unit that can only fail. The manual walk does this by asking the operator;
+   the engine must do it automatically (Phase D).
 
 ## 3. Dependency model (authoritative — from catalog + contract)
 
@@ -185,6 +191,15 @@ Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remot
   the client's `inventory --json` self-describe; hf-timestd's setup-station.sh
   gained `--non-interactive`.  §14 commons env bag was already wired.  All four
   DASI2 clients now drive non-interactively.
+- **Phase D (planned): environment-aware preflight.** Extend the contract §3
+  self-describe so a client reports hardware readiness (`inventory --json`
+  `hardware_present`, or a `probe` verb — the client detects its own
+  hardware). `smd bringup` runs a preflight and **skips or flags** any
+  client whose hardware is absent (mag-recorder→RM3100, gpsdo-monitor→GPSDO,
+  radiod→RX888); profiles mark which components are hardware-gated; surface
+  in `smd validate` + the TUI. Until built, the operator decides (read the
+  environment and act — the sigma host has no magnetometer, so mag-recorder
+  was correctly NOT brought up).
 
 ## 10. Validation status
 
