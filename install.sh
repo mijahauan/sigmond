@@ -237,6 +237,26 @@ if [[ ! -f "$KA9Q_CANONICAL/pyproject.toml" ]]; then
     unset _ka9q_src _candidate
 fi
 
+# ─── ensure sibling Python libraries are at their canonical locations ───────
+# callhash (wspr-recorder + psk-recorder) and hs-uploader (mag-recorder) are
+# path-based editable siblings declared in those clients' pyproject.toml.
+# Sigmond clones them on demand at client-install time, but front-loading the
+# pure-python substrate here makes the later client installs robust — a
+# missing callhash sibling was a documented greenfield uv-sync failure.
+# Best-effort: a failure is non-fatal since the client install pulls it anyway.
+for _lib in callhash hs-uploader; do
+    _lib_dir="/opt/git/sigmond/$_lib"
+    if [[ ! -f "$_lib_dir/pyproject.toml" && ! -d "$_lib_dir/.git" ]]; then
+        info "Cloning $_lib substrate → $_lib_dir"
+        if $SUDO git clone "https://github.com/mijahauan/$_lib" "$_lib_dir"; then
+            ok "$_lib cloned"
+        else
+            info "$_lib clone skipped (will be pulled at client install time)"
+        fi
+    fi
+done
+unset _lib _lib_dir
+
 # ─── sigmond user + group ────────────────────────────────────────────────────
 # A single non-human user `sigmond` owns /opt/git/sigmond/*.  Humans (Rob,
 # Michael, anyone collaborating) become members of the `sigmond` group and

@@ -2114,7 +2114,82 @@ def cmd_remove(args) -> int:
 # smd install
 # ---------------------------------------------------------------------------
 
+def _install_profile(args) -> int:
+    """smd install --profile <name>: enable + install a station bundle.
+
+    Expands a catalog ``[profile.<name>]`` into its component set and installs
+    it.  Phase A assumes a LOCAL radiod (the DASI2 default), so ka9q-radio and
+    the profile's ``local_radiod_infra`` are included; the remote-radiod branch
+    and per-client config orchestration arrive with ``smd bringup`` (Phase B).
+    """
+    from sigmond.catalog import load_profiles, load_catalog, get_entry
+    from sigmond.topology import set_component_enabled
+
+    name = args.profile
+    try:
+        profiles = load_profiles()
+    except Exception as exc:                       # noqa: BLE001 — surface, don't crash
+        _err(f'could not load profiles: {exc}')
+        return 1
+    prof = profiles.get(name)
+    if prof is None:
+        avail = ', '.join(sorted(profiles)) or '(none)'
+        _err(f"unknown profile '{name}' — available: {avail}")
+        return 1
+
+    # Foundation + local-radiod infra + the data clients (local-radiod
+    # assumption; remote handling is Phase B).  De-dup, preserve order.
+    raw = ['ka9q-radio', *prof.local_radiod_infra, *prof.clients]
+    seen, ordered = set(), []
+    for c in raw:
+        if c not in seen:
+            seen.add(c)
+            ordered.append(c)
+
+    _heading(f'install profile: {name}')
+    if prof.description:
+        _info(prof.description)
+    _info('  foundation : ka9q-radio (local)')
+    _info(f"  infra      : {', '.join(prof.local_radiod_infra) or '(none)'}")
+    _info(f"  clients    : {', '.join(prof.clients)}")
+    if prof.optional:
+        _info(f"  optional   : {', '.join(prof.optional)}  "
+              f"(install separately: smd install <name>)")
+    print()
+
+    dry_run = getattr(args, 'dry_run', False)
+    if not dry_run:
+        if _need_root('install --profile'):
+            return 1
+        try:
+            catalog = load_catalog()
+        except FileNotFoundError as exc:
+            _err(str(exc))
+            return 1
+        for comp in ordered:
+            entry = get_entry(comp, catalog)
+            if entry is None:
+                _warn(f'{comp}: not in catalog — skipping enable')
+                continue
+            if set_component_enabled(entry.name, True, TOPOLOGY_PATH,
+                                     description=entry.description):
+                _ok(f'{entry.name}: enabled in topology')
+        print()
+
+    # Hand off to the full-suite installer with the expanded component list.
+    args.components = ','.join(ordered)
+    rc = _install_full_suite(args)
+    if rc == 0 and not dry_run:
+        print()
+        _ok(f"profile '{name}' installed")
+        _info('next: configure each client with  smd config init <client>  '
+              '(guided orchestration: smd bringup, Phase B)')
+    return rc
+
+
 def cmd_install(args) -> int:
+    if getattr(args, 'profile', None):
+        return _install_profile(args)
     client = getattr(args, 'client', None)
     if client:
         return _install_single_client(args)
@@ -11582,6 +11657,8 @@ def main() -> int:
                        help='specific client to install from catalog (e.g. psk-recorder)')
         p.add_argument('--components', metavar='C1,C2',
                        help='comma-separated subset (default: all enabled in topology)')
+        p.add_argument('--profile', metavar='NAME',
+                       help='install a station bundle from catalog [profile.<name>] (e.g. --profile dasi2)')
         p.add_argument('--client-dir', metavar='DIR',
                        help='path to wsprdaemon-client (overrides topology)')
         p.add_argument('--dry-run', action='store_true',

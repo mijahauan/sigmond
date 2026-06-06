@@ -178,7 +178,17 @@ class SigmondApp(App):
             f"    {_sigmond_version_string()}"
         )
         self._load_system_view()
-        self.action_show_overview()
+        # Greenfield-aware landing: a host with nothing enabled yet is
+        # mid-install — lead with the Install screen rather than an empty
+        # Overview.  Once any component is enabled, land on Overview.
+        try:
+            greenfield = not self.topology.enabled_components()
+        except Exception:
+            greenfield = False
+        if greenfield:
+            self.action_show_install()
+        else:
+            self.action_show_overview()
         self.run_worker(_check_sigmond_version, thread=True,
                         name="sigmond-version-check")
 

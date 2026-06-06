@@ -57,6 +57,7 @@ requires        = ["ka9q-python", "ka9q-radio"]
 contract        = "0.8"
 install_script  = "/opt/git/sigmond/hf-timestd/scripts/install.sh"
 topology_alias  = "grape"
+start_priority  = 50                                  # timing authority: start before wspr/psk consumers
 
 [client.mag-recorder]
 kind            = "client"
@@ -150,6 +151,7 @@ repo            = "https://github.com/mijahauan/gpsdo-monitor"
 uses            = []
 requires        = []
 install_script  = "/opt/git/sigmond/gpsdo-monitor/install.sh"
+start_priority  = 0                                   # local-radiod timing infra: up with radiod
 # Richer metadata is auto-discovered from the repo's own deploy.toml once cloned.
 
 [client.igmp-querier]
@@ -159,6 +161,7 @@ repo            = "https://github.com/mijahauan/igmp-querier"
 uses            = []
 requires        = []
 install_script  = "/opt/git/sigmond/igmp-querier/install.sh"
+start_priority  = 0                                   # multicast querier: up before clients subscribe
 
 [client.ka9q-update]
 kind            = "infra"
@@ -188,3 +191,20 @@ replaced_by = ["wspr-recorder"]
 # Legacy config lived at /etc/wsprdaemon/ (not /etc/wsprdaemon-client/);
 # add it explicitly so the purge gets everything.
 extra_paths = ["/etc/wsprdaemon"]
+
+# ---------------------------------------------------------------------------
+# Profiles — named station bundles (grant / site presets).
+#
+# A profile names the clients + local-radiod infra that make up a station
+# role, so `smd install --profile <name>` (and the TUI one-shot install)
+# can bring the whole set up together.  Pure-python libraries (ka9q-python,
+# callhash, hs-uploader) are implicit — they are auto-pulled as siblings by
+# the clients that need them.  `local_radiod_infra` installs only when this
+# host runs radiod locally.  Other grants add their own [profile.<name>].
+# ---------------------------------------------------------------------------
+
+[profile.dasi2]
+description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetometer)"
+clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder"]
+local_radiod_infra = ["igmp-querier", "gpsdo-monitor"]
+optional           = ["ka9q-web"]

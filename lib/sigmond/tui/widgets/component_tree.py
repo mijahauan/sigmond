@@ -41,19 +41,7 @@ class ComponentTree(Tree):
 
         self.root.add_leaf("\u25a3 Overview", data={"screen": "overview"})
 
-        monitoring = self.root.add("Monitoring", expand=True)
-        monitoring.add_leaf("\u2316 Environment",        data={"screen": "environment"})
-        monitoring.add_leaf("\u29b5 Timing & Authority", data={"screen": "timing_authority"})
-        monitoring.add_leaf("\u2299 Annotation Quality", data={"screen": "annotation_quality"})
-        monitoring.add_leaf("\u26a1 Activity",          data={"screen": "activity"})
-        monitoring.add_leaf("\u25d0 GPSDO live",        data={"screen": "gpsdo"})
-        monitoring.add_leaf("\u25c9 ka9q-radio live",   data={"screen": "radiod"})
-        monitoring.add_leaf("\u25b6 KiwiSDR live",      data={"screen": "kiwisdr"})
-        monitoring.add_leaf("\u2316 Receiver channels", data={"screen": "receiver_channels"})
-        monitoring.add_leaf("\u21c6 RAC tunnel",        data={"screen": "rac"})
-        monitoring.add_leaf("\u2b22 Resources",         data={"screen": "resources"})
-
-        # Installation: everything that happens before a component can
+        # Installation leads — everything that happens before a component can
         # run on this host \u2014 pin a version, build/install, configure
         # per-instance, tune host policy (CPU / FFT wisdom).  Workflow
         # ordering is install \u2192 configure \u2192 enable; the screens here
@@ -67,6 +55,19 @@ class ComponentTree(Tree):
         installation.add_leaf("\u2699 CPU affinity",      data={"screen": "cpu_affinity"})
         installation.add_leaf("\u21f5 CPU frequency",     data={"screen": "cpu_freq"})
         installation.add_leaf("\u2a09 FFT Wisdom",        data={"screen": "fft_wisdom"})
+
+        monitoring = self.root.add("Monitoring", expand=True)
+        monitoring.add_leaf("\u2316 Environment",        data={"screen": "environment"})
+        monitoring.add_leaf("\u29b5 Timing & Authority", data={"screen": "timing_authority"})
+        monitoring.add_leaf("\u2299 Annotation Quality", data={"screen": "annotation_quality"})
+        monitoring.add_leaf("\u26a1 Activity",          data={"screen": "activity"})
+        monitoring.add_leaf("\u25d0 GPSDO live",        data={"screen": "gpsdo"})
+        monitoring.add_leaf("\u25c9 ka9q-radio live",   data={"screen": "radiod"})
+        monitoring.add_leaf("\u25b6 KiwiSDR live",      data={"screen": "kiwisdr"})
+        monitoring.add_leaf("\u2316 Receiver channels", data={"screen": "receiver_channels"})
+        monitoring.add_leaf("\u21c6 RAC tunnel",        data={"screen": "rac"})
+        monitoring.add_leaf("\u2b22 Resources",         data={"screen": "resources"})
+
 
         # Maintenance: ongoing operational changes once components are
         # running \u2014 lifecycle verbs, apply config edits, per-instance

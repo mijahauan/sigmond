@@ -251,6 +251,51 @@ def load_deprecated() -> dict[str, DeprecatedEntry]:
     }
 
 
+@dataclass(frozen=True)
+class Profile:
+    """A named station bundle from a ``[profile.<name>]`` catalog block.
+
+    Groups the clients + local-radiod infra that make up a station role so
+    ``smd install --profile`` (and the TUI one-shot install) can install the
+    set together.  Pure-python libraries are implicit — auto-pulled as client
+    siblings.  ``local_radiod_infra`` applies only when radiod is local.
+    """
+    name: str
+    description: str = ''
+    clients: tuple = ()
+    local_radiod_infra: tuple = ()
+    optional: tuple = ()
+
+
+def _load_profile_blocks(path: Path) -> dict[str, dict]:
+    """Read a catalog file's ``[profile.<name>]`` blocks as raw dicts."""
+    with open(path, 'rb') as f:
+        data = tomllib.load(f)
+    return dict((data.get('profile') or {}).items())
+
+
+def load_profiles() -> dict[str, Profile]:
+    """Sparse-overlay every layer's ``[profile.*]`` blocks (same shape as
+    ``load_deprecated``) and return them.  Operators add or extend profiles
+    in ``/etc/sigmond/catalog.toml`` the same way they override client
+    fields."""
+    merged: dict[str, dict] = {}
+    for layer_path in _layer_paths_in_application_order():
+        for name, block in _load_profile_blocks(layer_path).items():
+            existing = merged.get(name) or {}
+            merged[name] = {**existing, **block}
+    return {
+        name: Profile(
+            name=name,
+            description=block.get('description', ''),
+            clients=tuple(block.get('clients', ())),
+            local_radiod_infra=tuple(block.get('local_radiod_infra', ())),
+            optional=tuple(block.get('optional', ())),
+        )
+        for name, block in merged.items()
+    }
+
+
 def _load_catalog_file(path: Path) -> dict[str, CatalogEntry]:
     """Single-file load (used by the explicit-path branch of
     ``load_catalog`` and by tests).  No layering."""

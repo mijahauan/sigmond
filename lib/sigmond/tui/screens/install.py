@@ -98,6 +98,17 @@ class InstallScreen(Vertical):
             yield Button("Install selected", id="is-one", variant="primary")
             yield Button("Install all missing", id="is-all", variant="warning")
             yield Button("Refresh", id="is-refresh", variant="default")
+        try:
+            from ...catalog import load_profiles as _lp
+            _profiles = sorted(_lp())
+        except Exception:
+            _profiles = []
+        if _profiles:
+            yield Static("Station bundles (one-shot install):", classes="is-title")
+            with Horizontal(id="is-profiles"):
+                for _pname in _profiles:
+                    yield Button(f"Install {_pname} station",
+                                 id=f"is-profile-{_pname}", variant="success")
         yield Static("", id="is-last")
 
     def on_mount(self) -> None:
@@ -194,6 +205,32 @@ class InstallScreen(Vertical):
                   f"Each client's own install.sh handles the details. "
                   f"Existing installs are left alone."),
             cmd=cmd, sudo=True,
+            on_complete=self._after_install,
+        )
+
+    def _install_profile(self, pname: str) -> None:
+        try:
+            from ...catalog import load_profiles
+            prof = load_profiles().get(pname)
+        except Exception as exc:                       # noqa: BLE001
+            self.query_one("#is-last", Static).update(f"[red]{exc}[/]")
+            return
+        if prof is None:
+            self.query_one("#is-last", Static).update(
+                f"[red]unknown profile {pname}[/]")
+            return
+        cmd = [_smd_binary(), 'install', '--profile', pname, '--yes']
+        body = (
+            f"Install the [bold]{pname}[/] station bundle (assumes local radiod):\n\n"
+            f"  foundation: ka9q-radio\n"
+            f"  infra:      {', '.join(prof.local_radiod_infra) or '(none)'}\n"
+            f"  clients:    {', '.join(prof.clients)}\n\n"
+            f"Enables each in topology and runs its install. "
+            f"Optional add-ons ({', '.join(prof.optional) or 'none'}) install separately.")
+        confirm_and_run(
+            self.app,
+            title=f"Install {pname} station?",
+            body=body, cmd=cmd, sudo=True,
             on_complete=self._after_install,
         )
 
