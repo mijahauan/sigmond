@@ -56,7 +56,8 @@ class Plan:
 
 def build_plan(profile, *, local_radiod: bool,
                remote_status_dns: Optional[str] = None,
-               smd: str = 'smd', with_optional: bool = False) -> Plan:
+               smd: str = 'smd', with_optional: bool = False,
+               non_interactive: bool = False) -> Plan:
     """Pure: a profile + radiod locality -> the ordered Step list.
 
     ``local_radiod`` gates the entire radiod stack (infra, ka9q-radio, tuning,
@@ -71,8 +72,12 @@ def build_plan(profile, *, local_radiod: bool,
                           argv=[smd, 'install', '--components', comp, '--yes']))
 
     def configure(stage: str, client: str) -> None:
-        steps.append(Step(stage, f'configure {client}', 'config',
-                          argv=[smd, 'config', 'init', client]))
+        argv = [smd, 'config', 'init', client]
+        label = f'configure {client}'
+        if non_interactive:
+            argv.append('--non-interactive')
+            label += ' (non-interactive)'
+        steps.append(Step(stage, label, 'config', argv=argv))
 
     def checkpoint(stage: str, label: str, check: str, hard: bool = False) -> None:
         steps.append(Step(stage, f'checkpoint: {label}', 'checkpoint',

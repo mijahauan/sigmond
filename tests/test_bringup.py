@@ -63,3 +63,12 @@ def test_start_is_last_action_and_final_checkpoint_is_validate():
     p = build_plan(_dasi2(), local_radiod=True)
     assert p.steps[-1].kind == 'checkpoint' and p.steps[-1].check == 'validate'
     assert any(s.kind == 'start' for s in p.steps)
+
+
+def test_non_interactive_appends_flag_to_config_steps():
+    p = build_plan(_dasi2(), local_radiod=True, non_interactive=True)
+    cfg = [s for s in p.steps if s.kind == 'config']
+    assert cfg and all('--non-interactive' in s.argv for s in cfg)
+    p2 = build_plan(_dasi2(), local_radiod=True, non_interactive=False)
+    assert all('--non-interactive' not in s.argv
+               for s in p2.steps if s.kind == 'config')

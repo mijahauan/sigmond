@@ -2165,8 +2165,24 @@ def _bringup_probe(check: str, smd_bin: str):
         return (bool(confs), f"/etc/radio: {len(confs)} radiod conf(s)")
     if check.startswith('configured:'):
         name = check.split(':', 1)[1]
+        # Prefer the client's own self-describe (CONTRACT §3): ask
+        # `<client> inventory --json` where its config lives and confirm the
+        # file exists.  Fall back to /etc/<client> presence when the client
+        # has no inventory CLI on PATH.
+        import shutil as _sh, json as _json
+        exe = _sh.which(name)
+        if exe:
+            try:
+                r = _run([exe, 'inventory', '--json'], capture=True)
+                data = _json.loads(r.stdout) if getattr(r, 'returncode', 1) == 0 else {}
+                cfgp = (data or {}).get('config_path')
+            except Exception:
+                cfgp = None
+            if cfgp:
+                present = Path(cfgp).exists()
+                return (present, f"{name}: {cfgp} {'present' if present else 'MISSING'}")
         ok = Path(f'/etc/{name}').is_dir()
-        return (ok, f"/etc/{name} {'present' if ok else 'missing'}")
+        return (ok, f"/etc/{name} {'present' if ok else 'missing'} (no inventory CLI)")
     if check == 'validate':
         r = _run([smd_bin, 'validate'], capture=False)
         return (getattr(r, 'returncode', 1) == 0, 'see validate output above')
@@ -2200,7 +2216,8 @@ def cmd_bringup(args) -> int:
     smd_bin = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else 'smd'
 
     plan = build_plan(prof, local_radiod=local, remote_status_dns=remote_dns,
-                      smd=smd_bin, with_optional=getattr(args, 'with_optional', False))
+                      smd=smd_bin, with_optional=getattr(args, 'with_optional', False),
+                      non_interactive=getattr(args, 'non_interactive', False))
 
     _heading(f'bringup: {prof.name}  ({"LOCAL" if local else "REMOTE"} radiod)')
     if prof.description:
@@ -11827,6 +11844,8 @@ def main() -> int:
                                 'one locally (skips the radiod stack + FFT wisdom)')
     p_bringup.add_argument('--with-optional', action='store_true', dest='with_optional',
                            help='also install the profile optional add-ons (e.g. ka9q-web)')
+    p_bringup.add_argument('--non-interactive', action='store_true', dest='non_interactive',
+                           help='drive each client config interview non-interactively, applying the §14 commons defaults (unattended bring-up)')
     p_bringup.add_argument('--dry-run', action='store_true',
                            help='print the staged plan without running it')
 
