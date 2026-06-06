@@ -2870,6 +2870,21 @@ def cmd_apply(args) -> int:
             if radiod_units:
                 if _ensure_radiod_affinity_drop_ins(radiod_units, topology.get('cpu_affinity')):
                     something_changed = True
+                # Persist the cpufreq governor on radiod cores via the
+                # smd-cpu-governor.service boot oneshot.  intel_pstate
+                # boots as 'powersave'; radiod needs 'performance' pinned
+                # or its FFT cores throttle after every reboot.  The
+                # affinity writer above only sets CPUAffinity — without
+                # this the governor reverted until someone ran `smd diag
+                # cpu-affinity --apply` by hand.  Idempotent; same writer.
+                try:
+                    _radiod_cpus = _get_radiod_cpus()
+                    if _radiod_cpus:
+                        _gov = (topology.get('cpu_affinity', {}) or {}).get(
+                            'radiod_governor', 'performance')
+                        _apply_radiod_governor(_radiod_cpus, _gov)
+                except Exception:
+                    pass  # non-fatal; governor persistence is best-effort
                 # Check wisdom file — generation is now a deliberate user
                 # action via 'smd tui → Operate → FFT Wisdom' (or the CLI
                 # equivalent).  We don't block apply to run it.
