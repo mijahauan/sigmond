@@ -8206,6 +8206,10 @@ def cmd_wspr_watch(args) -> int:
     # it only for the displayed [HH:MM:SS] tag; the cycle's UTC time
     # is the authoritative key for sqlite lookups.
     ts_re = _re.compile(r'^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}),')
+    # Average decoder dt emitted inline by wspr-recorder's cycle commit
+    # (`… ms) dt=+0.84 bands=[…]`).  Parsed with its own regex so cycle_re's
+    # group numbering stays untouched; absent on older recorder builds.
+    dt_re = _re.compile(r'\bdt=([+\-][\d.]+)')
 
     _heading(f'WSPR cycle activity ({unit_pattern})')
     _info('   stage: decoder (wsprd) → SQLite (wspr.spots) → upload (wsprdaemon.org / wsprnet)')
@@ -8953,9 +8957,13 @@ def cmd_wspr_watch(args) -> int:
                 rx_part = f' rx={short:<16}'
             reporter_part = (f' reporter={_display_reporter(resolved_reporter)}'
                              if resolved_reporter else '')
+            # Average decoder dt for the cycle (recorder-supplied, inline).
+            dtm = dt_re.search(line)
+            _avgdt = float(dtm.group(1)) if dtm else None
+            dt_part = f' dt={_avgdt:+.2f}' if _avgdt is not None else ' dt= ----'
             cycle_text = (
                 f'[{hms}] cycle UTC {hh}:{mm}{reporter_part}{rx_part}  '
-                f'{spots_n:>3} spots{noise_part} / {bands_n:>2} bands  '
+                f'{spots_n:>3} spots{noise_part} / {bands_n:>2} bands{dt_part}  '
                 f'(write {write_ms:>3} ms){counts_part}'
             )
             # If a previous cycle is still pending (no shipped event
