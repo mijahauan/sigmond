@@ -8827,6 +8827,14 @@ def cmd_wspr_watch(args) -> int:
                 buf += chunk
                 continue
 
+            # Timing-fault alarms from wspr-recorder's anchor detector
+            # (frozen-bad-anchor divergence or a radiod RTP↔GPS offset step).
+            # Surface them LOUD inline so recovery/attribution is visible.
+            if 'TIMING FAULT' in line and 'mode=wspr' in line:
+                _i = line.find('TIMING FAULT')
+                print('  ⚠⚠ ' + line[_i:].strip(), flush=True)
+                continue
+
             # Match the new transport-side wsprnet POST events FIRST
             # (the START line tells us a POST is in flight; the DONE
             # line tells us how it landed).  Both come from
