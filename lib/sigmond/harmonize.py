@@ -716,6 +716,40 @@ def rule_data_path_upstream(view: SystemView) -> RuleResult:
     )
 
 
+def rule_timing_reference(view: SystemView) -> RuleResult:
+    """Runtime health of the local GPS timing-reference chain
+    (GPSDO -> gpsd -> chrony -> hf-timestd).  Observability only; remediation
+    lives in `smd timing reconcile`.  See docs/timing-chain-architecture.md.
+    Skipped on hosts with no local gpsd (remote-radiod / no GPS)."""
+    if not (shutil.which("gpsd") or Path("/usr/sbin/gpsd").exists()):
+        return RuleResult("timing_reference", "pass",
+                          "skipped (no local gpsd / GPS timing chain)", [])
+    try:
+        from .commands.timing import gather_facts, assess
+        links = assess(gather_facts(quick=True))
+    except Exception as exc:                       # noqa: BLE001
+        return RuleResult("timing_reference", "pass",
+                          f"skipped (timing probe failed: {exc})", [])
+    by = {l.name: l for l in links}
+    fails = [l for l in links if l.status == "fail"]
+    warns = [l for l in links if l.status == "warn"]
+    chrony = by.get("chrony")
+    gps = by.get("gps-feed")
+    summary = (chrony.detail if chrony and chrony.status == "ok"
+               else (gps.detail if gps else "chain present"))
+    if fails:
+        detail = "; ".join(f"{l.name}: {l.detail}" for l in fails)
+        return RuleResult("timing_reference", "fail",
+                          f"{detail}.  Remediate: sudo smd timing reconcile",
+                          [l.name for l in fails])
+    if warns:
+        return RuleResult("timing_reference", "warn",
+                          f"{summary}; warming/incomplete: "
+                          f"{', '.join(l.name for l in warns)}",
+                          [l.name for l in warns])
+    return RuleResult("timing_reference", "pass", summary, [])
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_frequency_coverage,
@@ -733,6 +767,7 @@ ALL_RUNTIME_RULES = [
     rule_cpu_isolation_runtime,
     rule_gpsdo_governor_coverage,
     rule_kernel_rcvbuf_adequate,
+    rule_timing_reference,
 ]
 
 

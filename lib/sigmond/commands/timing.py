@@ -148,14 +148,14 @@ def _gps_fix(run) -> Optional[bool]:
     return (max(modes) >= 2) if modes else None
 
 
-def gather_facts(run: Callable = _run) -> dict:
+def gather_facts(run: Callable = _run, quick: bool = False) -> dict:
     f: dict = {}
     f['shm'] = parse_shm(run(['ipcs', '-m']).stdout)
     f['gpsd_active'] = run(['systemctl', 'is-active', 'gpsd']).stdout.strip() == 'active'
     f['chrony_active'] = run(['systemctl', 'is-active', 'chrony']).stdout.strip() == 'active'
     f['sources'] = parse_sources(run(['chronyc', 'sources']).stdout)
     f['tracking'] = parse_tracking(run(['chronyc', 'tracking']).stdout)
-    f['gps_fix'] = _gps_fix(run)
+    f['gps_fix'] = None if quick else _gps_fix(run)
     try:
         expected = len(list(METROLOGY_ENV_DIR.glob('*.env')))
     except OSError:
