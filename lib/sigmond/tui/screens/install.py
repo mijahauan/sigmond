@@ -161,6 +161,13 @@ class InstallScreen(Vertical):
     InstallScreen #is-actions Button {
         margin-right: 1;
     }
+    InstallScreen #is-profiles, InstallScreen #is-bringups {
+        height: 3;
+        margin-top: 1;
+    }
+    InstallScreen #is-profiles Button, InstallScreen #is-bringups Button {
+        margin-right: 2;
+    }
     InstallScreen #is-last {
         margin-top: 1;
         color: $text-muted;
