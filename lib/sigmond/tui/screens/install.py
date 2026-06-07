@@ -106,9 +106,10 @@ def _gather_catalog() -> _CatalogView:
         from ...catalog import load_catalog
         catalog = load_catalog()
         # Exclude entries with no repo URL — those have no git workflow.
+        _KIND_ORDER = {"server": 0, "infra": 1, "client": 2, "library": 3}
         view.entries = sorted(
             (e for e in catalog.values() if e.repo),
-            key=lambda e: (e.kind, e.name),
+            key=lambda e: (_KIND_ORDER.get(e.kind, 2), e.name),
         )
     except FileNotFoundError as exc:
         view.error = f"catalog not found: {exc}"
@@ -133,7 +134,8 @@ class InstallScreen(Vertical):
         margin-bottom: 1;
     }
     InstallScreen #is-table {
-        height: 14;
+        height: auto;
+        max-height: 30;
     }
     InstallScreen #is-actions {
         height: 3;
