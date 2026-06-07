@@ -352,7 +352,9 @@ def applicable_stages(name: str, deploy=None, kind: str = None) -> list:
     """
     base = ["available", "downloaded", "installed"]
     if kind == "library":
-        return base
+        # Editable source deps: cloning IS installing (no build/config/enable;
+        # consumers pip-install -e from the clone).  Download == install.
+        return ["available", "installed"]
     if deploy is None:
         deploy = _read_deploy_toml(name) or _read_shim_deploy(name)
     has_units = (bool(_systemd_unit_names(deploy)) if deploy

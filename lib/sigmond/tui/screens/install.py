@@ -52,7 +52,10 @@ def _entry_progress(entry) -> dict:
             importable = importlib.util.find_spec(mod) is not None
         except Exception:
             importable = False
-        state = ComponentState(name=name, cloned=cloned, installed=importable,
+        # A cloned source dep is ready (installed) — consumers editable-install
+        # from it; importability in sigmond's own venv is a bonus, not required.
+        state = ComponentState(name=name, cloned=cloned,
+                               installed=cloned or importable,
                                configured=False, enabled=False, active=False)
     else:
         state = compute_state(name, None,

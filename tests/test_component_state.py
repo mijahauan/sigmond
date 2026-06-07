@@ -10,7 +10,7 @@ FULL = ["available", "downloaded", "installed", "configured", "enabled", "runnin
 class TestApplicableStages(unittest.TestCase):
     def test_library_terminal_at_installed(self):
         self.assertEqual(applicable_stages("x", {}, "library"),
-                         ["available", "downloaded", "installed"])
+                         ["available", "installed"])
 
     def test_tool_no_units_no_config_terminal_at_installed(self):
         self.assertEqual(applicable_stages("x", {}, "infra"),
