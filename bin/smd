@@ -11403,6 +11403,158 @@ def _add_hf_gps_tec_watch_args(p) -> None:
                         'or most-recently-modified data dir if no service.')
 
 
+def _add_radiod_watch_args(p) -> None:
+    """Argument spec for `smd watch radiod`."""
+    p.add_argument('--host', action='append', metavar='HOST', default=None,
+                   help='host whose radiod + kernel journal to follow '
+                        '(repeatable); default is this host.  Use ssh aliases '
+                        'for peers, e.g. --host bee1 --host bee2 --host localhost')
+    p.add_argument('-n', '--lines', type=int, default=20, metavar='N',
+                   help='replay the last N matching lines before following '
+                        '(default: 20)')
+    p.add_argument('--all-lines', action='store_true',
+                   help='show every radiod journal line, not just the RX888 '
+                        'clock / sample-loss / USB diagnostics')
+
+
+def cmd_radiod_watch(args) -> int:
+    """Live-tail radiod's RX888 clock / sample-loss diagnostics AND the kernel
+    USB log across one or more hosts.
+
+    Two journals per host:
+      1. radiod@* — rx888.c instrumentation:
+         - "RTP<->GPS offset STEPPED ..."  -> sample LOSS (USB drop / xhci
+           reset): host wallclock advanced but the ADC sample count did not.
+         - "measured sample rate ... ppm"  -> per-minute rate (noisy on the
+           NTP-disciplined sysclock; converges to ~0 ppm long-term because
+           the ADC clock is GPSDO-disciplined).
+         - "ADC clock not locked", "No rx888 data".
+      2. kernel — USB/xhci faults (e.g. "reset SuperSpeed USB device ...
+         xhci_hcd"): the root cause of RX888 sample loss.  Rendered in bold
+         red with a ⚠ USB RESET banner so it can't be missed.
+
+    radiods run on each receiver host, so peers are followed over ssh (the
+    local host needs no ssh)."""
+    import threading
+    import shutil
+    import re as _re
+
+    hosts = args.host or ['localhost']
+    lines = max(0, getattr(args, 'lines', 20) or 0)
+    show_all = getattr(args, 'all_lines', False)
+    is_tty = sys.stdout.isatty()
+
+    def _col(s, code):
+        return f'\033[{code}m{s}\033[0m' if (is_tty and code) else s
+
+    # radiod@* severity colouring
+    SEV = [
+        (_re.compile(r'STEPPED|SAMPLE LOSS', _re.I), '31'),                  # red
+        (_re.compile(r'not locked|No rx888 data|aborted|disappeared|'
+                     r'Transfer .*status', _re.I), '33'),                    # yellow
+        (_re.compile(r'measured sample rate', _re.I), '36'),                 # cyan
+    ]
+    KEEP = _re.compile(r'RX888|rx888|Transfer .*callback|No rx888 data',
+                       _re.I)
+    # kernel USB faults — the smoking gun for sample loss.  Highly visible.
+    USB_FAULT = _re.compile(
+        r'reset (?:SuperSpeed|high-speed|full-speed)? ?USB device|'
+        r'\bxhci|USB disconnect|over[- ]?current|cannot enable port|'
+        r'device descriptor read|not accepting address|'
+        r'device not accepting|ep0?_? ?(?:halt|stall)', _re.I)
+    TAG_COLOURS = ['35', '32', '34', '36', '33', '31']
+
+    def build_cmd(host, kernel):
+        if kernel:
+            flags = ['-fk', '-o', 'short-iso', '--no-hostname']
+            remote = "sudo journalctl -fk -o short-iso --no-hostname"
+        else:
+            flags = ['-f', '-u', 'radiod@*', '-o', 'short-iso', '--no-hostname']
+            remote = "sudo journalctl -f -u 'radiod@*' -o short-iso --no-hostname"
+        if lines:
+            flags += ['-n', str(lines)]
+            remote += f' -n {lines}'
+        if host in ('localhost', '', None):
+            jc = ['journalctl'] + flags
+            if os.geteuid() != 0 and shutil.which('sudo'):
+                return ['sudo'] + jc
+            return jc
+        return ['ssh', host, remote]
+
+    procs = []
+
+    def pump(host, tag, tag_code, kernel):
+        try:
+            p = subprocess.Popen(build_cmd(host, kernel),
+                                 stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True,
+                                 bufsize=1)
+        except Exception as e:  # noqa: BLE001
+            _err(f'{host}: cannot start '
+                 f'{"kernel" if kernel else "radiod"} journal follow: {e}')
+            return
+        procs.append(p)
+        for raw in p.stdout:
+            line = raw.rstrip('\n')
+            if not line:
+                continue
+            if kernel:
+                if not USB_FAULT.search(line):
+                    continue
+                # Make USB faults unmissable: bold-red banner line.
+                banner = _col('⚠⚠ USB FAULT (RX888 sample loss likely) ⚠⚠',
+                              '1;37;41')
+                print(f'{_col(tag, tag_code)} {banner} '
+                      f'{_col(line, "1;31")}', flush=True)
+                continue
+            if not show_all and not KEEP.search(line):
+                continue
+            code = None
+            for pat, c in SEV:
+                if pat.search(line):
+                    code = c
+                    break
+            print(f'{_col(tag, tag_code)} '
+                  f'{_col(line, code) if code else line}', flush=True)
+
+    print(_col('━━━ radiod RX888 clock / sample-loss / USB watch ━━━', '1'))
+    print('        radiod@* + kernel USB log across: ' + ', '.join(hosts))
+    print('        ' + _col('⚠⚠ USB FAULT', '1;37;41')
+          + ' = kernel USB/xhci reset (the cause)   '
+          + _col('red', '31') + ' = offset STEP / sample loss   '
+          + _col('yellow', '33') + ' = clock-lock / no-data   '
+          + _col('cyan', '36') + ' = rate (ppm)')
+    print('        ▸ a STEP means host wallclock advanced but the ADC sample '
+          'count did not = LOST samples')
+    print('        ▸ rate ppm is noisy on the NTP sysclock; it converges to '
+          '~0 ppm long-term (the ADC is GPSDO-disciplined)')
+    print('        Ctrl-C to exit.\n')
+    sys.stdout.flush()
+
+    threads = []
+    for i, h in enumerate(hosts):
+        code = TAG_COLOURS[i % len(TAG_COLOURS)]
+        for kernel in (False, True):
+            t = threading.Thread(target=pump,
+                                 args=(h, f'[{h}]', code, kernel),
+                                 daemon=True)
+            t.start()
+            threads.append(t)
+    try:
+        while any(t.is_alive() for t in threads):
+            for t in threads:
+                t.join(timeout=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for p in procs:
+            try:
+                p.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+    return 0
+
+
 def _add_ka9q_watch_args(p) -> None:
     """Argument spec shared by `smd ka9q-watch` and `smd watch ka9q`."""
     p.add_argument('--ka9q-python', metavar='PATH',
@@ -12392,6 +12544,14 @@ def main() -> int:
     )
     _add_verifier_watch_args(p_w_verifier)
 
+    p_w_radiod = watch_sub.add_parser(
+        'radiod',
+        help='live tail of radiod RX888 clock / sample-loss diagnostics + '
+             'kernel USB faults across hosts (offset STEPs = lost samples; '
+             'USB/xhci resets highlighted as the cause)',
+    )
+    _add_radiod_watch_args(p_w_radiod)
+
     # config (Phase 1)
     p_config = sub.add_parser('config',
                               help='inspect or migrate sigmond coordination config')
@@ -12634,6 +12794,8 @@ def main() -> int:
             return cmd_hf_gps_tec_watch(args)
         if target == 'mag':
             return cmd_mag_watch(args)
+        if target == 'radiod':
+            return cmd_radiod_watch(args)
         if target == 'ka9q':
             if not _HAS_SIGMOND_LIB:
                 print('smd: sigmond library not found; install '
