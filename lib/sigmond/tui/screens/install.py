@@ -161,11 +161,11 @@ class InstallScreen(Vertical):
     InstallScreen #is-actions Button {
         margin-right: 1;
     }
-    InstallScreen #is-profiles, InstallScreen #is-bringups {
+    InstallScreen #is-profiles {
         height: 3;
         margin-top: 1;
     }
-    InstallScreen #is-profiles Button, InstallScreen #is-bringups Button {
+    InstallScreen #is-profiles Button {
         margin-right: 2;
     }
     InstallScreen #is-last {
@@ -191,17 +191,12 @@ class InstallScreen(Vertical):
         except Exception:
             _profiles = []
         if _profiles:
-            yield Static("Station bundles (one-shot install):", classes="is-title")
+            yield Static("Install a station bundle \u2014 then configure it on "
+                         "the Configuration screen:", classes="is-title")
             with Horizontal(id="is-profiles"):
                 for _pname in _profiles:
                     yield Button(f"Install {_pname} station",
                                  id=f"is-profile-{_pname}", variant="success")
-            yield Static("Guided bring-up (install \u2192 configure \u2192 start):",
-                         classes="is-title")
-            with Horizontal(id="is-bringups"):
-                for _pname in _profiles:
-                    yield Button(f"Bring up {_pname} (guided)",
-                                 id=f"is-bringup-{_pname}", variant="primary")
         yield Static("", id="is-last")
 
     def on_mount(self) -> None:
@@ -217,8 +212,6 @@ class InstallScreen(Vertical):
             self._install_enabled()
         elif bid and bid.startswith("is-profile-"):
             self._install_profile(bid[len("is-profile-"):])
-        elif bid and bid.startswith("is-bringup-"):
-            self._bringup_profile(bid[len("is-bringup-"):])
 
     def _refresh(self, pull: bool = False) -> None:
         self.query_one("#is-status", Static).update(
@@ -301,23 +294,6 @@ class InstallScreen(Vertical):
             on_complete=self._after_install,
         )
 
-    def _bringup_profile(self, pname: str) -> None:
-        # Bring-up is an interactive, multi-stage sequence (per-client config
-        # interviews + a long FFT-wisdom wait), so it can't run through the
-        # capture-and-modal mutation runner.  Suspend the TUI, hand the
-        # terminal to `smd bringup`, then resume and refresh.
-        smd = _smd_binary()
-        try:
-            with self.app.suspend():
-                subprocess.run(['sudo', smd, 'bringup', '--profile', pname])
-        except Exception as exc:                       # noqa: BLE001
-            self.app.notify(f"bringup failed to launch: {exc}",
-                            severity="error", timeout=8)
-            return
-        self.app.notify(f"bringup '{pname}' finished — review the terminal output",
-                        timeout=6)
-        self._refresh()
-
     def _install_profile(self, pname: str) -> None:
         try:
             from ...catalog import load_profiles
@@ -335,8 +311,9 @@ class InstallScreen(Vertical):
             f"  foundation: ka9q-radio\n"
             f"  infra:      {', '.join(prof.local_radiod_infra) or '(none)'}\n"
             f"  clients:    {', '.join(prof.clients)}\n\n"
-            f"Enables each in topology and runs its install. "
-            f"Optional add-ons ({', '.join(prof.optional) or 'none'}) install separately.")
+            f"Enables each in topology and installs the software.  Then "
+            f"[bold]configure on the Configuration screen[/] (radiod via SDR "
+            f"inventory first), and Start.  No config/start happens here.")
         confirm_and_run(
             self.app,
             title=f"Install {pname} station?",
@@ -348,7 +325,9 @@ class InstallScreen(Vertical):
         last = self.query_one("#is-last", Static)
         argv = ' '.join(result.args) if result.args else ''
         if result.returncode == 0:
-            last.update(f"[green]\u2714 exit 0[/]  {argv}")
+            last.update("[green]\u2714 installed[/]  \u2014 next: the "
+                        "[bold]Configuration[/] screen (radiod via SDR inventory, "
+                        "then the clients), then [bold]Start[/].")
         else:
             last.update(f"[red]\u2718 exit {result.returncode}[/]  {argv}")
         self._refresh()
