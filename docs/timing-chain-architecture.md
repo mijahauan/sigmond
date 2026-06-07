@@ -127,7 +127,14 @@ cascades into its neighbours.
   3 min (ConditionFileIsExecutable=/usr/sbin/gpsd). 7 hermetic tests. Replaces the
   hf-timestd watchdogs (which stay disabled). Verified on sigma: status 6/6
   healthy, reconcile a clean no-op.
-- **Step 4 — observability:** wire the timing chain into `smd validate`.
+- **Step 4 — observability (DONE 2026-06-06, sigmond `HEAD`):** `rule_timing_reference`
+  in `harmonize.py` (ALL_RUNTIME_RULES) folds the chain into `smd validate` —
+  read-only, pointing failures at `smd timing reconcile`; skips without a local
+  gpsd. `smd validate` now shows `timing_reference: selected PPS (stratum 1)`.
+
+**Roadmap COMPLETE.** The anti-pattern is designed out: stable SHM contract +
+own-only recovery + a single reconciler + deterministic ordering, observable via
+`smd validate` and remediated via `smd timing reconcile`.
 
 This spans sigmond + hf-timestd but uses the same reconcile philosophy sigmond
 already applies (`apply` / `validate`), extended to own the timing chain.
