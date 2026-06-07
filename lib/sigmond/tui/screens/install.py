@@ -22,6 +22,67 @@ from textual.widgets import Button, DataTable, Static
 from textual.worker import Worker, WorkerState
 
 from ..mutation import confirm_and_run
+from ...component_state import (
+    ComponentState, compute_state, applicable_stages, stage_progress,
+    _read_deploy_toml,
+)
+
+# Command that ADVANCES a component to reach the named next stage.
+_CMD_TO_REACH = {
+    "downloaded": "smd install {n}",
+    "installed":  "smd install {n}",
+    "configured": "smd config init {n}",
+    "enabled":    "smd enable {n}",
+    "running":    "smd start {n}",
+}
+
+
+def _entry_progress(entry) -> dict:
+    """Per-component lifecycle track + current position.  The track length
+    varies by capability: libraries/tools stop at 'installed'; service infra
+    with no config skips 'configured'; clients ride the full pipeline."""
+    name = entry.name
+    deploy = _read_deploy_toml(name)
+    track = applicable_stages(name, deploy, entry.kind)
+    if entry.kind == "library":
+        import importlib.util
+        cloned = os.path.lexists(f"/opt/git/sigmond/{name}")
+        mod = name.removesuffix("-python").replace("-", "_")
+        try:
+            importable = importlib.util.find_spec(mod) is not None
+        except Exception:
+            importable = False
+        state = ComponentState(name=name, cloned=cloned, installed=importable,
+                               configured=False, enabled=False, active=False)
+    else:
+        state = compute_state(name, None,
+                              alias=getattr(entry, "topology_alias", None))
+    pos, reached, nxt = stage_progress(state, track)
+    return {"reached": reached, "next": nxt, "pos": pos,
+            "total": len(track), "is_lib": entry.kind == "library"}
+
+
+def _entry_stage(entry) -> tuple:
+    """(reached_stage, is_library) \u2014 used by summary / missing / guard."""
+    pr = _entry_progress(entry)
+    return (pr["reached"], pr["is_lib"])
+
+
+def _stage_cell(entry) -> str:
+    """Rich progress cell: a bar sized to THIS component's track, filled to its
+    current stage, with the next command (or a check when complete)."""
+    pr = _entry_progress(entry)
+    pos, total, reached, nxt = pr["pos"], pr["total"], pr["reached"], pr["next"]
+    bar = "\u25cf" * (pos + 1) + "\u25cb" * (total - pos - 1)
+    if nxt:
+        cmd = _CMD_TO_REACH.get(nxt, "smd " + nxt + " {n}").format(n=entry.name)
+        tail = "  [dim]\u00b7 next: " + cmd + "[/]"
+    else:
+        tail = "  [green]\u2713[/]"
+    colour = "green" if pos >= 2 else "yellow"   # 'installed' (idx 2) or beyond
+    tag = " [dim](dep)[/]" if pr["is_lib"] else ""
+    return (f"[{colour}]{bar}[/]  {reached}{tag} "
+            f"[dim]({pos + 1}/{total})[/]{tail}")
 
 
 def _smd_binary() -> str:
@@ -92,7 +153,7 @@ class InstallScreen(Vertical):
                      classes="is-title")
         yield Static("[dim]loading\u2026[/]", id="is-status")
         table = DataTable(id="is-table", cursor_type="row", zebra_stripes=True)
-        table.add_columns("Kind", "Name", "Description", "Status")
+        table.add_columns("Kind", "Name", "Description", "Progress  (download \u2192 install \u2192 configure \u2192 enable \u2192 run)")
         yield table
         with Horizontal(id="is-actions"):
             yield Button("Install selected", id="is-one", variant="primary")
@@ -147,21 +208,22 @@ class InstallScreen(Vertical):
             status.update(f"[red]{view.error}[/]")
             return
 
-        installed = sum(1 for e in view.entries if e.is_installed())
+        def _needs_install(e):
+            stage, _ = _entry_stage(e)
+            return stage in ("available", "downloaded")
+        pending = sum(1 for e in view.entries if _needs_install(e))
+        ready = len(view.entries) - pending
         status.update(
             f"{len(view.entries)} entries  "
-            f"\u2022  [green]{installed} installed[/]  "
-            f"\u2022  {len(view.entries) - installed} not installed")
+            f"\u2022  [green]{ready} built+[/]  "
+            f"\u2022  [yellow]{pending} need install[/]")
 
         table = self.query_one("#is-table", DataTable)
         table.clear()
         self._entries = list(view.entries)
         for entry in view.entries:
-            state = ("[green]\u2714 installed[/]"
-                     if entry.is_installed()
-                     else "[dim]\u2718 not installed[/]")
             table.add_row(entry.kind, entry.name,
-                          entry.description[:60], state)
+                          entry.description[:48], _stage_cell(entry))
 
     def _selected_entry(self):
         table = self.query_one("#is-table", DataTable)
@@ -178,9 +240,10 @@ class InstallScreen(Vertical):
             self.query_one("#is-last", Static).update(
                 "[yellow]pick a row first[/]")
             return
-        if entry.is_installed():
+        stage, _ = _entry_stage(entry)
+        if stage not in ("available", "downloaded"):
             self.query_one("#is-last", Static).update(
-                f"[dim]{entry.name} already installed[/]")
+                f"[dim]{entry.name} already built ({stage})[/]")
             return
 
         cmd = [_smd_binary(), 'install', entry.name]
@@ -195,7 +258,8 @@ class InstallScreen(Vertical):
 
     def _install_all_missing(self) -> None:
         entries = getattr(self, '_entries', [])
-        missing = [e for e in entries if not e.is_installed()]
+        missing = [e for e in entries
+                   if _entry_stage(e)[0] in ("available", "downloaded")]
         if not missing:
             self.query_one("#is-last", Static).update(
                 "[green]nothing to install[/]")

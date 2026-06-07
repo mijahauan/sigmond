@@ -69,8 +69,8 @@ class ComponentState:
         if self.installed:
             return "installed"
         if self.cloned:
-            return "available"
-        return "missing"
+            return "downloaded"   # source cloned but not yet built
+        return "available"        # in the catalog, not downloaded
 
     @property
     def can_start(self) -> bool:
@@ -92,9 +92,9 @@ class ComponentState:
         prefix is just noise.
         """
         if not self.cloned:
-            return "missing — repo not cloned"
-        if not self.installed:
             return f"available — needs: smd install {self.name}"
+        if not self.installed:
+            return f"downloaded — needs: smd install {self.name}"
         if not self.configured:
             return f"installed — needs: smd config init {self.name}"
         if not self.enabled:
@@ -112,6 +112,19 @@ class ComponentState:
 def _read_deploy_toml(name: str) -> Optional[dict]:
     """Return parsed deploy.toml for a component, or None if missing."""
     path = GIT_BASE / name / "deploy.toml"
+    if not path.exists():
+        return None
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+
+
+def _read_shim_deploy(name: str) -> Optional[dict]:
+    """Synthesized lifecycle shim for deploy-less components (non-conformant
+    infra like igmp-querier carries its [systemd] units here)."""
+    path = Path("/etc/sigmond/clients") / f"{name}.deploy.toml"
     if not path.exists():
         return None
     try:
@@ -276,6 +289,133 @@ def _active_via_lifecycle(*candidate_names: str) -> tuple[bool, int, int]:
     return (False, 0, 0)
 
 
+SYSTEMD_SYSTEM = Path("/etc/systemd/system")
+
+# Ordered lifecycle, 1..6 — drives the progress display.
+STAGES = ("available", "downloaded", "installed",
+          "configured", "enabled", "running")
+_STAGE_NEXT = {
+    "available":  "smd install {n}",
+    "downloaded": "smd install {n}",
+    "installed":  "smd config init {n}",
+    "configured": "smd enable {n}",
+    "enabled":    "smd start {n}",
+    "running":    "",
+}
+
+
+def stage_index(stage: str) -> int:
+    """1-based position (available=1 .. running=6); 0 if unknown."""
+    try:
+        return STAGES.index(stage) + 1
+    except ValueError:
+        return 0
+
+
+def progress_bar(stage: str, total: int = 6,
+                 filled: str = "\u25cf", empty: str = "\u25cb") -> str:
+    """A 6-segment progress glyph, filled up to the current stage."""
+    n = stage_index(stage)
+    return filled * n + empty * max(0, total - n)
+
+
+def next_hint(stage: str, name: str) -> str:
+    """The next command to run from this stage (empty when nothing left)."""
+    tmpl = _STAGE_NEXT.get(stage, "")
+    return tmpl.format(n=name) if tmpl else ""
+
+
+def _needs_config(deploy) -> bool:
+    """A component needs a 'configured' stage iff it declares a [contract.config]
+    entry or a kind='render' install step (an operator-populated file)."""
+    if not deploy:
+        return False
+    if (deploy.get("contract") or {}).get("config"):
+        return True
+    for step in (deploy.get("install") or {}).get("steps") or []:
+        if isinstance(step, dict) and step.get("kind") == "render":
+            return True
+    return False
+
+
+def _deployless_runs(name: str) -> bool:
+    """Deploy-less components that are nonetheless long-running services."""
+    return name in ("ka9q-radio", "ka9q-web", "radiod")
+
+
+def applicable_stages(name: str, deploy=None, kind: str = None) -> list:
+    """The lifecycle stages that actually apply to this component.
+
+    Libraries/tools terminate at 'installed'; components with no systemd units
+    skip enable/run; components with no config step skip 'configured'.  So the
+    track length itself conveys how involved a package is.
+    """
+    base = ["available", "downloaded", "installed"]
+    if kind == "library":
+        return base
+    if deploy is None:
+        deploy = _read_deploy_toml(name) or _read_shim_deploy(name)
+    has_units = (bool(_systemd_unit_names(deploy)) if deploy
+                 else _deployless_runs(name))
+    stages = list(base)
+    if _needs_config(deploy):
+        stages.append("configured")
+    if has_units:
+        stages += ["enabled", "running"]
+    return stages
+
+
+def stage_progress(state: "ComponentState", track: list) -> tuple:
+    """Return (pos, reached_stage, next_stage) within *track* — the furthest
+    contiguous stage the component has satisfied."""
+    satisfied = {
+        "available":  True,
+        "downloaded": state.cloned,
+        "installed":  state.installed,
+        "configured": state.configured,
+        "enabled":    state.enabled,
+        "running":    state.active,
+    }
+    pos = 0
+    for i, stg in enumerate(track):
+        if satisfied.get(stg, False):
+            pos = i
+        else:
+            break
+    nxt = track[pos + 1] if pos + 1 < len(track) else None
+    return pos, track[pos], nxt
+
+
+def _install_artifacts_present(name: str, deploy) -> bool:
+    """'smd install ran' signal when no [build].produces is declared: a clone
+    is not enough — look for real build/link artifacts."""
+    base = GIT_BASE / name
+    if (base / "venv").exists():
+        return True
+    for d in (Path("/usr/local/bin"), Path("/usr/local/sbin")):
+        if (d / name).exists():
+            return True
+    if deploy is not None:
+        for u in _systemd_unit_names(deploy):
+            if (SYSTEMD_SYSTEM / u).exists():
+                return True
+        for step in (deploy.get("install") or {}).get("steps") or []:
+            if isinstance(step, dict) and step.get("kind") == "link":
+                dst = step.get("dst")
+                if isinstance(dst, str) and Path(dst).exists():
+                    return True
+    return False
+
+
+def _radiod_built(name: str) -> bool:
+    """ka9q-radio's binary lives at /usr/local/sbin/radiod (name != binary)."""
+    if name in ("ka9q-radio", "radiod"):
+        return Path("/usr/local/sbin/radiod").exists()
+    if name == "ka9q-web":
+        return Path("/usr/local/sbin/ka9q-web").exists()
+    return False
+
+
 def compute_state(name: str, topology=None, alias: str = None) -> ComponentState:
     """Compute the lifecycle state for one component name.
 
@@ -316,11 +456,12 @@ def compute_state(name: str, topology=None, alias: str = None) -> ComponentState
         # or "enabled, running" — the only states meaningful for a
         # build-it-yourself component.
         active, active_n, total_n = _active_via_lifecycle(name, alias)
+        built = active or _install_artifacts_present(name, None) or _radiod_built(name)
         return ComponentState(
             name=name,
             cloned=True,
-            installed=True,
-            configured=True,
+            installed=built,
+            configured=built,
             enabled=enabled,
             active=active,
             active_unit_count=active_n,
@@ -328,11 +469,13 @@ def compute_state(name: str, topology=None, alias: str = None) -> ComponentState
         )
 
     produces = _produces_paths(deploy)
-    # When the deploy.toml doesn't declare [build].produces, we have no
-    # filesystem fingerprint to verify against — trust the cloned state
-    # (assume installed).  Components that *do* declare produces get the
-    # real check.  This is the "older deploy.toml convention" path.
-    installed = (not produces) or all(p.exists() for p in produces)
+    # Prefer the declared [build].produces fingerprint.  When absent (most
+    # clients don't declare it), a clone alone is NOT "installed" — infer from
+    # real build artifacts (venv / linked binary / linked units) instead.
+    if produces:
+        installed = all(p.exists() for p in produces)
+    else:
+        installed = _install_artifacts_present(name, deploy)
 
     renders = _render_dst_paths(deploy)
     # When there are no render steps declared, treat as configured by
