@@ -217,3 +217,15 @@ description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetomete
 clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder"]
 local_radiod_infra = ["igmp-querier", "gpsdo-monitor"]
 optional           = ["ka9q-web"]
+
+[profile.base]
+description        = "Base SDR station — local radiod + web + timing, no recording clients"
+clients            = ["hf-timestd"]
+local_radiod_infra = ["igmp-querier", "ka9q-web"]
+optional           = ["gpsdo-monitor"]
+
+[profile.client]
+description        = "Decode-only station — clients against a REMOTE radiod (no local ka9q-radio/web)"
+clients            = ["hf-timestd", "wspr-recorder", "psk-recorder"]
+local_radiod_infra = []
+optional           = ["mag-recorder", "codar-sounder", "hfdl-recorder", "hf-gps-tec"]

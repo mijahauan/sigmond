@@ -2254,6 +2254,20 @@ def cmd_bringup(args) -> int:
 
     remote_dns = getattr(args, 'remote_radiod', None)
     local = (remote_dns is None) and _detect_local_radiod()
+    # Decode-only / client-shaped profiles (no local_radiod_infra) run against a
+    # REMOTE radiod.  If none was detected locally and --remote-radiod wasn't
+    # given, ask for the remote status DNS — clients have nothing to bind to
+    # otherwise.  (bringup is interactive; the TUI suspends to this terminal.)
+    if (not local and remote_dns is None
+            and not getattr(args, 'non_interactive', False)
+            and sys.stdin.isatty()):
+        entered = input(
+            'No local radiod detected.  Remote radiod status DNS '
+            '(e.g. bee3-status.local), or blank to abort: ').strip()
+        if not entered:
+            _err('bringup: no radiod available (local or remote) — aborting')
+            return 1
+        remote_dns = entered
     smd_bin = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else 'smd'
 
     plan = build_plan(prof, local_radiod=local, remote_status_dns=remote_dns,

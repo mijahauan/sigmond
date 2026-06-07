@@ -29,7 +29,7 @@ class InstallScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(isinstance(c, InstallScreen)
                                 for c in app.query_one("#center").children))
 
-    async def test_install_all_invokes_plain_smd_install(self):
+    async def test_install_enabled_invokes_topology_scoped_install(self):
         from sigmond.tui.app import SigmondApp
 
         captured = []
@@ -47,7 +47,7 @@ class InstallScreenTests(unittest.IsolatedAsyncioTestCase):
 
             with patch("sigmond.tui.mutation.suspend_and_run_sudo",
                        side_effect=fake_runner):
-                app.query_one("#is-all").press()
+                app.query_one("#is-enabled").press()
                 await pilot.pause()
                 modal = app.screen
                 modal.query_one("#cm-yes").press()
@@ -57,10 +57,10 @@ class InstallScreenTests(unittest.IsolatedAsyncioTestCase):
             argv = captured[0]
             self.assertTrue(argv[0].endswith('smd'))
             self.assertEqual(argv[1], 'install')
-            # "Install all missing" now passes the missing names explicitly
-            # via --components plus --yes, so the operator confirmation in
-            # the screen serves as the install-time confirmation too.
-            self.assertIn('--components', argv)
+            # "Install enabled" installs the topology-enabled set: plain
+            # `smd install --yes` (no --components — the topology filter scopes
+            # it), so the screen's confirm doubles as the install confirmation.
+            self.assertNotIn('--components', argv)
             self.assertIn('--yes', argv)
 
 

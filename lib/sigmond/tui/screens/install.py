@@ -101,10 +101,24 @@ def _smd_binary() -> str:
 class _CatalogView:
     entries: list = field(default_factory=list)   # list[CatalogEntry]
     error: Optional[str] = None
+    pulled: Optional[str] = None
 
 
-def _gather_catalog() -> _CatalogView:
+def _gather_catalog(pull: bool = False) -> _CatalogView:
     view = _CatalogView()
+    if pull:
+        # Pull the latest sigmond so new HamSCI clients added to catalog.toml
+        # appear as "Available".  Best-effort (public HTTPS remote needs no
+        # auth); a failure just falls back to the on-disk catalog.
+        try:
+            r = subprocess.run(
+                ["git", "-C", "/opt/git/sigmond/sigmond",
+                 "-c", "safe.directory=*", "pull", "--ff-only"],
+                capture_output=True, text=True, timeout=30, check=False)
+            view.pulled = "up to date" if "up to date" in (r.stdout + r.stderr) \
+                else ("updated" if r.returncode == 0 else "pull failed")
+        except Exception:
+            view.pulled = "pull failed"
     try:
         from ...catalog import load_catalog
         catalog = load_catalog()
@@ -162,7 +176,7 @@ class InstallScreen(Vertical):
         yield table
         with Horizontal(id="is-actions"):
             yield Button("Install selected", id="is-one", variant="primary")
-            yield Button("Install all missing", id="is-all", variant="warning")
+            yield Button("Install enabled", id="is-enabled", variant="success")
             yield Button("Refresh", id="is-refresh", variant="default")
         try:
             from ...catalog import load_profiles as _lp
@@ -189,19 +203,20 @@ class InstallScreen(Vertical):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
         if bid == "is-refresh":
-            self._refresh()
+            self._refresh(pull=True)
         elif bid == "is-one":
             self._install_selected()
-        elif bid == "is-all":
-            self._install_all_missing()
+        elif bid == "is-enabled":
+            self._install_enabled()
         elif bid and bid.startswith("is-profile-"):
             self._install_profile(bid[len("is-profile-"):])
         elif bid and bid.startswith("is-bringup-"):
             self._bringup_profile(bid[len("is-bringup-"):])
 
-    def _refresh(self) -> None:
-        self.query_one("#is-status", Static).update("[dim]loading\u2026[/]")
-        self.run_worker(_gather_catalog, thread=True, name="is-gather")
+    def _refresh(self, pull: bool = False) -> None:
+        self.query_one("#is-status", Static).update(
+            "[dim]git pull + reload\u2026[/]" if pull else "[dim]loading\u2026[/]")
+        self.run_worker(lambda: _gather_catalog(pull), thread=True, name="is-gather")
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.state != WorkerState.SUCCESS:
@@ -222,10 +237,11 @@ class InstallScreen(Vertical):
             return stage in ("available", "downloaded")
         pending = sum(1 for e in view.entries if _needs_install(e))
         ready = len(view.entries) - pending
+        pulled = f"  [dim](catalog: {view.pulled})[/]" if view.pulled else ""
         status.update(
             f"{len(view.entries)} entries  "
             f"\u2022  [green]{ready} built+[/]  "
-            f"\u2022  [yellow]{pending} need install[/]")
+            f"\u2022  [yellow]{pending} need install[/]{pulled}")
 
         table = self.query_one("#is-table", DataTable)
         table.clear()
@@ -265,24 +281,15 @@ class InstallScreen(Vertical):
             on_complete=self._after_install,
         )
 
-    def _install_all_missing(self) -> None:
-        entries = getattr(self, '_entries', [])
-        missing = [e for e in entries
-                   if _entry_stage(e)[0] in ("available", "downloaded")]
-        if not missing:
-            self.query_one("#is-last", Static).update(
-                "[green]nothing to install[/]")
-            return
-
-        names = ', '.join(e.name for e in missing)
-        components_arg = ','.join(e.name for e in missing)
-        cmd = [_smd_binary(), 'install', '--components', components_arg, '--yes']
+    def _install_enabled(self) -> None:
+        cmd = [_smd_binary(), 'install', '--yes']
         confirm_and_run(
             self.app,
-            title=f"Install {len(missing)} missing entries?",
-            body=(f"Installing: {names}\n\n"
-                  f"Each client's own install.sh handles the details. "
-                  f"Existing installs are left alone."),
+            title="Install the topology-enabled components?",
+            body=("Installs every component this host's [bold]Topology[/] has "
+                  "enabled \u2014 set the station shape on the Topology screen "
+                  "first (or use a profile / guided bring-up below).\n\n"
+                  "Already-built components are left alone."),
             cmd=cmd, sudo=True,
             on_complete=self._after_install,
         )
