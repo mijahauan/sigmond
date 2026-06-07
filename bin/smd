@@ -112,6 +112,7 @@ for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
 
 try:
     from sigmond.commands.validate    import cmd_validate
+    from sigmond.commands.timing      import cmd_timing
     from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
     from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh
     from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
@@ -12317,6 +12318,13 @@ def main() -> int:
                        help='run cross-client harmonization rules (read-only)')
     p.add_argument('--json', action='store_true',
                    help='emit machine-readable JSON')
+    p_timing = sub.add_parser('timing',
+                              help='timing-chain reconciler (GPSDO/gpsd/chrony/hf-timestd)')
+    p_timing.add_argument('timing_cmd', nargs='?', choices=['status', 'reconcile'],
+                          default='status',
+                          help='status (read-only, default) or reconcile (own-only fixes)')
+    p_timing.add_argument('--dry-run', action='store_true',
+                          help='reconcile: show the actions without applying them')
 
     # psk-watch — live tail of psk-recorder's PSK Reporter upload activity
     p_tts = sub.add_parser('timestd-tune-storage',
@@ -12994,13 +13002,15 @@ def main() -> int:
         _deprecated('timestd-tune-storage', 'storage tune-timestd')
         return cmd_timestd_tune_storage(args)
 
-    if args.command in ('validate', 'config', 'environment', 'ka9q-watch'):
+    if args.command in ('validate', 'config', 'environment', 'ka9q-watch', 'timing'):
         if not _HAS_SIGMOND_LIB:
             print('smd: sigmond library not found; install lib/sigmond alongside bin/smd',
                   file=sys.stderr)
             return 1
         if args.command == 'validate':
             return cmd_validate(args)
+        if args.command == 'timing':
+            return cmd_timing(args)
         if args.command == 'ka9q-watch':
             _deprecated('ka9q-watch', 'watch ka9q')
             return cmd_ka9q_watch(args)

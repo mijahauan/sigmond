@@ -617,6 +617,10 @@ $SUDO systemctl enable --now sigmond-storage-trim-all.timer
 # before gpsd/chrony/hf-timestd).  Only meaningful on a host running radiod +
 # a local GPS, but harmless otherwise.
 $SUDO systemctl enable sigmond-shm-precreate.service 2>/dev/null || true
+# Timing-chain reconciler (docs/timing-chain-architecture.md, step 3): the single
+# owner of GPSDO/gpsd/chrony/hf-timestd recovery, replacing the hf-timestd watchdogs.
+# Service is ConditionFileIsExecutable=/usr/sbin/gpsd, so harmless where no local GPS.
+$SUDO systemctl enable --now sigmond-timing-reconcile.timer 2>/dev/null || true
 ok "sigmond-storage-trim-all.timer enabled + started (15-min cadence)"
 
 # ─── smd symlink ──────────────────────────────────────────────────────────────

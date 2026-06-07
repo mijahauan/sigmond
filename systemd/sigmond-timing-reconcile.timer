@@ -1,0 +1,10 @@
+[Unit]
+Description=sigmond: periodic timing-chain reconcile (every 3 min)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=3min
+RandomizedDelaySec=20
+
+[Install]
+WantedBy=timers.target

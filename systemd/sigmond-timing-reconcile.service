@@ -1,0 +1,10 @@
+[Unit]
+Description=sigmond: timing-chain reconciler (single owner of GPSDO/gpsd/chrony/hf-timestd recovery)
+Documentation=file:///opt/git/sigmond/sigmond/docs/timing-chain-architecture.md
+# Only where a local GPS timing chain exists; replaces the hf-timestd watchdogs.
+ConditionFileIsExecutable=/usr/sbin/gpsd
+After=chrony.service gpsd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/smd timing reconcile
