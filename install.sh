@@ -712,6 +712,22 @@ for _repo in /opt/git/sigmond/*/; do
         || $SUDO git config --system --add safe.directory "$_repo"
 done
 
+# ─── RAC — admin remote-access infra on every sigmond host ────────────────────
+# Provisions frpc + wd-rac.service (enabled, but INERT until configured with the
+# gw2 assignment from the WsprDaemon admin).  Belongs on every install so a
+# NAT'd station is reachable for support even before the station clients come up.
+[[ -f /etc/sigmond/coordination.env ]] && source /etc/sigmond/coordination.env
+if [[ -x /opt/git/sigmond/rac/install.sh ]]; then
+    info "Installing RAC (remote access channel)…"
+    if $SUDO env STATION_CALL="${STATION_CALL:-}" SIGMOND_INSTANCE="${SIGMOND_INSTANCE:-}"             bash /opt/git/sigmond/rac/install.sh; then
+        ok "  RAC installed (inert until configured with the gw2 assignment)"
+    else
+        warn "  RAC install failed (non-fatal)"
+    fi
+else
+    info "RAC not cloned (catalog repo unreachable) — skipping; add it later with 'smd install rac'"
+fi
+
 # ─── done ─────────────────────────────────────────────────────────────────────
 echo
 echo -e "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════╗${NC}"
