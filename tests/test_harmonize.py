@@ -347,6 +347,8 @@ class TestRuleCpuIsolationRuntime(unittest.TestCase):
                 "rule_cpu_isolation_runtime",
                 "rule_gpsdo_governor_coverage",
                 "rule_kernel_rcvbuf_adequate",
+                "rule_timing_reference",
+                "rule_wspr_decode_enabled",
             ],
         )
 

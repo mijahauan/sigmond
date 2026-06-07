@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -416,14 +417,50 @@ def _config_from_shared(client: str, reporter_id: str, shared_body: str) -> str:
     )
 
 
+def _instance_env_defaults(client: str) -> "dict[str, str]":
+    """Greenfield per-instance env defaults the client declares in its
+    deploy.toml ``[contract.instance_env]`` table.
+
+    sigmond seeds these KEY=VALUE pairs into a new instance's env file so a
+    sigmond-managed (greenfield) host gets the client's intended runtime
+    mode without hand-editing.  Example: wspr-recorder declares
+    ``WD_DECODE_VIA_DB = "1"`` because a sigmond host has no legacy
+    ``wd-decode@*`` chain, so decode must run in-process or no spots are
+    ever produced.  Returns {} when the client declares none / has no
+    deploy.toml.
+    """
+    deploy = Path("/opt/git/sigmond") / client / "deploy.toml"
+    try:
+        with open(deploy, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    raw = (data.get("contract") or {}).get("instance_env") or {}
+    out: "dict[str, str]" = {}
+    for k, v in raw.items():
+        # TOML may type `1` / `true` as int/bool; env files are strings.
+        out[k] = ("1" if v else "0") if isinstance(v, bool) else str(v)
+    return out
+
+
 def _env_stub(client: str, reporter_id: str) -> str:
-    return (
+    body = (
         _stub_header(client, reporter_id, "Per-instance env")
         + "\n"
         f"# Loaded by {client}@{reporter_id}.service via\n"
         f"#   EnvironmentFile=-/etc/{client}/env/{reporter_id}.env\n"
-        "# Empty by default; add KEY=VALUE lines as the client requires.\n"
     )
+    defaults = _instance_env_defaults(client)
+    if defaults:
+        body += (
+            "# Seeded from the client's deploy.toml [contract.instance_env]\n"
+            "# (greenfield defaults \u2014 safe to edit).\n"
+        )
+        for k, v in defaults.items():
+            body += f"{k}={v}\n"
+    else:
+        body += "# Empty by default; add KEY=VALUE lines as the client requires.\n"
+    return body
 
 
 def _sources_stub(client: str, reporter_id: str) -> str:

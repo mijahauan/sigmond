@@ -750,6 +750,71 @@ def rule_timing_reference(view: SystemView) -> RuleResult:
     return RuleResult("timing_reference", "pass", summary, [])
 
 
+def rule_wspr_decode_enabled(view: SystemView) -> RuleResult:
+    """Runtime: an *active* wspr-recorder instance with WD_DECODE_VIA_DB
+    unset runs in recorder-only mode — it captures period WAVs but never
+    decodes them, so it produces ZERO spots, silently.  On a sigmond host
+    there is no legacy ``wd-decode@*`` bash chain to pick up the slack, so
+    this is a real (and otherwise invisible) misconfiguration.
+
+    The greenfield default is now seeded from the client's deploy.toml
+    ``[contract.instance_env]`` (WD_DECODE_VIA_DB=1); this rule catches
+    instances provisioned before that, or hand-edited envs.  Skipped when
+    wspr-recorder isn't active, or when a legacy wsprdaemon-client decode
+    chain is present (recorder-only is intentional there)."""
+    import subprocess
+    env_dir = Path("/etc/wspr-recorder/env")
+    if not env_dir.is_dir():
+        return RuleResult("wspr_decode_enabled", "pass",
+                          "skipped (no wspr-recorder configured)", [])
+    if Path("/opt/wsprdaemon-client/bin/decoders").is_dir():
+        return RuleResult("wspr_decode_enabled", "pass",
+                          "skipped (legacy wsprdaemon-client decode chain present)", [])
+    try:
+        out = subprocess.run(
+            ["systemctl", "list-units", "--type=service", "--state=active",
+             "--no-legend", "--plain", "wspr-recorder@*.service"],
+            capture_output=True, text=True, timeout=10).stdout
+    except Exception:                                  # noqa: BLE001
+        return RuleResult("wspr_decode_enabled", "pass",
+                          "skipped (systemctl unavailable)", [])
+    active = [ln.split()[0] for ln in out.splitlines() if ln.strip()]
+    if not active:
+        return RuleResult("wspr_decode_enabled", "pass",
+                          "skipped (no active wspr-recorder instance)", [])
+
+    def _decode_on(unit: str) -> bool:
+        inst = unit[len("wspr-recorder@"):-len(".service")]
+        forms = {inst}
+        if "\\x" in inst:
+            try:
+                forms.add(inst.encode().decode("unicode_escape"))
+            except Exception:                          # noqa: BLE001
+                pass
+        for name in forms:
+            envf = env_dir / f"{name}.env"
+            if not envf.exists():
+                continue
+            for line in envf.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("WD_DECODE_VIA_DB") and "=" in line:
+                    return line.split("=", 1)[1].strip() not in ("", "0")
+        return False
+
+    recorder_only = [u[len("wspr-recorder@"):-len(".service")]
+                     for u in active if not _decode_on(u)]
+    if recorder_only:
+        return RuleResult(
+            "wspr_decode_enabled", "warn",
+            "wspr-recorder in recorder-only mode (WD_DECODE_VIA_DB unset) — "
+            "captures WAVs but produces NO spots: " + ", ".join(recorder_only)
+            + ".  Fix: add WD_DECODE_VIA_DB=1 to the instance env "
+            "(/etc/wspr-recorder/env/<id>.env) and restart the unit.",
+            ["wspr-recorder"])
+    return RuleResult("wspr_decode_enabled", "pass",
+                      f"decode enabled on {len(active)} active instance(s)", [])
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_frequency_coverage,
@@ -768,6 +833,7 @@ ALL_RUNTIME_RULES = [
     rule_gpsdo_governor_coverage,
     rule_kernel_rcvbuf_adequate,
     rule_timing_reference,
+    rule_wspr_decode_enabled,
 ]
 
 
