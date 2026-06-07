@@ -299,6 +299,69 @@ def _init_siggen(args) -> int:
     return 0
 
 
+def cmd_radiod_register(args) -> int:
+    """`smd config register-radiod <instance_id> [--serial S]`: register an
+    already-written /etc/radio/radiod@<id>.conf in coordination.toml so clients
+    can bind to it.
+
+    The TUI SDR-inventory screen writes radiod@<id>.conf directly (via sudo
+    tee) but, running as the invoking user, can't append to root-owned
+    coordination.toml -- so it shells out here.  Without this step the radiod is
+    invisible to the env bag (`SIGMOND_RADIOD_STATUS` stays unset) and
+    wspr/psk configs keep their `<configure-via-config-init>` placeholder.
+
+    status_dns is read from the conf's [global] status line as ground truth,
+    so there is no drift between what radiod publishes and what coordination
+    advertises to clients."""
+    heading("config register-radiod")
+    instance_id = getattr(args, "instance_id", None)
+    if not instance_id:
+        err("instance id required")
+        return 1
+    conf = RADIOD_CONFIG_DIR / f"radiod@{instance_id}.conf"
+    if not conf.exists():
+        err(f"no such radiod config: {conf}")
+        info("Write it first (SDR inventory / `smd config init radiod`).")
+        return 1
+
+    status_dns = ""
+    in_global = False
+    for raw in conf.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_global = (line.lower() == "[global]")
+            continue
+        if in_global and line.lower().split("=", 1)[0].strip() == "status":
+            status_dns = line.split("=", 1)[1].strip().strip('"').strip("'")
+
+    if not status_dns:
+        err(f"could not parse a [global] status line from {conf}")
+        return 1
+
+    plan = {
+        "instance_id": instance_id,
+        "status_dns":  status_dns,
+        "serial":      (getattr(args, "serial", "") or "").strip(),
+    }
+    _append_coordination([_coord_block(plan)], args)
+    try:
+        fresh = load_coordination(COORDINATION_PATH)
+        COORDINATION_ENV.parent.mkdir(parents=True, exist_ok=True)
+        COORDINATION_ENV.write_text(render_env(fresh))
+        ok(f"rendered {COORDINATION_ENV}")
+    except (OSError, PermissionError) as exc:
+        warn(f"wrote coordination.toml but could not refresh "
+             f"{COORDINATION_ENV}: {exc}")
+
+    print()
+    ok(f"registered radiod '{instance_id}' (status {status_dns})")
+    info("Clients configured now will auto-bind to this radiod "
+         "(SIGMOND_RADIOD_STATUS).")
+    return 0
+
+
 def cmd_radiod_init(args) -> int:
     heading("config init radiod")
     if getattr(args, "siggen", False):

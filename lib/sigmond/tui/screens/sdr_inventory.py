@@ -15,8 +15,11 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import os
+import shutil
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -667,6 +670,39 @@ def _write_radiod_conf(entry: SdrEntry, meta: SdrDeviceMeta) -> Optional[str]:
     return None
 
 
+def _smd_binary() -> str:
+    """Locate the smd entry point (see lifecycle._smd_binary)."""
+    argv0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
+        return argv0
+    found = shutil.which('smd')
+    return found or '/usr/local/sbin/smd'
+
+
+def _register_radiod_coordination(config_name: str, serial: str = "") -> Optional[str]:
+    """Register a just-written radiod@<name>.conf in coordination.toml so
+    clients can bind to it.
+
+    Writing the conf (sudo tee, above) leaves the radiod invisible to the
+    cross-client env bag -- coordination.toml has no [radiod.<id>] entry, so
+    SIGMOND_RADIOD_STATUS stays unset and wspr/psk configs keep their
+    <configure-via-config-init> placeholder.  Shell out to the CLI (the
+    privileged coordination write + env re-render stays there).  Returns an
+    error string on failure, or None on success.
+    """
+    cmd = ['sudo', _smd_binary(), 'config', 'register-radiod', config_name]
+    if serial:
+        cmd += ['--serial', serial]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            return (r.stderr.strip() or r.stdout.strip()
+                    or f'exit {r.returncode}')
+    except Exception as e:  # noqa: BLE001
+        return str(e)
+    return None
+
+
 def _verify_radiod_conf(config_name: str) -> Optional[str]:
     """Read back the written conf file and verify the status line.
 
@@ -1026,7 +1062,15 @@ class SdrInventoryScreen(Vertical):
                         self.query_one("#sdr-status", Static).update(
                             f"[yellow]⚠ written but verify failed: {verr}[/]")
                     else:
-                        self.query_one("#sdr-status", Static).update(
-                            f"[green]✔ radiod@{cname}.conf written and verified[/]")
+                        rerr = _register_radiod_coordination(cname, entry.serial)
+                        if rerr:
+                            self.query_one("#sdr-status", Static).update(
+                                f"[yellow]⚠ radiod@{cname}.conf written but "
+                                f"coordination registration failed: {rerr}[/]")
+                        else:
+                            self.query_one("#sdr-status", Static).update(
+                                f"[green]✔ radiod@{cname}.conf written, "
+                                f"verified, and registered — clients will "
+                                f"auto-bind[/]")
 
         self.app.push_screen(DeviceMetaModal(meta=current_meta), _after)

@@ -12867,6 +12867,17 @@ def main() -> int:
                         'a 10 MHz carrier + a built-in demod channel on loopback '
                         'so the radiod multicast chain can be exercised anywhere.')
 
+    p = config_sub.add_parser('register-radiod',
+                              help='register an already-written '
+                                   'radiod@<id>.conf in coordination.toml '
+                                   '(used by the TUI SDR-inventory screen)')
+    p.add_argument('instance_id',
+                   help='radiod instance id, i.e. the <id> in '
+                        '/etc/radio/radiod@<id>.conf')
+    p.add_argument('--serial', default='',
+                   help='USB iSerial of the SDR to bind this instance to '
+                        '(optional; lets a later config init recognise it)')
+
     p = config_sub.add_parser('edit',
                               help="invoke a client's config edit flow, "
                                    "or open $EDITOR on its config when no "
@@ -13159,6 +13170,13 @@ def main() -> int:
             return cmd_config_backup(args)
         if sub_cmd == 'restore':
             return cmd_config_restore(args)
+        if sub_cmd == 'register-radiod':
+            # Writes /etc/sigmond/coordination.toml + re-renders the env bag
+            # -- needs root, same as `config init radiod`.
+            if _need_root('config register-radiod'):
+                return 1
+            from sigmond.commands.radiod_config import cmd_radiod_register
+            return cmd_radiod_register(args)
         if sub_cmd == 'init':
             # radiod's wizard writes /etc/radio/ + appends to
             # /etc/sigmond/coordination.toml + re-renders coordination.env
