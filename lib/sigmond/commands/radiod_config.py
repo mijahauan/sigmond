@@ -340,6 +340,14 @@ def cmd_radiod_register(args) -> int:
         err(f"could not parse a [global] status line from {conf}")
         return 1
 
+    # radiod publishes the [global] status name under the mDNS `.local`
+    # domain (conf `status = foo` -> announced `foo.local`); clients resolve
+    # that FQDN.  Advertise the `.local` form in coordination so it matches
+    # what the siggen/interactive paths store ({id}-status.local) and what
+    # ka9q-python discovery returns.
+    if not status_dns.endswith(".local"):
+        status_dns = status_dns + ".local"
+
     plan = {
         "instance_id": instance_id,
         "status_dns":  status_dns,
