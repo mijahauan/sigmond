@@ -1806,8 +1806,42 @@ def _derive_component_name_from_url(url: str) -> str:
     return stem
 
 
+def _augment_stop_list_with_timer_services(stop_list: list) -> list:
+    """For each ``*.timer`` in ``stop_list``, insert the matching
+    ``*.service`` just before it when that service is currently
+    active/activating/reloading.
+
+    ``systemctl stop foo.timer`` does NOT stop a ``foo.service`` the timer
+    already triggered (e.g. a grape-daily catch-up run still processing,
+    or a oneshot watchdog mid-run) — and such timer-driven oneshots are
+    frequently absent from deploy.toml's unit list (only the ``.timer`` is
+    declared).  Mutates and returns ``stop_list`` (order preserved)."""
+    seen = set(stop_list)
+    for u in stop_list[:]:  # iterate a snapshot
+        if not u.endswith('.timer'):
+            continue
+        paired_service = u[:-len('.timer')] + '.service'
+        if paired_service in seen:
+            continue
+        # "active"/"activating"/"reloading" => a run we must interrupt.
+        r = _run(['systemctl', 'is-active', paired_service])
+        if r.stdout.strip() in ('active', 'activating', 'reloading'):
+            stop_list.insert(stop_list.index(u), paired_service)
+            seen.add(paired_service)
+    return stop_list
+
+
 def _stop_component_units(component: str) -> None:
-    """systemctl-stop everything declared by component's deploy.toml."""
+    """systemctl-stop everything a component owns — in reverse-dependency
+    order, and including the ``.service`` behind each ``.timer``.
+
+    Used by ``smd disable``; mirrors the robustness of ``cmd_stop`` so a
+    disable leaves nothing running.  Previously this stopped only the units
+    literally declared in deploy.toml, so a timer-triggered oneshot that
+    was mid-run (its ``.service`` often isn't listed — only the ``.timer``)
+    or a Restart=always service still Wanted by a not-yet-stopped consumer
+    (e.g. metrology@ instances keeping core-recorder alive) could survive
+    the disable."""
     if not _HAS_SIGMOND_LIB:
         return
     try:
@@ -1829,11 +1863,21 @@ def _stop_component_units(component: str) -> None:
                         unit_names.extend(_expand_running_instances(u))
                     else:
                         unit_names.append(u)
-            for u in unit_names:
-                _run(['systemctl', 'stop', u], sudo=True)
+            for unit_name in _augment_stop_list_with_timer_services(unit_names):
+                _run(['systemctl', 'stop', unit_name], sudo=True)
             return
-        for unit in [u for u in units if not u.orphaned]:
-            _run(['systemctl', 'stop', unit.unit], sudo=True)
+        units = [u for u in units if not u.orphaned]
+        # Reverse-dependency order: stop consumers before the services they
+        # depend on, so a Restart=always service isn't revived by a still-
+        # running dependent.
+        try:
+            units = order_units(units, coordination=load_coordination())
+        except Exception:
+            pass
+        stop_list = _augment_stop_list_with_timer_services(
+            [u.unit for u in reversed(units)])
+        for unit_name in stop_list:
+            _run(['systemctl', 'stop', unit_name], sudo=True)
     except Exception as exc:
         _warn(f'{component}: stop units skipped — {exc}')
 
@@ -3230,29 +3274,13 @@ def cmd_stop(args) -> int:
         coord = load_coordination()
         units = order_units(units, coordination=coord)
 
-    # Build the full stop list:
-    #   1. Every declared unit (services, targets, timers).
-    #   2. For each .timer, also the matching .service if it's currently
-    #      running.  systemctl stop foo.timer doesn't kill a foo.service
-    #      that the timer triggered earlier — e.g. a grape-daily catch-up
-    #      run that's still chewing on yesterday's data when we stop.
-    stop_list: list[str] = [u.unit for u in reversed(units)]
-    seen = set(stop_list)
-    for u in stop_list[:]:  # iterate a snapshot
-        if u.endswith('.timer'):
-            paired_service = u[:-len('.timer')] + '.service'
-            if paired_service in seen:
-                continue
-            # `is-active --quiet` returns 0 ONLY for "active"; it returns
-            # non-zero for "activating".  We want both — a long-running
-            # oneshot triggered by the timer (e.g. grape-daily mid-
-            # processing) is exactly what we need to interrupt on stop.
-            r = _run(['systemctl', 'is-active', paired_service])
-            state = r.stdout.strip()
-            if state in ('active', 'activating', 'reloading'):
-                idx = stop_list.index(u)
-                stop_list.insert(idx, paired_service)
-                seen.add(paired_service)
+    # Build the full stop list: every declared unit (reverse-dependency
+    # order), plus the .service behind each .timer if it's mid-run — a
+    # `systemctl stop foo.timer` doesn't kill a foo.service the timer
+    # triggered earlier (e.g. a grape-daily catch-up still chewing on
+    # yesterday's data).  Shared with `smd disable` via the helper.
+    stop_list: list[str] = _augment_stop_list_with_timer_services(
+        [u.unit for u in reversed(units)])
 
     _heading('stop')
     stopped = 0
