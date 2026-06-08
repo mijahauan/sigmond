@@ -957,6 +957,32 @@ def _read_rac_topology(topology: dict) -> tuple[str, int]:
     return rac_id, rac_number
 
 
+def _read_rac_frpc() -> tuple[str, int]:
+    """(rac_id, rac_number) already committed in the live frpc.toml, or ('', -1).
+
+    frpc.toml is the runtime source of truth for what the tunnel is actually
+    configured with (the non-WEB proxy's name is the rac_id; its remotePort
+    minus the port base is the rac_number).  Used so a re-run of
+    ``smd rac install`` treats existing values as already entered and does
+    not re-prompt for them.
+    """
+    if not _FRPC_CONFIG.exists():
+        return '', -1
+    try:
+        import tomllib
+        with open(_FRPC_CONFIG, 'rb') as f:
+            cfg = tomllib.load(f)
+    except Exception:
+        return '', -1
+    for proxy in cfg.get('proxies', []):
+        name = proxy.get('name', '')
+        if name and not name.endswith('-WEB'):
+            rp = proxy.get('remotePort', -1)
+            num = rp - _RAC_PORT_BASE if isinstance(rp, int) and rp > 0 else -1
+            return name, num
+    return '', -1
+
+
 def _detect_rac_defaults() -> tuple[str, int]:
     """Try to detect RAC ID and number from the wsprdaemon v4 config.
 
@@ -1426,41 +1452,54 @@ WantedBy=multi-user.target
     return True
 
 
-def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False) -> bool:
-    """Full wd-rac install: frpc binary + frpc.ini + systemd service."""
-    rac_id, rac_number = _read_rac_topology(topology)
+def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False,
+                    cli_rac_id=None, cli_rac_number=None) -> bool:
+    """Full wd-rac install: frpc binary + frpc.toml + systemd service.
 
-    # Fall back to auto-detection (wsprdaemon.conf, else the WSPR
-    # uploader's WD_RECEIVER_CALL) when not explicitly configured.
-    if not rac_id or rac_number < 0:
-        detected_id, detected_num = _detect_rac_defaults()
-        if not rac_id and detected_id:
-            rac_id = detected_id
-            _info(f'wd-rac: rac_id default detected: {rac_id}')
-        if rac_number < 0 and detected_num >= 0:
-            rac_number = detected_num
-            _info(f'wd-rac: rac_number detected: {rac_number}')
+    Resolves (rac_id, rac_number) by precedence:
+      1. CLI args  (``smd rac install <number> --id <id>``)
+      2. values already entered — topology.toml, then the live frpc.toml
+      3. interactive prompt: RAC number FIRST (always assigned by the RAC
+         administrator and supplied by the operator on this machine), then
+         RAC ID, prompted only when not already entered and defaulting to a
+         detected receiver id, else this host's name.
+      4. non-interactive (--yes / no tty) fallback: auto-detection, with the
+         host name as the last-resort rac_id.
 
-    # Interactive prompt when still missing and running in a real terminal.
-    if (not rac_id or rac_number < 0) and not yes and sys.stdin.isatty():
+    Runs standalone — no dependency on radiod, recorders, or any other
+    component — so it is the first thing an operator can bring up on a fresh
+    host to let a remote admin connect and finish the install.
+    """
+    # 1. CLI args win.  2. otherwise whatever is already committed on disk
+    #    (topology.toml, then the running frpc.toml).
+    stored_id, stored_number = _read_rac_topology(topology)
+    if not stored_id or stored_number < 0:
+        frpc_id, frpc_number = _read_rac_frpc()
+        stored_id = stored_id or frpc_id
+        if stored_number < 0:
+            stored_number = frpc_number
+
+    rac_id = (cli_rac_id or '').strip() or stored_id
+    rac_number = (cli_rac_number if (cli_rac_number is not None
+                                     and cli_rac_number >= 0)
+                  else stored_number)
+
+    id_committed     = bool(rac_id)        # came from CLI or already on disk
+    number_committed = rac_number >= 0
+
+    # 3. Interactive prompts — RAC number first, RAC ID only when unset.
+    if (not yes and sys.stdin.isatty()
+            and (not number_committed or not id_committed)):
         import readline  # noqa: F401 — enables line editing on input()
         print()
-        print('  wd-rac needs a RAC ID and a RAC number '
-              '(the number is assigned by the RAC administrator).')
-        # RAC ID — always show the detected default; Enter accepts it.
-        default_id = rac_id
-        try:
-            prompt = (f'  RAC ID [{default_id}]: ' if default_id
-                      else '  RAC ID (e.g. AI6VN-0): ')
-            val = input(prompt).strip()
-            rac_id = val or default_id
-        except (EOFError, KeyboardInterrupt):
-            print()
-        # RAC number — required; loop until a valid integer or abort.
-        while rac_number < 0:
+        print('  wd-rac (Remote Access Channel) — reverse tunnel for '
+              'remote SSH/web access.')
+
+        # RAC number — always operator-supplied; ask first; loop until valid.
+        while not number_committed:
             try:
-                val = input('  RAC number (integer, required — '
-                            'Ctrl-C to abort): ').strip()
+                val = input('  RAC number (integer, assigned by the RAC '
+                            'administrator — Ctrl-C to abort): ').strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 _err('wd-rac: aborted — RAC number is required')
@@ -1470,13 +1509,47 @@ def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False) ->
                       'port); enter the integer from the admin email.')
                 continue
             try:
-                rac_number = int(val)
+                n = int(val)
             except ValueError:
                 _warn(f'  "{val}" is not an integer — try again.')
+                continue
+            if n < 0:
+                _warn('  RAC number must be non-negative.')
+                continue
+            rac_number, number_committed = n, True
+
+        # RAC ID — only prompt when not already entered; default to a
+        # detected receiver id, else this host's name.  Enter accepts it.
+        if not id_committed:
+            import socket
+            default_id = (_detect_rac_defaults()[0]
+                          or socket.gethostname().split('.')[0])
+            try:
+                val = input(f'  RAC ID [{default_id}]: ').strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                val = ''
+            rac_id = val or default_id
+            id_committed = bool(rac_id)
+
+    # 4. Non-interactive / --yes fallback when values are still unresolved.
+    if not rac_id or rac_number < 0:
+        detected_id, detected_num = _detect_rac_defaults()
+        if not rac_id and detected_id:
+            rac_id = detected_id
+            _info(f'wd-rac: rac_id default detected: {rac_id}')
+        if rac_number < 0 and detected_num >= 0:
+            rac_number = detected_num
+            _info(f'wd-rac: rac_number detected: {rac_number}')
+        if not rac_id:
+            import socket
+            rac_id = socket.gethostname().split('.')[0]
+            _info(f'wd-rac: rac_id defaulted to host name: {rac_id}')
 
     if not rac_id or rac_number < 0:
         _warn('wd-rac: rac_id or rac_number not set — tunnel will not be started')
-        _warn('  To configure: run  smd rac install  (prompts interactively)')
+        _warn('  To configure: run  smd rac install <number>  '
+              '(prompts when omitted)')
         _warn('  Or:           smd tui  and press  a  (RAC screen)')
 
     ok = True
@@ -1610,6 +1683,8 @@ def cmd_rac(args) -> int:
             topology,
             getattr(args, 'dry_run', False),
             yes=getattr(args, 'yes', False),
+            cli_rac_id=getattr(args, 'rac_id', None),
+            cli_rac_number=getattr(args, 'rac_number', None),
         ) else 1
 
     if action in ('start', 'stop', 'restart'):
@@ -13047,6 +13122,16 @@ def main() -> int:
         help='provision the tunnel (frpc binary + frpc.toml + keypair + '
              'gateway registration + unit) — alias for '
              '`smd install --components wd-rac`',
+    )
+    p_rac_install.add_argument(
+        'rac_number', nargs='?', type=int, default=None, metavar='NUMBER',
+        help='RAC number assigned by the administrator (sets the ssh tunnel '
+             'port = 35800 + NUMBER); prompted first if omitted',
+    )
+    p_rac_install.add_argument(
+        '--id', dest='rac_id', metavar='ID', default=None,
+        help='RAC ID (default: detected receiver id, else this host name); '
+             'only prompted when not already configured',
     )
     p_rac_install.add_argument(
         '--dry-run', action='store_true',
