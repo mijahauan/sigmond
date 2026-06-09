@@ -48,6 +48,19 @@ def test_stage_assignment_timing_authority_and_independent():
     assert stage['configure psk-recorder'] == STAGE3A
 
 
+def test_plan_runs_radiod_migrate_after_configs_before_start():
+    # A leftover legacy config that `config init` skipped is healed by a
+    # `radiod migrate` step that runs after all configs and before any start.
+    p = build_plan(_dasi2(), local_radiod=True)
+    mig = next((i for i, s in enumerate(p.steps)
+                if 'migrate' in s.label and 'migrate' in s.argv), None)
+    first_start = next((i for i, s in enumerate(p.steps)
+                        if s.kind == 'start'), None)
+    assert mig is not None, 'no radiod-migrate step in the plan'
+    assert first_start is not None and mig < first_start
+    assert p.steps[mig].argv[-4:] == ['admin', 'radiod', 'migrate', '--yes']
+
+
 def test_single_hard_checkpoint_is_radiod_configured():
     p = build_plan(_dasi2(), local_radiod=True)
     hard = [s for s in p.steps if s.hard]

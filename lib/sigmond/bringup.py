@@ -143,6 +143,16 @@ def build_plan(profile, *, local_radiod: bool,
             configure(STAGE3B, client)
             checkpoint(STAGE3B, f'{client} configured', check=f'configured:{client}')
 
+    # Heal any leftover legacy config before starting: a stale client config
+    # from a prior install (e.g. the legacy `status_address` field) that
+    # `config init` refused to overwrite would otherwise fail to load.  This
+    # rewrites it to the canonical `status` schema and canonicalizes the radiod
+    # identity in coordination.toml.  Idempotent — a no-op when nothing is
+    # legacy, so it's harmless on a truly-clean host.
+    steps.append(Step(STAGE4, 'migrate any legacy config to the canonical radiod '
+                              'schema', 'tune',
+                      argv=[smd, 'admin', 'radiod', 'migrate', '--yes']))
+
     # --- Stage 4: start, ORDERED so clients never provision against a cold
     # radiod.  radiod reaches systemd 'active' (forked) ~10 s — and on a cold
     # start up to ~3 min — before it logs 'rx888 running' (actually streaming);
