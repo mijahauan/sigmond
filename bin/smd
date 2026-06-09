@@ -24,12 +24,7 @@ Observe (what is, read-only):
     smd log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd environment list | probe | describe                      discover network peers
-    smd watch       <wspr|psk|radiod|hfdl|codar|ka9q|uploads|verifier> [args...] unified service watcher
-    smd ka9q-watch                                               upstream-drift watcher (alias)
-    smd psk-watch   [N | -v]                                     PSK Reporter upload events (alias)
-    smd wspr-watch  [N | -v]                                     WSPRnet upload events (alias)
-    smd hfdl-watch  [N | -v]                                     HFDL decoded-frame activity (alias)
-    smd codar-watch [N | -v]                                     CODAR ionospheric soundings (alias)
+    smd watch       <wspr|psk|hfdl|codar|hf-gps-tec|mag|ka9q|radiod|uploads|verifier> [args...] unified service watcher
     smd sources     list | add | remove | apply                  per-client SDR source selection
 
 Operate (run things now, may need sudo):
@@ -6080,7 +6075,7 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier rac ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage sources public-ip completion component instance"
+    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier rac wisdom timestd-tune-storage storage sources public-ip completion component instance"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web wd-rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -6160,7 +6155,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "install apply" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk radiod hfdl codar ka9q uploads verifier" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk hfdl codar hf-gps-tec mag ka9q radiod uploads verifier" -- "$cur"))
                     ;;
                 verifier)
                     COMPREPLY=($(compgen -W "report" -- "$cur"))
@@ -6170,15 +6165,6 @@ _smd_complete() {
                     ;;
                 completion)
                     COMPREPLY=($(compgen -W "bash" -- "$cur"))
-                    ;;
-                wspr-watch)
-                    COMPREPLY=($(compgen -W "-v --verbose --instance --backlog --rejected -r" -- "$cur"))
-                    ;;
-                psk-watch|hfdl-watch|codar-watch)
-                    COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
-                    ;;
-                ka9q-watch)
-                    COMPREPLY=($(compgen -W "--ka9q-python --ka9q-radio --remote --branch --no-fetch --json" -- "$cur"))
                     ;;
                 public-ip)
                     COMPREPLY=($(compgen -W "--no-v6 -q --quiet" -- "$cur"))
@@ -6208,7 +6194,7 @@ _smd_complete() {
                         wspr)
                             COMPREPLY=($(compgen -W "-v --verbose --instance --backlog --rejected -r" -- "$cur"))
                             ;;
-                        psk|hfdl|codar)
+                        psk|hfdl|codar|mag|hf-gps-tec)
                             COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
                             ;;
                         ka9q)
@@ -13349,43 +13335,6 @@ def main() -> int:
     p_storage_tune.add_argument('--apply', action='store_true',
                                 help='write the drop-ins (default: print recommendation only)')
 
-    p_psk = sub.add_parser('psk-watch',
-                           help='live tail of PSK Reporter upload events '
-                                '(alias: smd watch psk)')
-    _add_psk_watch_args(p_psk)
-
-    # wspr-watch — live tail of wsprdaemon-client's WSPRnet upload activity
-    p_wspr = sub.add_parser('wspr-watch',
-                            help='live tail of WSPRnet upload events '
-                                 '(alias: smd watch wspr)')
-    _add_wspr_watch_args(p_wspr)
-
-    # hfdl-watch — live tail of hfdl-recorder per-band decoded frames
-    p_hfdl = sub.add_parser('hfdl-watch',
-                            help='live tail of HFDL decoded-frame activity '
-                                 '(alias: smd watch hfdl)')
-    _add_hfdl_watch_args(p_hfdl)
-
-    # codar-watch — live tail of codar-sounder per-station soundings
-    p_codar = sub.add_parser('codar-watch',
-                             help='live tail of CODAR ionospheric soundings '
-                                  '(alias: smd watch codar)')
-    _add_codar_watch_args(p_codar)
-
-    # mag-watch — live tail of mag-recorder sample/packager/upload activity
-    p_mag = sub.add_parser('mag-watch',
-                           help='live tail of RM3100 magnetometer sample '
-                                'activity + daily packager/PSWS-upload events '
-                                '(alias: smd watch mag)')
-    _add_mag_watch_args(p_mag)
-
-    # ka9q-watch — alert on upstream ka9q-radio changes that could break clients
-    p = sub.add_parser('ka9q-watch',
-                       help='check ka9q-radio upstream for changes that could '
-                            'break ka9q-python RTP clients '
-                            '(alias: smd watch ka9q)')
-    _add_ka9q_watch_args(p)
-
     # watch — unified live-tail / observe interface
     #
     # Convenience verb so each per-service watcher is reachable via a
@@ -13690,26 +13639,6 @@ def main() -> int:
             return cmd_diag_drop_in(args)
         return cmd_diag(args)
 
-    if args.command == 'psk-watch':
-        _deprecated('psk-watch', 'watch psk')
-        return cmd_psk_watch(args)
-
-    if args.command == 'wspr-watch':
-        _deprecated('wspr-watch', 'watch wspr')
-        return cmd_wspr_watch(args)
-
-    if args.command == 'hfdl-watch':
-        _deprecated('hfdl-watch', 'watch hfdl')
-        return cmd_hfdl_watch(args)
-
-    if args.command == 'codar-watch':
-        _deprecated('codar-watch', 'watch codar')
-        return cmd_codar_watch(args)
-
-    if args.command == 'mag-watch':
-        _deprecated('mag-watch', 'watch mag')
-        return cmd_mag_watch(args)
-
     if args.command == 'watch':
         target = getattr(args, 'watch_target', None)
         if target == 'wspr':
@@ -13804,7 +13733,7 @@ def main() -> int:
         _deprecated('timestd-tune-storage', 'storage tune-timestd')
         return cmd_timestd_tune_storage(args)
 
-    if args.command in ('validate', 'config', 'environment', 'ka9q-watch', 'timing', 'uninstall'):
+    if args.command in ('validate', 'config', 'environment', 'timing', 'uninstall'):
         if not _HAS_SIGMOND_LIB:
             print('smd: sigmond library not found; install lib/sigmond alongside bin/smd',
                   file=sys.stderr)
@@ -13815,9 +13744,6 @@ def main() -> int:
             return cmd_timing(args)
         if args.command == 'uninstall':
             return cmd_uninstall(args)
-        if args.command == 'ka9q-watch':
-            _deprecated('ka9q-watch', 'watch ka9q')
-            return cmd_ka9q_watch(args)
         if args.command == 'environment':
             env_cmd = getattr(args, 'env_command', None)
             if env_cmd == 'list':

@@ -19,7 +19,6 @@ Top-level subparsers — 33 in total, alphabetical. Sub-groups indented.
 |---|---|---|---|
 | `add` | | `cmd_add` | yes |
 | `apply` | | `cmd_apply` | yes |
-| `codar-watch` | | `cmd_codar_watch` | no |
 | `completion` | `bash` | `cmd_completion` | no |
 | `config` | `show / identity / refresh / migrate / backup / restore / init / edit` | `cmd_config_*` | mixed (identity/refresh/init/edit/restore mutate) |
 | `cpu` | (shortcut to `diag cpu-freq`) | `cmd_diag_cpu_freq` | no (read-only without `--apply`) |
@@ -27,12 +26,9 @@ Top-level subparsers — 33 in total, alphabetical. Sub-groups indented.
 | `disable` | | `cmd_disable` | yes |
 | `enable` | | `cmd_enable` | yes |
 | `environment` | `list / probe / describe` | `cmd_environment_*` | no |
-| `hfdl-watch` | | `cmd_hfdl_watch` | no |
 | `install` | | `cmd_install` | yes |
-| `ka9q-watch` | | `cmd_ka9q_watch` | no |
 | `list` | (`--update` / `--apply` opt) | `cmd_list` | optional |
 | `log` | | `cmd_log` | optional (`--level` writes) |
-| `psk-watch` | | `cmd_psk_watch` | no |
 | `public-ip` | | `cmd_public_ip` | no |
 | `reload` | (`--via=auto\|systemd\|socket`) | `cmd_reload` | yes |
 | `remove` | | `cmd_remove` | yes |
@@ -47,9 +43,8 @@ Top-level subparsers — 33 in total, alphabetical. Sub-groups indented.
 | `tui` | | `cmd_tui` | n/a |
 | `validate` | | `cmd_validate` | no |
 | `verifier` | `report [--target wspr\|psk] / rehabilitate` | `cmd_verifier_*` | rehabilitate mutates |
-| `watch` | `wspr / psk / hfdl / codar / ka9q / uploads / verifier` | dispatches into the matching `cmd_*_watch` | no |
+| `watch` | `wspr / psk / hfdl / codar / hf-gps-tec / mag / ka9q / radiod / uploads / verifier` | dispatches into the matching `cmd_*_watch` | no |
 | `wisdom` | `plan / status` | `cmd_wisdom_*` | plan mutates |
-| `wspr-watch` | | `cmd_wspr_watch` | no |
 
 Notes / leftovers:
 
@@ -58,8 +53,10 @@ Notes / leftovers:
 - `software install` / `software apply` rewrite into the top-level
   `install` / `apply` so the lock + root-check path stays single-keyed.
 - The legacy single-target watch verbs (`psk-watch`, `wspr-watch`,
-  `hfdl-watch`, `codar-watch`, `ka9q-watch`) coexist with the unified
-  `watch <target>` family. Both call the same `cmd_*_watch` handlers.
+  `hfdl-watch`, `codar-watch`, `mag-watch`, `ka9q-watch`) have been
+  removed; all watchers are now reached only via the unified
+  `watch <target>` family, which dispatches into the `cmd_*_watch`
+  handlers.
 
 ---
 
@@ -130,7 +127,7 @@ warrant a separate row.
 | FFTW wisdom (plan / status) | `wisdom plan / status` | `fft_wisdom` | one screen serves both verbs |
 | Per-client SDR source selection (radiod / KiwiSDR feeds) | `sources list/add/remove/apply` | `sources` | list + apply paths surfaced; add/remove still CLI-only |
 | ka9q-radio pin / compat watch | `ka9q-watch`, `watch ka9q` | `ka9q_watch` | — |
-| Activity watch (wspr/psk/hfdl/codar) | `wspr-watch`, `psk-watch`, `hfdl-watch`, `codar-watch`, `watch <t>` | `activity` | live-tail screen with target selector covers all four |
+| Activity watch (wspr/psk/hfdl/codar) | `watch <target>` | `activity` | live-tail screen with target selector covers all four |
 | Uploads activity watch | `watch uploads` | `activity` | reachable via the same screen's target selector |
 | Verifier watch | `watch verifier` | `activity` | reachable via the same screen's target selector |
 | Verifier report / rehabilitate | `verifier report / rehabilitate` | `verifier` | both surfaced on one screen (report top, rehabilitate bottom) |
