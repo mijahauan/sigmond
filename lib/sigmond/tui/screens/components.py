@@ -88,7 +88,8 @@ class _ComponentRow:
     current_ref: str         # e.g. "main@abc1234" or "—"
     version_policy: str      # "latest" | "ignore" | "<ref>"
     enabled: bool = False    # topology.toml: [component.X] enabled = true/false
-    lifecycle: str = "—"    # "running" | "stopped" | "available" | "missing"
+    lifecycle: str = "—"    # "running" | "stopped" | "available" | "missing" | "dormant"
+    gated_reason: str = ""   # when lifecycle=="dormant": absent hardware label
     commit_idx: str = "—"   # total commit count, e.g. "247"
     behind: str = "—"       # commits behind origin/main, e.g. "3" or "0"
     ahead: str = "—"        # local commits not pushed (mirror of behind)
@@ -398,6 +399,19 @@ def _gather(topology_components: dict, do_fetch: bool = False) -> _ComponentsVie
         else:
             lifecycle = "installed" if installed else "missing"
 
+        # Hardware-gated overlay: an enabled core component whose hardware is
+        # absent reads as "dormant", not stopped/running — same source of truth
+        # as `smd validate`'s rule_hardware_gated_core (harmonize.dormant_reason).
+        gated_reason = ""
+        try:
+            from ...harmonize import dormant_reason as _dormant_reason
+            reason = _dormant_reason(name, enabled=enabled)
+            if reason:
+                lifecycle = "dormant"
+                gated_reason = reason
+        except Exception:
+            pass  # best-effort overlay; never break the table
+
         view.rows.append(_ComponentRow(
             name=name,
             kind=entry.kind,
@@ -409,6 +423,7 @@ def _gather(topology_components: dict, do_fetch: bool = False) -> _ComponentsVie
             version_policy=policy,
             enabled=enabled,
             lifecycle=lifecycle,
+            gated_reason=gated_reason,
             commit_idx=commit_idx,
             behind=behind,
             ahead=ahead,
@@ -988,13 +1003,20 @@ class ComponentsScreen(Vertical):
         n_behind   = sum(1 for r in rows if _to_int(r.behind) > 0)
         n_dirty    = sum(1 for r in rows if r.dirty)
         n_ahead    = sum(1 for r in rows if _to_int(r.ahead) > 0)
-        self.query_one("#cv-status", Static).update(
+        dormant    = [r for r in rows if r.lifecycle == "dormant"]
+        status_line = (
             f"{n_total} components  •  "
             f"[red]{n_missing} missing[/]  •  "
             f"[yellow]{n_behind} behind[/]  •  "
             f"[red]{n_dirty} dirty[/]  •  "
             f"[yellow]{n_ahead} ahead[/]"
         )
+        if dormant:
+            # Expected on a host missing optional hardware (e.g. no GPSDO / no
+            # magnetometer) — informational, not an error.
+            detail = ", ".join(f"{r.name} ({r.gated_reason})" for r in dormant)
+            status_line += f"  •  [cyan]{len(dormant)} dormant[/] [dim]— hardware absent: {detail}[/]"
+        self.query_one("#cv-status", Static).update(status_line)
 
         sel = self._selected
         if not sel:
@@ -1027,6 +1049,8 @@ class ComponentsScreen(Vertical):
             return "[green]running[/]"
         if stage == "stopped":
             return "[yellow]stopped[/]"
+        if stage == "dormant":
+            return "[cyan]dormant[/]"
         if stage == "missing":
             return "[red]missing[/]"
         if stage == "available":

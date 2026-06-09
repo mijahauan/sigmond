@@ -889,6 +889,21 @@ def rule_hardware_gated_core(view: SystemView) -> RuleResult:
                       "skipped (no hardware-gated core components enabled)", [])
 
 
+def dormant_reason(component: str, *, enabled: bool):
+    """For per-component status surfaces (TUI/CLI): the human hardware label
+    when ``component`` is an *enabled*, hardware-gated core component whose
+    hardware is absent — i.e. it should read as **dormant** rather than just
+    stopped/running.  Returns None otherwise (not gated, hardware present, not
+    enabled, or readiness unknown).  Shares rule_hardware_gated_core's source of
+    truth so the components table and ``smd validate`` never disagree."""
+    if not enabled:
+        return None
+    label = _HARDWARE_GATED.get(component)
+    if label is None:
+        return None
+    return label if _hardware_ready(component) is False else None
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_frequency_coverage,

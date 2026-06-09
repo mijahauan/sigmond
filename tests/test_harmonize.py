@@ -412,6 +412,25 @@ class TestRuleHardwareGatedCore(unittest.TestCase):
         self.assertIn("skipped", r.message)
         self.assertNotIn("core-but-gated", r.message)
 
+    def test_dormant_reason_for_component_status(self):
+        # The TUI/CLI per-component overlay: enabled + gated + hardware absent
+        # -> the hardware label; everything else -> None.
+        orig = harmonize._hardware_ready
+        self.addCleanup(lambda: setattr(harmonize, "_hardware_ready", orig))
+
+        harmonize._hardware_ready = lambda comp: False   # hardware absent
+        self.assertIsNotNone(harmonize.dormant_reason("mag-recorder", enabled=True))
+        self.assertIsNone(harmonize.dormant_reason("mag-recorder", enabled=False))
+
+        harmonize._hardware_ready = lambda comp: True    # hardware present
+        self.assertIsNone(harmonize.dormant_reason("mag-recorder", enabled=True))
+
+        harmonize._hardware_ready = lambda comp: None    # unknown
+        self.assertIsNone(harmonize.dormant_reason("mag-recorder", enabled=True))
+
+        harmonize._hardware_ready = lambda comp: False
+        self.assertIsNone(harmonize.dormant_reason("ka9q-radio", enabled=True))  # not gated
+
     def test_gpsdo_monitor_is_registered_and_gated(self):
         # gpsdo-monitor is hardware-gated too (Leo Bodnar GPSDO).  Enabled
         # with hardware absent -> core-but-gated dormant, like mag-recorder.
