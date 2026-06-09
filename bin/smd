@@ -409,7 +409,14 @@ def _need_root(cmd_name: str) -> bool:
     if sudo:
         # Replace the current process — sudo prompts for password if
         # needed, then runs the same script with the same args as root.
-        os.execvp(sudo, [sudo, '--', sys.argv[0], *sys.argv[1:]])
+        # Route through `env` so the re-exec carries SIGMOND_ALLOW_SUDO=1
+        # (sudo's env_reset would otherwise strip it): this is smd's OWN
+        # self-elevation, so the top-of-main guard must let it through —
+        # the marker is what distinguishes it from a human typing `sudo smd`.
+        # The flag inherits to every child process, so a root smd's sub-smd
+        # calls (e.g. bringup's install steps) are covered too.
+        os.execvp(sudo, [sudo, '--', 'env', 'SIGMOND_ALLOW_SUDO=1',
+                         sys.argv[0], *sys.argv[1:]])
         # execvp doesn't return on success; if it does, fall through.
     print(f'smd {cmd_name}: must run as root (sudo not found on PATH)',
           file=sys.stderr)
@@ -2593,9 +2600,13 @@ def cmd_bringup(args) -> int:
         _info('(dry-run — no changes made)')
         return 0
 
-    # No root gate: bringup runs as the operator.  Each `smd ...` sub-step runs
-    # as the operator too and self-elevates its own privileged operations (so we
-    # never `sudo smd`); only the raw `systemctl` steps are run via sudo here.
+    # Elevate once, like every other mutating verb: _need_root re-execs the
+    # whole bringup under sudo (carrying SIGMOND_ALLOW_SUDO so the guard lets it
+    # and its sub-smd steps through).  The operator never types `sudo` — smd
+    # does it.  Sub-steps then run already-as-root (sudo=False below).
+    if _need_root('bringup'):
+        return 1
+
     for st in plan.steps:
         if st.kind == 'note':
             _info(st.label)
@@ -2626,10 +2637,7 @@ def cmd_bringup(args) -> int:
             _heading(st.label)
         else:
             _info(f'» {st.label}')
-        # `smd ...` steps run as the operator (they self-elevate internally);
-        # raw steps (e.g. `systemctl start sigmond-wisdom.service`) need sudo.
-        is_smd_step = bool(st.argv) and str(st.argv[0]) == smd_bin
-        r = _run(st.argv, capture=False, sudo=not is_smd_step)
+        r = _run(st.argv, capture=False, sudo=False)
         if getattr(r, 'returncode', 0) != 0 and not st.background:
             _warn(f'step exited {r.returncode}: {" ".join(st.argv)}')
         if st.settle_s:
@@ -13484,8 +13492,8 @@ def main() -> int:
     # without SUDO_USER and are unaffected.
     if (os.geteuid() == 0 and os.environ.get('SUDO_USER')
             and not os.environ.get('SIGMOND_ALLOW_SUDO')):
-        _err("don't run smd under sudo — it elevates each privileged step itself. "
-             "Re-run as yourself:  " + ' '.join(['smd', *sys.argv[1:]]))
+        _err("don't run smd under sudo — it elevates itself when a verb needs "
+             "root.  Re-run as yourself:  " + ' '.join(['smd', *sys.argv[1:]]))
         return 1
 
     if not args.command:
