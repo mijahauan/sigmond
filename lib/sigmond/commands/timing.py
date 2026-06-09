@@ -1,8 +1,8 @@
-"""smd timing — single idempotent reconciler for the GPSDO -> gpsd -> chrony ->
+"""smd admin timing — single idempotent reconciler for the GPSDO -> gpsd -> chrony ->
 hf-timestd timing chain (docs/timing-chain-architecture.md, step 3).
 
-Replaces the per-component watchdogs.  `smd timing [status]` reports chain
-health; `smd timing reconcile` applies OWN-ONLY remediation — it NEVER restarts
+Replaces the per-component watchdogs.  `smd admin timing [status]` reports chain
+health; `smd admin timing reconcile` applies OWN-ONLY remediation — it NEVER restarts
 a shared dependency to fix a downstream consumer (the cascade that put the GPS
 reference on internet NTP).  It is the single actor allowed to act on the chain.
 """
@@ -231,7 +231,7 @@ def cmd_timing(args) -> int:
 
     if verb == 'reconcile':
         if os.geteuid() != 0:
-            err('reconcile needs root — run: sudo smd timing reconcile')
+            err('reconcile needs root — run: sudo smd admin timing reconcile')
             return 1
         heading('reconcile (own-only)')
         for a in reconcile(facts, dry_run=getattr(args, 'dry_run', False)):
@@ -239,7 +239,7 @@ def cmd_timing(args) -> int:
         return 0
 
     if fails:
-        warn(f'{len(fails)} link(s) failing — fix: sudo smd timing reconcile')
+        warn(f'{len(fails)} link(s) failing — fix: sudo smd admin timing reconcile')
         return 1
     ok('timing chain healthy')
     return 0

@@ -46,7 +46,7 @@ AFFINITY_UNITS = {
     # decoder clients — previously marked "manages itself" but in
     # practice they were left unconfined and ran on radiod's CPUs,
     # polluting radiod's L3 cache and causing USB packet drops on
-    # bee1 2026-05-09.  Adding them here lets `smd diag cpu-affinity
+    # bee1 2026-05-09.  Adding them here lets `smd admin diag cpu-affinity
     # --apply` write the standard drop-in alongside everything else.
     # wspr-recorder was missing from this list (regression: its decode
     # threads ran on radiod's cores 0-1 — the exact contention this map
@@ -577,7 +577,7 @@ def render_drop_in(cpus: set, label: str) -> str:
     return textwrap.dedent(f"""\
         # CPU affinity managed by smd — do not edit manually.
         # Role: {label}
-        # Regenerate: smd diag cpu-affinity --apply
+        # Regenerate: smd admin diag cpu-affinity --apply
         [Service]
         CPUAffinity=
         CPUAffinity={cpu_str}
@@ -795,7 +795,7 @@ def _find_smd_drop_in(unit: str) -> Optional[Path]:
 
     Checks the per-instance drop-in first, then the template-level drop-in.
     Template-level drop-ins (e.g. wd-decode@.service.d/) are written by
-    ``smd diag cpu-affinity --apply`` and apply to all instances of that template.
+    ``smd admin diag cpu-affinity --apply`` and apply to all instances of that template.
     """
     inst_path = _smd_drop_in_path(unit)
     if inst_path.exists():
@@ -1261,7 +1261,7 @@ def build_affinity_report(
 
 
 # ---------------------------------------------------------------------------
-# Serialization — JSON-safe dict for smd diag cpu-affinity --json and
+# Serialization — JSON-safe dict for smd admin diag cpu-affinity --json and
 # future consumers.  Sets become sorted lists; frozensets in CacheIsland
 # are flattened.  Thread groups are summarized by count rather than dumped
 # in full — the text renderer is the right tool for per-thread detail.

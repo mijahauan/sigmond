@@ -1,7 +1,7 @@
-"""CPU frequency screen — view + apply for `smd diag cpu-freq`.
+"""CPU frequency screen — view + apply for `smd admin diag cpu-freq`.
 
 Shows the [cpu_freq] policy from topology.toml and each CPU's current
-scaling_max_freq against it.  Apply runs `smd diag cpu-freq
+scaling_max_freq against it.  Apply runs `smd admin diag cpu-freq
 --apply` via a confirm-modal-gated button (auto-refresh on success).
 
 Motivation sits in the CPU-affinity memory: radiod cores need high
@@ -153,7 +153,7 @@ class CPUFreqScreen(Vertical):
             self._run_apply()
 
     def _run_apply(self) -> None:
-        cmd = [_smd_binary(), 'diag', 'cpu-freq', '--apply']
+        cmd = [_smd_binary(), 'admin', 'diag', 'cpu-freq', '--apply']
         confirm_and_run(
             self.app,
             title="Apply CPU frequency policy?",

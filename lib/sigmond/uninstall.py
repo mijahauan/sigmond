@@ -35,7 +35,7 @@ the destinations.  Component-owned dirs (/etc/radio, /var/lib/ka9q-radio,
 shared dirs (/usr/local/{bin,sbin}, /etc/systemd/system, udev/sysctl/...) are
 removed one by one so the shared dir itself is never touched.
 
-Plan-first ALWAYS.  ``smd uninstall`` prints the plan and stops; ``--yes``
+Plan-first ALWAYS.  ``smd admin uninstall`` prints the plan and stops; ``--yes``
 executes.  ``--dry-run`` is the explicit no-op form.  Refuses non-root.
 """
 

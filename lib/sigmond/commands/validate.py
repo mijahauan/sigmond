@@ -1,4 +1,4 @@
-"""`smd validate` — runs harmonization rules read-only."""
+"""`smd admin validate` — runs harmonization rules read-only."""
 
 from __future__ import annotations
 

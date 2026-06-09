@@ -458,7 +458,7 @@ class KindSpec:
     tui_extra: Optional[Callable[[Any], str]] = None       # TUI extras-column render
 
 
-# Insertion order is the canonical display order for `smd environment list`
+# Insertion order is the canonical display order for `smd admin environment list`
 # (the order tuple in commands/environment.py used to be hand-maintained;
 # now it derives from this dict's keys).
 REGISTRY: dict = {

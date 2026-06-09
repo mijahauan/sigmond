@@ -1,8 +1,8 @@
-"""Diag net screen — TUI counterpart to `smd diag net`.
+"""Diag net screen — TUI counterpart to `smd admin diag net`.
 
 Classifies the host's network environment for multi-host radiod safety.
 Tier 1 checks run unprivileged; Tier 2 (raw-socket IGMP listen) needs
-root.  This screen runs `smd diag net --json` in a worker.
+root.  This screen runs `smd admin diag net --json` in a worker.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def _smd_binary() -> str:
 
 
 def _run_diag(listen_s: int, use_sudo: bool) -> dict:
-    cmd = [_smd_binary(), 'diag', 'net', '--json',
+    cmd = [_smd_binary(), 'admin', 'diag', 'net', '--json',
            '--listen', str(listen_s)]
     argv = ['sudo', '-n', *cmd] if use_sudo else cmd
     try:
@@ -37,12 +37,12 @@ def _run_diag(listen_s: int, use_sudo: bool) -> dict:
     except (OSError, subprocess.SubprocessError) as exc:
         return {"error": f"launch failed: {exc}"}
     except subprocess.TimeoutExpired:
-        return {"error": "smd diag net timed out"}
+        return {"error": "smd admin diag net timed out"}
     if r.returncode != 0:
         msg = (r.stderr or r.stdout or "").strip()[:400]
         if 'sudo: a password is required' in msg or 'sudo:' in msg[:10]:
             return {"error": "sudo requires a password — "
-                    "run `smd diag net` in a terminal for Tier-2 listen"}
+                    "run `smd admin diag net` in a terminal for Tier-2 listen"}
         return {"error": msg or f"exit {r.returncode}"}
     try:
         return {"payload": json.loads(r.stdout)}

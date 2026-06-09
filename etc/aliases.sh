@@ -23,3 +23,24 @@ tm() {
         tmux new-session -s "$session"
     fi
 }
+
+# --- smd bash tab-completion --------------------------------------------------
+# Auto-load smd's tab-completion in every shell, cached.  The cache is
+# regenerated whenever the smd executable is newer than it (e.g. after a
+# `git pull` or an edit to bin/smd), so new shells always get current completion
+# at near-zero startup cost (generating it fresh costs ~0.2s; sourcing the cache
+# is instant).  Sourcing the completion also defines the `smdrefresh`,
+# `smdt`, and `smdtui` helpers that ship inside it.
+#
+# To refresh the CURRENT shell after editing smd without opening a new terminal,
+# run:  smdrefresh   (defined by the sourced completion script).
+if command -v smd >/dev/null 2>&1; then
+    _smd_completion_cache="${XDG_CACHE_HOME:-$HOME/.cache}/smd/completion.bash"
+    _smd_bin="$(readlink -f "$(command -v smd)" 2>/dev/null || command -v smd)"
+    if [[ ! -s "$_smd_completion_cache" || "$_smd_bin" -nt "$_smd_completion_cache" ]]; then
+        mkdir -p "$(dirname "$_smd_completion_cache")" 2>/dev/null \
+            && smd admin completion bash > "$_smd_completion_cache" 2>/dev/null
+    fi
+    [[ -s "$_smd_completion_cache" ]] && source "$_smd_completion_cache"
+    unset _smd_completion_cache _smd_bin
+fi

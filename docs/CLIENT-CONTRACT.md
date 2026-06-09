@@ -28,7 +28,7 @@ v0.8 adds:
   and §4.  Every spot row gains a first-class `reporter_id`
   column.  The legacy `instance` field (== `radiod_id`) is
   deprecated; will be removed when MULTI-INSTANCE-ARCHITECTURE.md
-  Phase 9 ships (a release after Phase 8's `smd instance
+  Phase 9 ships (a release after Phase 8's `smd admin instance
   migrate` has been operator-driven on enough hosts).  WSPRnet
   upload boundary renders the reporter ID's first `-` as `/`
   (`AC0G-B1` → `AC0G/B1`); sigmond-internal surfaces never
@@ -47,7 +47,7 @@ v0.8 adds:
   are not hardware-gated omit the field.  This lets a client
   detect its OWN hardware; sigmond consults it (install-orchestration
   Phase D) to skip an absent-hardware client during `smd bringup`
-  and to mark it core-but-dormant in `smd validate`, instead of
+  and to mark it core-but-dormant in `smd admin validate`, instead of
   hard-coding USB IDs.  Absent field = "not gated / unknown":
   sigmond must not treat a missing field as hardware-absent.  The
   reference implementation is `mag-recorder` (device-path / simulator
@@ -108,7 +108,7 @@ v0.5 adds:
   unix-socket HTTP/JSON endpoint with mandatory `/healthz`, `/readyz`,
   `/status`, `/metrics`, plus optional `/channels`, `/events`,
   `/reload`.  `/status` schema is the basis for inter-client
-  diagnostics in `smd status` / `smd diag` (multicast collisions,
+  diagnostics in `smd status` / `smd admin diag` (multicast collisions,
   IGMP-snooping silent failure, shared-spool exhaustion, CPU budget
   breach, radiod loss, back-pressure cascade).
 - **§14 (new) — configuration interview.**  `[contract.config]` block
@@ -164,7 +164,7 @@ v0.3 adds:
   new `log_paths` object.
 - **§11 (new) — runtime log level controlled by sigmond.**  Sigmond
   publishes `<CLIENT>_LOG_LEVEL` in `coordination.env`; clients honor
-  it on startup and on SIGHUP.  Enables `smd log set-level <client> DEBUG`
+  it on startup and on SIGHUP.  Enables `smd admin log set-level <client> DEBUG`
   without config edits or restarts.
 
 Previous v0.2 additions (unchanged):
@@ -289,7 +289,7 @@ bee3, the reference implementation — see §9):
 `contract_version` is the version of this document the client was built
 against. Sigmond compares it to its own supported version and warns on
 mismatch (see Migration and versioning, below). `git` is optional but
-recommended — it lets `smd diag` answer "what's running?" without
+recommended — it lets `smd admin diag` answer "what's running?" without
 shelling into the client.
 
 **Per-instance v0.5 fields:**
@@ -718,7 +718,7 @@ multicast addresses on a client's behalf.  Sigmond MAY read each
 client's resolved destination from the `inventory --json` output and
 use it for diagnostics, routing, or collision detection.  If sigmond
 detects two clients claiming the same address, that is a hard error
-surfaced through `smd diag` — sigmond does not silently reassign.
+surfaced through `smd admin diag` — sigmond does not silently reassign.
 
 **Inventory surface.**  Every instance entry in `<client> inventory --json`
 MUST include a `data_destination` field — the multicast IP the instance
@@ -779,7 +779,7 @@ The key format is `RADIOD_<id>_CHAIN_DELAY_NS`, matching sigmond's
 existing convention for per-radiod facts (see `RADIOD_<id>_STATUS`,
 `RADIOD_<id>_SAMPRATE`).  When the calibrating hf-timestd instance
 locks a new chain-delay value, it calls into sigmond via a hook
-(`smd radiod-fact set <id> chain_delay_ns <value>`, or equivalent
+(`smd admin radiod-fact set <id> chain_delay_ns <value>`, or equivalent
 write to coordination.env — mechanism TBD in sigmond Phase 4); sigmond
 rewrites coordination.env atomically and sends SIGHUP (or systemd
 reload) to every service whose unit file has
@@ -813,7 +813,7 @@ as a new field:
 
 A `null` or missing value means "no correction is being applied"
 (either sigmond has not published one, or the client is running
-standalone without the hook).  Sigmond's `smd diag` surfaces any
+standalone without the hook).  Sigmond's `smd admin diag` surfaces any
 mismatch across peer clients of the same radiod.
 
 **Standalone behaviour.**  Without sigmond, each client reads
@@ -865,13 +865,13 @@ with no matching `RADIOD_*_CHAIN_DELAY_NS` in coordination.env.
 
 ### 10. Logging discipline and discovery (v0.3)
 
-Sigmond needs to locate a client's logs for diagnostics (`smd log`,
-`smd diag`) without guessing directory layouts.  This section
+Sigmond needs to locate a client's logs for diagnostics (`smd admin log`,
+`smd admin diag`) without guessing directory layouts.  This section
 standardizes where clients log and how they tell sigmond about it.
 
 **Primary log channel.**  Clients MUST log normal operation to stderr.
 When running under systemd, stderr is captured by the journal.
-`smd log <client>` is then a thin wrapper around
+`smd admin log <client>` is then a thin wrapper around
 `journalctl -u <unit>`.
 
 **File logs (optional).**  Clients MAY additionally write persistent
@@ -902,10 +902,10 @@ do:
 
 The keys inside `log_paths` are client-defined; sigmond treats the
 object as opaque and presents all paths to the operator via
-`smd log <client> --files`.  If a client writes no file logs,
+`smd admin log <client> --files`.  If a client writes no file logs,
 `log_paths` SHOULD be omitted (not an empty object).
 
-**Sigmond side.**  `smd log <client>` defaults to
+**Sigmond side.**  `smd admin log <client>` defaults to
 `journalctl -u <unit> --follow`.  With `--files`, it reads
 `log_paths` from the client's inventory and tails the named files.
 
@@ -949,7 +949,7 @@ on startup using this precedence (highest-priority first):
 Clients running as long-lived daemons MUST install a `SIGHUP` handler
 that re-reads the environment variables (steps 2 and 3) and re-applies
 the resolved level to the root logger without restarting RTP streams
-or other active work.  This makes `smd log set-level <client> DEBUG` a
+or other active work.  This makes `smd admin log set-level <client> DEBUG` a
 one-step operation: sigmond rewrites `coordination.env` and sends
 `SIGHUP` to the unit.
 
@@ -964,7 +964,7 @@ log level in `inventory --json` as a top-level field:
 }
 ```
 
-This lets `smd diag` show at a glance which clients are running in
+This lets `smd admin diag` show at a glance which clients are running in
 debug mode without parsing logs.
 
 **Interaction with §3 stdout cleanliness.**  The log-level mechanism
@@ -1165,7 +1165,7 @@ time.  The fix was a same-day PyPI publish.  A version check in
 ### 13. Control surface (v0.5)
 
 Each running client exposes a uniform runtime view that sigmond and
-`smd status` / `smd diag` can read without per-client knowledge.
+`smd status` / `smd admin diag` can read without per-client knowledge.
 This complements §3's `inventory --json` (the static, what-could-be
 view) with a live, what-is-happening view.
 
@@ -1517,7 +1517,7 @@ it.
 
 A v0.5+ client MAY add a `commons` block to `inventory --json`
 reporting the values it currently has set for variables in the
-§14.3 bag.  This is the basis for `smd validate` to detect drift
+§14.3 bag.  This is the basis for `smd admin validate` to detect drift
 between a client's stored config and `coordination.toml [host]`.
 Drift becomes a validation warning, never a silent rewrite —
 sigmond never edits client files.
@@ -1541,12 +1541,12 @@ its GNSS-VTEC endpoint, which sigmond surfaces as
 
 #### 14.6 Workflow ordering and reporter naming
 
-Sigmond's situational-awareness inventory (`smd environment`) and
+Sigmond's situational-awareness inventory (`smd admin environment`) and
 the operator's `coordination.toml` together establish *which
 radiods exist* before any client is configured.  The intended
 workflow is:
 
-1. **Discover** — `smd environment probe` finds reachable peers.
+1. **Discover** — `smd admin environment probe` finds reachable peers.
 2. **Declare** — operator records radiod(s) in
    `coordination.toml [radiod.<id>]`.
 3. **Configure** — `smd config init|edit <client> [<instance>]`
@@ -1825,7 +1825,7 @@ A direct-radiod client MUST:
    collision check (§7) reads `data_destination` from inventory
    and flags duplicates across peers.  The client is responsible
    for the picking; sigmond is responsible for detecting the
-   collision and surfacing it through `smd diag`.  Acceptable
+   collision and surfacing it through `smd admin diag`.  Acceptable
    picking strategies:
    - Read what the running radiod assigned and report it
      (recommended).
@@ -1937,7 +1937,7 @@ today:
    destinations (e.g. psws.eng.ua.edu).
 
 This section makes the surface declarative so sigmond can budget
-disk and surface backpressure in `smd diag`.
+disk and surface backpressure in `smd admin diag`.
 
 #### 17.2 Why this exists
 
@@ -2069,7 +2069,7 @@ Sigmond uses `data_sinks` for:
   grouped by physical filesystem (for file sinks) and by service
   backend (for service sinks); compares against `[disk_budget]`
   thresholds.
-- **`smd diag` annotations.**  Surfaces `health = "unreachable"`
+- **`smd admin diag` annotations.**  Surfaces `health = "unreachable"`
   or `"stale-schema"` for service sinks; surfaces missing-path or
   permission-denied for file sinks.
 - **Status output.**  `smd status <client>` may list one row per
@@ -2355,7 +2355,7 @@ both, neither, or just one — the four combinations are all legal
 Sigmond:
 
 - Surfaces `timing_authority_applied` per client in `smd status`
-  and `smd diag`.
+  and `smd admin diag`.
 - Cross-references peer clients of the same radiod: if one peer is
   authority-corrected and another is RTP-default, that's a
   degraded but legal state; sigmond reports it for operator
@@ -2576,7 +2576,7 @@ of v0.8** but remains in row schemas for backwards compatibility
 during the deprecation window.  It will be removed when sigmond's
 MULTI-INSTANCE-ARCHITECTURE.md Phase 9 ships (one release after
 operator hosts have actually migrated via Phase 8's
-`smd instance migrate`).
+`smd admin instance migrate`).
 
 ### §19.4 — WSPRnet upload boundary (MUST for WSPRnet-bound paths)
 
@@ -2603,15 +2603,15 @@ re-implementing the replace.
 
 A reporter's sources selection lives at
 `/etc/sigmond/clients/<client>@<reporter-id>.sources.toml` (per
-sigmond's MULTI-INSTANCE-ARCHITECTURE.md §4).  The `smd sources`
-CLI accepts the per-instance syntax (`smd sources add
+sigmond's MULTI-INSTANCE-ARCHITECTURE.md §4).  The `smd admin sources`
+CLI accepts the per-instance syntax (`smd admin sources add
 <client>@<reporter-id> <kind>:<id>`) silently; the bare
 `<client>` form is preserved for legacy single-instance
 deployments during the deprecation window.
 
 ### §19.6 — Migration path
 
-Sigmond Phase 8 (`smd instance migrate`) is the one-shot
+Sigmond Phase 8 (`smd admin instance migrate`) is the one-shot
 interactive tool that flips an operating host from the legacy
 `<client>@<radiod-id>.service` shape to
 `<client>@<reporter-id>.service`.  Clients do not need to do

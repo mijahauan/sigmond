@@ -196,10 +196,10 @@ sudo smd list --catalog
 sudo smd status
 
 # Run diagnostics
-sudo smd diag
+sudo smd admin diag
 ```
 
-Expected `smd diag` output on a fresh install (no components enabled yet):
+Expected `smd admin diag` output on a fresh install (no components enabled yet):
 
 ```
 ✓  network: wsprnet.org reachable
@@ -275,9 +275,9 @@ enabled = false        # set true if you want WSPR audio capture
 | `sudo smd stop` | Stop all enabled components |
 | `sudo smd restart` | Restart all enabled components |
 | `sudo smd status` | Show service health |
-| `sudo smd log <client>` | Follow logs for a client |
-| `sudo smd diag` | Run cross-component diagnostics |
-| `sudo smd validate` | Check cross-client harmonization rules |
+| `sudo smd admin log <client>` | Follow logs for a client |
+| `sudo smd admin diag` | Run cross-component diagnostics |
+| `sudo smd admin validate` | Check cross-client harmonization rules |
 | `smd list` | Show per-component status (git ref, upstream divergence, version policy) |
 | `smd component update [<name>]` | Pull latest code per topology version policy and reapply (was `smd list --update`; root) |
 | `smd list --catalog` | Show full component catalog (what could be installed) |

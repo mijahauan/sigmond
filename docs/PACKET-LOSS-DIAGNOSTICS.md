@@ -31,8 +31,8 @@ irq_pin_drift_allowed = false                  # IRQs must land on the cores abo
 Then:
 
 ```bash
-smd environment probe --source=local_resources
-smd environment           # see healthy/degraded for local_system
+smd admin environment probe --source=local_resources
+smd admin environment           # see healthy/degraded for local_system
 ```
 
 Run it twice — the first probe records a baseline snapshot, the second
@@ -56,7 +56,7 @@ groups.  Each maps to a packet-loss suspect.
 
 ## How to read the output
 
-`smd environment --json | jq '.observations[] | select(.source=="local_resources")'`
+`smd admin environment --json | jq '.observations[] | select(.source=="local_resources")'`
 gives the raw probe output.  In a healthy state the rates are zero and
 `observed_cores` matches `expected_cores` for every declared handler.
 

@@ -3,7 +3,7 @@
 Mounts SigmondApp via Textual's Pilot test harness and verifies:
 
   1. Vocabulary alignment — the three CLI-V2-SPEC-sensitive code paths
-     (`smd log set-level`, `smd component update`, `smd watch ka9q`)
+     (`smd admin log set-level`, `smd component update`, `smd watch ka9q`)
      emit the canonical argv when their screen actions fire.
   2. Per-instance dropdowns — the six MULTI-INSTANCE-ARCHITECTURE §8
      screens (activity / verifier / logs / lifecycle / client_config
@@ -11,7 +11,7 @@ Mounts SigmondApp via Textual's Pilot test harness and verifies:
      expected ID and their option lists contain a real reporter_id
      when the host has migrated instances.
 
-Run after a `smd instance migrate` (or any TUI vocabulary change) to
+Run after a `smd admin instance migrate` (or any TUI vocabulary change) to
 confirm the screens still match what the CLI accepts.
 
 Usage:
@@ -94,8 +94,9 @@ async def walk() -> None:
                     record("logs: set-level argv", FAIL, "no confirm_and_run call")
                 else:
                     argv = captured[0]
-                    ok = (len(argv) >= 5 and argv[1] == "log"
-                          and argv[2] == "set-level" and argv[3] == installed[0])
+                    ok = (len(argv) >= 6 and argv[1] == "admin"
+                          and argv[2] == "log" and argv[3] == "set-level"
+                          and argv[4] == installed[0])
                     record("logs: set-level argv", PASS if ok else FAIL,
                            " ".join(str(x) for x in argv))
 
@@ -290,7 +291,7 @@ async def walk() -> None:
                             for i in range(table.row_count)]
                     if table.row_count == 0:
                         record("instance: DataTable populated", SKIP,
-                               "no instances on host (run `sudo smd instance "
+                               "no instances on host (run `sudo smd admin instance "
                                "migrate --yes` to populate)")
                     else:
                         record("instance: DataTable populated", PASS,

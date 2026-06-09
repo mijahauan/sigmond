@@ -108,7 +108,7 @@ Stage 3b mag-recorder  <-- INDEPENDENT track: no radiod, no wisdom, runs anytime
                                      -- checkpoint: mag validates --
 Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remote);
                  order: igmp-querier -> radiod -> hf-timestd -> wspr/psk;  mag-recorder independent
-                                     -- final: smd validate all green --
+                                     -- final: smd admin validate all green --
 ```
 
 ### Conditional branches
@@ -129,7 +129,7 @@ Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remot
 | Stage 1 | radiod configured; tuning applied; wisdom launched | **hard-stop** |
 | Stage 2 | hf-timestd recording GRAPE; timing endpoint advertised | advisory |
 | Stage 3a/b | each client passes its own `validate` / self-describe | advisory |
-| Stage 4 | `smd validate` board all green | advisory (report) |
+| Stage 4 | `smd admin validate` board all green | advisory (report) |
 
 ## 7. New components to build
 
@@ -201,7 +201,7 @@ Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remot
   `ka9q-radio`, which has no inventory CLI, so sigmond detects the RX888
   itself). `smd bringup` preflight **skips** an absent-hardware client
   (`_detect_magnetometer`/`_detect_local_sdr` now delegate to the shared probe)
-  and `smd validate`'s `rule_hardware_gated_core` marks an enabled-but-absent
+  and `smd admin validate`'s `rule_hardware_gated_core` marks an enabled-but-absent
   core client **core-but-dormant** instead of letting it vanish. `None`
   (not gated / unknown) is never treated as absent.
   `hardware_present` now covers **mag-recorder** (→RM3100) and
@@ -228,7 +228,7 @@ and `--non-interactive` appending the flag to config steps.
 | `--non-interactive --dry-run` | every `configure` step tagged `(non-interactive)`; install/tune/start/checkpoint steps unchanged |
 | `--with-optional --dry-run` | `install ka9q-web` added to Stage 1 (no configure step — it has no `[contract.config]`) |
 
-**Other:** `smd validate` remains 11/0/0 after all Phase A–C changes.
+**Other:** `smd admin validate` remains 11/0/0 after all Phase A–C changes.
 hf-timestd's `setup-station.sh --non-interactive` was run for real against a
 temp `--config` path and produced a complete config with callsign / grid /
 location / status populated from the §14 env bag.

@@ -719,7 +719,7 @@ def rule_data_path_upstream(view: SystemView) -> RuleResult:
 def rule_timing_reference(view: SystemView) -> RuleResult:
     """Runtime health of the local GPS timing-reference chain
     (GPSDO -> gpsd -> chrony -> hf-timestd).  Observability only; remediation
-    lives in `smd timing reconcile`.  See docs/timing-chain-architecture.md.
+    lives in `smd admin timing reconcile`.  See docs/timing-chain-architecture.md.
     Skipped on hosts with no local gpsd (remote-radiod / no GPS)."""
     if not (shutil.which("gpsd") or Path("/usr/sbin/gpsd").exists()):
         return RuleResult("timing_reference", "pass",
@@ -740,7 +740,7 @@ def rule_timing_reference(view: SystemView) -> RuleResult:
     if fails:
         detail = "; ".join(f"{l.name}: {l.detail}" for l in fails)
         return RuleResult("timing_reference", "fail",
-                          f"{detail}.  Remediate: sudo smd timing reconcile",
+                          f"{detail}.  Remediate: sudo smd admin timing reconcile",
                           [l.name for l in fails])
     if warns:
         return RuleResult("timing_reference", "warn",

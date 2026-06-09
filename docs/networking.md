@@ -26,11 +26,11 @@ No querier = no refresh = streams die.
 
 ---
 
-## Diagnose: `smd diag net`
+## Diagnose: `smd admin diag net`
 
 ```
-smd diag net              # unprivileged; uses /proc/net/igmp state
-sudo smd diag net         # adds a passive raw-socket listen for queries
+smd admin diag net              # unprivileged; uses /proc/net/igmp state
+sudo smd admin diag net         # adds a passive raw-socket listen for queries
 ```
 
 The command classifies your host into one of these environments:
@@ -122,7 +122,7 @@ sudo systemctl enable --now igmp-querier
 Verify it's active from another host on the same segment:
 
 ```
-sudo smd diag net --listen 130          # should now report a querier
+sudo smd admin diag net --listen 130          # should now report a querier
 ```
 
 Uninstall:
@@ -136,7 +136,7 @@ sudo /opt/git/sigmond/igmp-querier/uninstall.sh
 - **Enterprise / campus LANs.** Your IT already has one; running
   another can cause querier-election churn or violate policy.
 - **Home networks with an existing L3 router that queries.** Check
-  `sudo smd diag net` first; if a querier is reported, don't add
+  `sudo smd admin diag net` first; if a querier is reported, don't add
   another.
 - **Hosts that reboot often.** Pick a host that stays up — if the
   querier disappears for longer than the snoop timeout (~260 s),
@@ -155,7 +155,7 @@ multicast packets travel:
   willing to have flood multicast on every port.
 - `ttl ≥ 2` → crosses routers. Rarely what you want for ka9q-radio.
 
-**Default to `ttl = 0`.** Only raise it after `smd diag net` returns
+**Default to `ttl = 0`.** Only raise it after `smd admin diag net` returns
 `lan-capable` or after you've explicitly installed a querier.
 
 ---
@@ -167,5 +167,5 @@ consumers, no per-client overhead. But correct L2 multicast handling
 requires a querier (RFC 2236 §8), and consumer networking gear often
 ships snooping-on + querier-off, which is the one combination that
 silently breaks. Sigmond can't detect and fix your switch for you, but
-`smd diag net` will tell you which of the five environments you're in
+`smd admin diag net` will tell you which of the five environments you're in
 and what the one correct next step is.

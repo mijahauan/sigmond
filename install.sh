@@ -409,7 +409,7 @@ ok "Python: $($PYTHON3 --version)"
 # world-readable so operators can `sqlite3 sink.db` read-only without joining
 # the group.  Matches lib/sigmond/storage_migrate.py SINK_DIR_MODE/SINK_GROUP
 # — without this match, the producer-side writer falls back to silent noop
-# and `smd storage migrate-to-sqlite` is the only thing that re-applies the
+# and `smd admin storage migrate-to-sqlite` is the only thing that re-applies the
 # perms (it shouldn't be load-bearing for a greenfield install).
 #
 # /var/log/sigmond stays group-only (2770 sigmond:sigmond) — no need to
@@ -604,7 +604,7 @@ ok "sigmond-shm-precreate symlink installed"
 $SUDO systemctl daemon-reload
 # Enable just the unified trim timer.  ConditionPathExists=/var/lib/sigmond/sink.db
 # in the service unit keeps it inactive until a producer writes — and even
-# with sink.db pre-created, `smd storage trim --all --yes` is a no-op on an
+# with sink.db pre-created, `smd admin storage trim --all --yes` is a no-op on an
 # empty db.  Safe to enable on greenfield.
 # `enable --now` STARTS the timer immediately (not just at next boot).
 # Combined with the unit's OnActiveSec=10min, this guarantees a first

@@ -1,4 +1,4 @@
-"""`smd verifier report --target timestd` — local-product audit of
+"""`smd admin verifier report --target timestd` — local-product audit of
 the hf-timestd metrology pipeline.
 
 Unlike wspr/psk, hf-timestd does NOT stage through sigmond's
@@ -181,11 +181,11 @@ def _format_per_channel(stats: List[ChannelStats], now: datetime,
 
 
 def cmd_verifier_report_timestd(args) -> int:
-    """`smd verifier report --target timestd` entry point."""
+    """`smd admin verifier report --target timestd` entry point."""
     try:
         window = _parse_window(args.window)
     except ValueError as exc:
-        print(f"smd verifier report: {exc}", file=sys.stderr)
+        print(f"smd admin verifier report: {exc}", file=sys.stderr)
         return 2
 
     db_path = Path(
@@ -193,7 +193,7 @@ def cmd_verifier_report_timestd(args) -> int:
     )
     if not db_path.exists():
         print(
-            f"smd verifier report: timestd db not found at {db_path}",
+            f"smd admin verifier report: timestd db not found at {db_path}",
             file=sys.stderr,
         )
         return 2
@@ -202,7 +202,7 @@ def cmd_verifier_report_timestd(args) -> int:
             f"file:{db_path}?mode=ro", uri=True, timeout=5.0
         )
     except sqlite3.Error as exc:
-        print(f"smd verifier report: open timestd db failed: {exc}",
+        print(f"smd admin verifier report: open timestd db failed: {exc}",
               file=sys.stderr)
         return 2
 

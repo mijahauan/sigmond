@@ -2,7 +2,7 @@
 
 Implements MULTI-INSTANCE-ARCHITECTURE.md §3 (reporter ID format),
 §4 (canonical file layout), and the file-side actions for §6
-(`smd instance add` / `smd instance remove`).
+(`smd admin instance add` / `smd admin instance remove`).
 
 An *instance* is one deployment context of a recorder client, keyed by
 operator-meaningful reporter ID (e.g. `AC0G-B1`).  Each instance owns:
@@ -173,7 +173,7 @@ def instance_paths(client: str, reporter_id: str) -> InstancePaths:
 
 
 # ---------------------------------------------------------------------------
-# Instance enumeration (`smd instance list`)
+# Instance enumeration (`smd admin instance list`)
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -263,7 +263,7 @@ def list_instances(catalog_clients: Optional[list[str]] = None) -> list[Instance
     stems aren't valid reporter IDs (e.g. the legacy
     `wspr-recorder-config.toml` shape) are silently skipped — those
     are pre-multi-instance deployments that haven't been migrated
-    yet, handled by `smd instance migrate`.
+    yet, handled by `smd admin instance migrate`.
 
     Operator-callable: when /etc/<client>/ is service-user-owned
     (mode 0750 — hf-gps-tec, mag-recorder, hf-timestd, …) the glob
@@ -317,7 +317,7 @@ def list_instances(catalog_clients: Optional[list[str]] = None) -> list[Instance
             ))
 
         # Fallback path: directory unreadable (or no .toml found yet but
-        # the operator may have units enabled via `smd instance add`'s
+        # the operator may have units enabled via `smd admin instance add`'s
         # systemd step).  systemctl works without /etc read access.
         if not cfg_files:
             for rid in _list_units_for_client(client):
@@ -356,7 +356,7 @@ def get_instance(client: str, reporter_id: str) -> Optional[Instance]:
 
 
 # ---------------------------------------------------------------------------
-# File scaffolding (`smd instance add` / `remove`)
+# File scaffolding (`smd admin instance add` / `remove`)
 # ---------------------------------------------------------------------------
 
 # Header lines written into each stub file so an operator opening one
@@ -365,7 +365,7 @@ def _stub_header(client: str, reporter_id: str, kind: str) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return (
         f"# {kind} for {client}@{reporter_id}\n"
-        f"# Created by `smd instance add` on {ts}.\n"
+        f"# Created by `smd admin instance add` on {ts}.\n"
         f"# See docs/MULTI-INSTANCE-ARCHITECTURE.md for the canonical "
         f"layout.\n"
     )
@@ -379,15 +379,15 @@ def _config_stub(client: str, reporter_id: str) -> str:
         f'reporter_id = "{reporter_id}"\n'
         "\n"
         "# Source-keys this instance consumes from.  Use\n"
-        '#   smd sources add ' + client + '@' + reporter_id + ' <kind>:<id>\n'
-        "# to populate.  See `smd sources list` for what's discoverable.\n"
+        '#   smd admin sources add ' + client + '@' + reporter_id + ' <kind>:<id>\n'
+        "# to populate.  See `smd admin sources list` for what's discoverable.\n"
         "sources = []\n"
         "\n"
         "[instance.metadata]\n"
         '# antenna  = "loop"            # operator description\n'
         '# sdr      = "rx888-mk2"       # SDR model / serial / friendly name\n'
         "\n"
-        "# Client-specific sections follow.  Run `smd instance edit\n"
+        "# Client-specific sections follow.  Run `smd admin instance edit\n"
         f"# {client} {reporter_id}` to invoke the client's config flow.\n"
     )
 
@@ -467,10 +467,10 @@ def _sources_stub(client: str, reporter_id: str) -> str:
     return (
         _stub_header(client, reporter_id, "Per-instance sources selection")
         + "\n"
-        "# Rendered by `smd sources apply` from the instance config's\n"
+        "# Rendered by `smd admin sources apply` from the instance config's\n"
         "# `sources = [...]` list.  Don't hand-edit; use\n"
-        f"#   smd sources add {client}@{reporter_id} <kind>:<id>\n"
-        f"#   smd sources remove {client}@{reporter_id} <kind>:<id>\n"
+        f"#   smd admin sources add {client}@{reporter_id} <kind>:<id>\n"
+        f"#   smd admin sources remove {client}@{reporter_id} <kind>:<id>\n"
         "selections = []\n"
     )
 
@@ -511,7 +511,7 @@ def create_instance(
         raise InstanceExists(
             f"instance {client}@{reporter_id} already has files: "
             f"{existing_list}.  Use --force to keep them and create "
-            f"only missing files, or `smd instance remove` first."
+            f"only missing files, or `smd admin instance remove` first."
         )
 
     if dry_run:
@@ -589,7 +589,7 @@ def remove_instance(
 
 
 # ---------------------------------------------------------------------------
-# Migration (`smd instance migrate`)
+# Migration (`smd admin instance migrate`)
 # (MULTI-INSTANCE-ARCHITECTURE.md §6 + §10 Phase 8)
 # ---------------------------------------------------------------------------
 
@@ -730,7 +730,7 @@ def _migration_config_header(client: str, old: str, reporter_id: str) -> str:
     legacy = _LEGACY_SHARED_CONFIG.get(client, Path("(unknown legacy path)"))
     return (
         f"# Per-instance config for {client}@{reporter_id}\n"
-        f"# Created by `smd instance migrate` on {ts}\n"
+        f"# Created by `smd admin instance migrate` on {ts}\n"
         f"# (migrated from legacy unit {client}@{old}.service).\n"
         f"#\n"
         f"# This file is a copy of {legacy} with an [instance]\n"

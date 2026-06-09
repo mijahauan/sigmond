@@ -17,7 +17,7 @@ naming-divergence problem on bee1.
 
 ## 1. Why this matters
 
-bee1's `smd validate` after the multi-instance migration showed:
+bee1's `smd admin validate` after the multi-instance migration showed:
 
 ```
 frequency_coverage: 1 frequency claim(s) within samprate
@@ -243,7 +243,7 @@ Optional new rule (deferred to a follow-up):
   block key differs from it).
 - Validator rules: no logic change required; semantics improve once
   client inventories align (Phase 2).
-- Tests + a `smd validate` golden output check.
+- Tests + a `smd admin validate` golden output check.
 
 **Phase 2 — Client inventory output (per repo).**
 - Each of psk/wspr/hfdl/codar/hf-timestd emits `radiod_id` = the
@@ -253,7 +253,7 @@ Optional new rule (deferred to a follow-up):
 - Tests updated.
 - No daemon-behavior change; no config-schema change.
 
-After Phase 2, bee1's `smd validate` would show 42 frequency claims
+After Phase 2, bee1's `smd admin validate` would show 42 frequency claims
 checked instead of 1, with no operator action required beyond rerunning
 each client to refresh its inventory output.
 
@@ -273,7 +273,7 @@ each client to refresh its inventory output.
 - Migration path for legacy configs (§4 step 5).
 
 **Phase 5 — Per-host migration.**
-- `smd radiod migrate` walks each enabled client's config on the host
+- `smd admin radiod migrate` walks each enabled client's config on the host
   and rewrites legacy `id` blocks to the new `status` form.
 - Equivalent to running `<client> config edit` per client but
   scriptable + idempotent.
@@ -312,7 +312,7 @@ each client to refresh its inventory output.
    "samprate": ...}]`? If not, Phase 4 has a prerequisite.
 2. **Configurator multi-radiod menu UX.** Whiptail menu, plain-text
    prompt, or a Textual chooser inside `smd tui`? Defer to per-client.
-3. **`smd radiod migrate` scope.** Does it also stop and restart the
+3. **`smd admin radiod migrate` scope.** Does it also stop and restart the
    affected daemons after rewriting their configs? Lean: yes, with a
    `--no-restart` flag for operators who want to batch.
 4. **Multi-radiod-per-client.** psk-recorder's `[[radiod]]` is an array

@@ -1,7 +1,7 @@
 """CPU affinity screen — hardware topology, plan, observed state, contention.
 
 Read view from ``build_affinity_report()``; mutation via an in-TUI
-Apply button that runs ``smd diag cpu-affinity --apply``
+Apply button that runs ``smd admin diag cpu-affinity --apply``
 (confirm-modal-gated, auto-refresh on success).
 
 Motivation: help operators see whether radiod's USB3/FFT path is actually
@@ -197,7 +197,7 @@ class CPUAffinityScreen(Vertical):
             self._run_apply()
 
     def _run_apply(self) -> None:
-        cmd = [_smd_binary(), 'diag', 'cpu-affinity', '--apply']
+        cmd = [_smd_binary(), 'admin', 'diag', 'cpu-affinity', '--apply']
         confirm_and_run(
             self.app,
             title="Apply CPU affinity plan?",

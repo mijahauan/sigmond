@@ -1,7 +1,7 @@
 """Terminal output helpers and banner.
 
 All human-readable output from these helpers goes to **stderr**, not
-stdout.  That way commands like `smd validate --json` or `smd config
+stdout.  That way commands like `smd admin validate --json` or `smd config
 show --json` can emit a clean JSON document on stdout without any
 warnings or headings leaking into it.  Scripted consumers pipe stdout;
 humans see everything on stderr.

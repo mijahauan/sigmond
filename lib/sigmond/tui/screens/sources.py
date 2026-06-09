@@ -1,10 +1,10 @@
-"""Sources screen — TUI counterpart to `smd sources` (CLI-V2-SPEC.md §3 Wiring).
+"""Sources screen — TUI counterpart to `smd admin sources` (CLI-V2-SPEC.md §3 Wiring).
 
 Per-client sensor-feed selection: which radiod control plane / KiwiSDR
 (future: magnetometer, VLF) each recorder consumes from.  Read-and-apply
 in the TUI; add/remove of individual selections still happens via the
-CLI for now (`smd sources add <client> <kind>:<id>` /
-`smd sources remove <client> <kind>:<id>`).
+CLI for now (`smd admin sources add <client> <kind>:<id>` /
+`smd admin sources remove <client> <kind>:<id>`).
 
 Mirrors the apply.py shape: a state view (sources list output) + a row
 of action buttons + an output log + a status line.
@@ -76,9 +76,9 @@ class SourcesScreen(Vertical):
             "Selections are stored at /etc/sigmond/clients/<client>.sources.toml.",
             classes="sc-body")
         yield Static(
-            "Equivalent to:  [cyan]smd sources list[/]  /  "
-            "[cyan]smd sources apply --dry-run[/]  /  "
-            "[cyan bold]smd sources apply[/]",
+            "Equivalent to:  [cyan]smd admin sources list[/]  /  "
+            "[cyan]smd admin sources apply --dry-run[/]  /  "
+            "[cyan bold]smd admin sources apply[/]",
             classes="sc-body")
         with Horizontal(id="sc-controls"):
             yield Button("Refresh list", id="sc-list", variant="primary")
@@ -89,8 +89,8 @@ class SourcesScreen(Vertical):
         yield Static("", id="sc-last")
         yield Static(
             "[dim]Edit selections via CLI for now:[/]\n"
-            "  [cyan]smd sources add <client> <kind>:<id>[/]\n"
-            "  [cyan]smd sources remove <client> <kind>:<id>[/]\n"
+            "  [cyan]smd admin sources add <client> <kind>:<id>[/]\n"
+            "  [cyan]smd admin sources remove <client> <kind>:<id>[/]\n"
             "[dim]Then return here and press Apply.[/]\n"
             "\n"
             "[dim]Per-instance reporters (sigmond "
@@ -98,9 +98,9 @@ class SourcesScreen(Vertical):
             "[cyan]<client>@<reporter-id>[/]"
             "[dim] form once the sources CLI grows per-instance "
             "awareness (Phase 7 — pending):[/]\n"
-            "  [cyan]smd sources add wspr-recorder@AC0G-B1 "
+            "  [cyan]smd admin sources add wspr-recorder@AC0G-B1 "
             "radiod:my-rx888[/]\n"
-            "  [cyan]smd sources remove wspr-recorder@AC0G-B1 "
+            "  [cyan]smd admin sources remove wspr-recorder@AC0G-B1 "
             "kiwi:grape-corner-1[/]\n"
             "[dim]Until then, selections are per-client.[/]",
             classes="sc-cli-hint", markup=True)
@@ -118,7 +118,7 @@ class SourcesScreen(Vertical):
             self._run_apply()
 
     def _run_list(self) -> None:
-        cmd = [_smd_binary(), 'sources', 'list']
+        cmd = [_smd_binary(), 'admin', 'sources', 'list']
         log = self.query_one("#sc-output", RichLog)
         log.clear()
         log.write(f"$ {' '.join(cmd)}")
@@ -126,7 +126,7 @@ class SourcesScreen(Vertical):
         self.run_worker(lambda: self._exec(cmd), thread=True, name="sc-list")
 
     def _run_dry(self) -> None:
-        cmd = [_smd_binary(), 'sources', 'apply', '--dry-run']
+        cmd = [_smd_binary(), 'admin', 'sources', 'apply', '--dry-run']
         log = self.query_one("#sc-output", RichLog)
         log.clear()
         log.write(f"$ {' '.join(cmd)}")
@@ -164,7 +164,7 @@ class SourcesScreen(Vertical):
         return result
 
     def _run_apply(self) -> None:
-        cmd = [_smd_binary(), 'sources', 'apply']
+        cmd = [_smd_binary(), 'admin', 'sources', 'apply']
         confirm_and_run(
             self.app,
             title="Apply sources selections?",

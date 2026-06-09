@@ -21,7 +21,7 @@ Surface:
     stops services, purges packages, deletes dirs.  Refuses to run
     unless the caller sets `confirmed=True` on the plan.
 
-Caller pattern (`smd storage migrate-to-sqlite`):
+Caller pattern (`smd admin storage migrate-to-sqlite`):
     1. Build plan.
     2. Print artifacts that would be removed.
     3. If operator passed `--yes`, mark plan confirmed and execute.
@@ -78,7 +78,7 @@ NEUTRALIZED_PREFIX = "# pre-sqlite-migration: "
 
 # Header we append above any auto-inserted SIGMOND_SQLITE_PATH=, so
 # operators can grep "added by smd" and know what wrote it.
-INSERTED_HEADER = "# Added by `smd storage migrate-to-sqlite` to pin the SQLite sink."
+INSERTED_HEADER = "# Added by `smd admin storage migrate-to-sqlite` to pin the SQLite sink."
 
 # Backup suffix for any file we rewrite.  Operator can `mv` the .bak
 # back if the migration was a mistake.
@@ -114,7 +114,7 @@ SINK_DB_MODE = 0o664
 # read-only overlay) and SqliteWriter falls back to silent noop.
 SYSTEMD_DROPIN_BASENAME = "sigmond-sqlite-sink.conf"
 SYSTEMD_DROPIN_CONTENT = (
-    "# Added by `smd storage migrate-to-sqlite` so this producer can\n"
+    "# Added by `smd admin storage migrate-to-sqlite` so this producer can\n"
     "# write to /var/lib/sigmond/sink.db.  Without it, ProtectSystem=strict\n"
     "# would make the sink dir read-only inside the unit's namespace and\n"
     "# producer flushes would silently turn into no-ops.\n"
@@ -520,7 +520,7 @@ def plan_clickhouse_removal(probe: Optional[HostProbe] = None) -> RemovalPlan:
         # drop-in target is the TEMPLATE dir (`<client>@.service.d/`)
         # so all current AND future instances of the client inherit
         # it.  Without this, an instance created post-migration via
-        # `smd instance migrate` would silently miss the drop-in and
+        # `smd admin instance migrate` would silently miss the drop-in and
         # producer flushes would fail with "attempt to write a
         # readonly database" (the codar-sounder@AC0G-B1 incident on
         # bee1, 2026-05-26).

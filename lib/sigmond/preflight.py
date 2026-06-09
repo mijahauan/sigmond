@@ -9,7 +9,7 @@ fine, and sigmond's environment cache is what records that.
 Decisions:
   - All deps installed locally → proceed silently.
   - ka9q-radio missing, no environment cache yet → abort and direct
-    operator to `smd environment probe`.  That one probe informs every
+    operator to `smd admin environment probe`.  That one probe informs every
     subsequent client install, so it's a one-time setup step, not a
     per-client tax.
   - ka9q-radio missing, cache shows >=1 remote radiod → dep is
@@ -65,7 +65,7 @@ def check_requires(client: str,
         if yes:
             warn("--yes passed; proceeding without environment data")
             return True
-        err("aborting — run `smd environment probe` first, then re-run install.")
+        err("aborting — run `smd admin environment probe` first, then re-run install.")
         return False
 
     radiod_obs = _filter_obs(cache, source="mdns", kind="radiod") if cache else []
@@ -209,8 +209,8 @@ def _render_no_cache(client: str,
     info("the same scan informs every subsequent client install — running")
     info("it once is a one-time setup step, not per-client.")
     info("")
-    info("→ run:  smd environment probe")
-    info("        smd environment list      (to confirm what was found)")
+    info("→ run:  smd admin environment probe")
+    info("        smd admin environment list      (to confirm what was found)")
     info(f"        smd install {client}    (re-run after the probe)")
 
 

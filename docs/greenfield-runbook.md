@@ -31,10 +31,10 @@ Do these in order. Each phase assumes the previous one succeeded.
 | 2 | Topology | `smd enable <component>` | Declares what this host runs. |
 | 3 | Install | `smd install <component>` | Clones, builds native deps, runs `apply`. |
 | 4 | radiod config | `smd config init radiod` | The SDR daemon needs a `[global]`+`[rx888]` conf. |
-| 5 | FFT wisdom | `smd wisdom plan` | **Long, manual, one-time.** radiod won't start cleanly without it. |
-| 6 | Host tuning | (mostly automatic via `apply`) + `smd validate` | rmem_max, CPU affinity, governor — radiod RT correctness. |
+| 5 | FFT wisdom | `smd admin wisdom plan` | **Long, manual, one-time.** radiod won't start cleanly without it. |
+| 6 | Host tuning | (mostly automatic via `apply`) + `smd admin validate` | rmem_max, CPU affinity, governor — radiod RT correctness. |
 | 7 | Client config | `smd config edit <client>` | Reporter ids, PSWS station/instrument. |
-| 8 | Start + verify | `smd start` / `smd validate` / `smd status` | Bring it up, confirm the board is clean. |
+| 8 | Start + verify | `smd start` / `smd admin validate` / `smd status` | Bring it up, confirm the board is clean. |
 | 9 | PSWS key (if uploading) | `setup-psws-keys.sh` | External — register with PSWS. |
 
 > **What `smd install` / `smd apply` now do for you automatically** (so you don't
@@ -85,7 +85,7 @@ Each install clones to `/opt/git/sigmond/<name>`, builds any native binary per
 emitted), installs the client's venv, and runs `smd apply`.
 
 > **ka9q-python is installed *editable*** into every venv (clients **and**
-> sigmond's own), so `smd validate`'s protocol-compat check always reflects the
+> sigmond's own), so `smd admin validate`'s protocol-compat check always reflects the
 > live source pin. If you advance the ka9q-radio build, re-stamp the pin:
 > `python /opt/git/sigmond/ka9q-python/scripts/sync_types.py --apply --ka9q-radio /opt/git/sigmond/ka9q-radio`
 > (header-only re-stamp when `--check` already says "in sync").
@@ -100,7 +100,7 @@ smd config init radiod         # writes /etc/radio/<instance>.conf  ([global]+[r
 RX888-specific gotchas this runbook hit:
 
 - **USB 3.0 SuperSpeed is mandatory.** The RX888 streams ~129.6 Msps; on a USB
-  2.0 (480 Mbps) port `rx888_usb_init` fails. Verify: `smd diag` flags the link
+  2.0 (480 Mbps) port `rx888_usb_init` fails. Verify: `smd admin diag` flags the link
   speed, or `lsusb -t` should show the device at `5000M`. Re-seat into a blue
   USB3 port if not.
 - **FX3 firmware / DFU.** A freshly-plugged RX888 enumerates in DFU mode
@@ -118,8 +118,8 @@ radiod plans a large forward FFT at startup; without precomputed FFTW wisdom it
 either fails or runs poorly.
 
 ```bash
-smd wisdom plan                # generates /etc/fftw/wisdomf — can take ~30+ min
-smd wisdom status
+smd admin wisdom plan                # generates /etc/fftw/wisdomf — can take ~30+ min
+smd admin wisdom status
 ```
 
 - This is **the** step that isn't automated — it's CPU-bound and long. Kick it
@@ -136,7 +136,7 @@ Most of this is applied automatically by `smd apply` during install. Verify, the
 do the two manual extras.
 
 ```bash
-smd validate                   # the board should be all checks passing
+smd admin validate                   # the board should be all checks passing
 ```
 
 What `apply` already put in place (confirm via validate / the files):
@@ -156,7 +156,7 @@ What `apply` already put in place (confirm via validate / the files):
 
 Manual extras:
 
-- **CPU freq caps (optional)** — `smd diag cpu-freq --apply` writes per-core
+- **CPU freq caps (optional)** — `smd admin diag cpu-freq --apply` writes per-core
   `scaling_max_freq` from `[cpu_freq]` in topology.toml. Usually unnecessary:
   radiod cores default to hardware max at boot, and capping the other cores only
   throttles your decode clients. (Note: freq caps are **not** boot-persistent —
@@ -202,14 +202,14 @@ For multiple instances of one client (e.g. several reporter ids), use the
 per-instance flow in [`MULTI-INSTANCE-ARCHITECTURE.md`](MULTI-INSTANCE-ARCHITECTURE.md);
 new instances seed their config from the shared `/etc/<client>/config.toml`.
 
-For which radiod channels/feeds a client subscribes to: `smd sources list|add|apply`.
+For which radiod channels/feeds a client subscribes to: `smd admin sources list|add|apply`.
 
 ## Phase 8 — Start + verify
 
 ```bash
 smd start                      # honors start_priority — radiod first
 smd status
-smd validate                   # final board: aim for all checks passing
+smd admin validate                   # final board: aim for all checks passing
 ```
 
 Spot-check data is actually flowing:
@@ -232,7 +232,7 @@ sudo bash /opt/git/sigmond/hf-timestd/scripts/setup-psws-keys.sh
 
 ---
 
-## `smd validate` — the checks that bite on a fresh host
+## `smd admin validate` — the checks that bite on a fresh host
 
 A clean greenfield ends with every check passing (0 warnings, 0 failures).
 
@@ -240,7 +240,7 @@ A clean greenfield ends with every check passing (0 warnings, 0 failures).
 |-------|-----------|-----|
 | `kernel_rcvbuf_adequate` | `rmem_max` < 16 MiB | auto via `apply`; or write `99-sigmond-multicast.conf` (64 MiB) + `sysctl --load` |
 | `ka9q_python_compat` | radiod build != ka9q-python pin | `sync_types.py --apply`; ensure ka9q-python is editable in the venv |
-| `cpu_isolation_runtime` | something else runs on radiod cores | re-run `smd diag cpu-affinity --apply` |
+| `cpu_isolation_runtime` | something else runs on radiod cores | re-run `smd admin diag cpu-affinity --apply` |
 | `channel_count` | client channel demand vs radiod | check client `sources` / radiod fragments |
 | `disk_budget` | `/var` over threshold | storage trim / retention |
 
@@ -260,7 +260,7 @@ them if they recur.
 | `smd start` -> "Unit not found" (a `.timer`) | timer or its target `.service` not linked | fixed — `apply` links every unit in `systemd/`; re-run `smd apply` |
 | client `226/NAMESPACE` on first start | a `StateDirectory`/`ReadWritePaths` path missing (e.g. `/var/lib/hs-uploader`) | the client's `deploy.toml` mkdir step creates it; re-run install |
 | `uv` editable reinstall -> EACCES on `__pycache__` | venv built root-owned, removing as non-root | reinstall as root, then `chmod -R a+rX` the venv |
-| governor back to `powersave` after reboot | `smd-cpu-governor.service` not installed | `smd apply` (or `smd diag cpu-affinity --apply`) installs + enables it |
+| governor back to `powersave` after reboot | `smd-cpu-governor.service` not installed | `smd apply` (or `smd admin diag cpu-affinity --apply`) installs + enables it |
 
 ---
 
@@ -279,10 +279,10 @@ smd install hf-timestd
 
 # 4-5. radiod config + wisdom (wisdom is slow — let it finish)
 smd config init radiod
-smd wisdom plan
+smd admin wisdom plan
 
 # 6. verify host tuning that apply already did; stage isolcpus (reboot later)
-smd validate
+smd admin validate
 #   edit /etc/default/grub: GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=0,1 rcu_nocbs=0,1"
 sudo update-grub
 
@@ -290,7 +290,7 @@ sudo update-grub
 smd config edit wspr-recorder             # reporter AC0G/SIGMA
 smd config edit hf-timestd                # PSWS S000418 / instrument 367
 smd start
-smd validate && smd status
+smd admin validate && smd status
 
 # 9. PSWS key (only if uploading)
 sudo bash /opt/git/sigmond/hf-timestd/scripts/setup-psws-keys.sh

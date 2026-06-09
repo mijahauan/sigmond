@@ -1,7 +1,7 @@
 """Environment manifest — the operator-declared picture of what should be
 around this host.
 
-Read by `smd environment` and the TUI Environment screen, and reconciled
+Read by `smd admin environment` and the TUI Environment screen, and reconciled
 against live discovery observations.  This is distinct from `topology.py`
 (what this host runs) and `coordination.py` (how local components talk).
 Environment answers: 'what peers should I expect to see on the network,

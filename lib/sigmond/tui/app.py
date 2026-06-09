@@ -575,7 +575,7 @@ class SigmondApp(App):
             "processes — one physical core (HT pair) per radiod "
             "instance, everything else shares the rest.\n\n"
             "Read-only. To apply the plan, run:\n"
-            "  smd diag cpu-affinity --apply",
+            "  smd admin diag cpu-affinity --apply",
         )
 
     def _mount_placeholder(self, title: str, description: str,
@@ -615,7 +615,7 @@ class SigmondApp(App):
             "Radiod cores get high clock to keep the USB3/FFT path "
             "fed; the rest stay power-efficient.\n\n"
             "Read-only.  To apply:\n"
-            "  smd diag cpu-freq --apply",
+            "  smd admin diag cpu-freq --apply",
         )
 
     def action_show_logs(self) -> None:
@@ -632,7 +632,7 @@ class SigmondApp(App):
             "Press 'Stop' before switching components.  The log "
             "pane caps at 2000 lines.\n\n"
             "To change log level, use the CLI for now:\n"
-            "  smd log set-level <component> DEBUG",
+            "  smd admin log set-level <component> DEBUG",
         )
 
     def action_show_lifecycle(self) -> None:
@@ -782,15 +782,15 @@ class SigmondApp(App):
             "config wizard (whiptail, or `$EDITOR` fallback).  Fill in "
             "antenna / SDR / per-mode settings.\n"
             "  3. Enable + start the unit from the Lifecycle screen "
-            "(or `smd instance enable <client> <reporter>` from "
+            "(or `smd admin instance enable <client> <reporter>` from "
             "the CLI).\n\n"
             "Edit existing: select a row, click Edit.  Remove: select a "
             "row, click Remove (does NOT stop the unit — "
-            "`smd instance disable` is a separate step).\n\n"
+            "`smd admin instance disable` is a separate step).\n\n"
             "Migrate: scans for legacy radiod-keyed deployments and "
             "shows what would convert.  The actual interactive "
             "migration prompts per candidate and is CLI-only — run "
-            "`smd instance migrate --yes` in a terminal.",
+            "`smd admin instance migrate --yes` in a terminal.",
         )
 
     def action_show_instance(self) -> None:
@@ -810,16 +810,16 @@ class SigmondApp(App):
             "Listing: read-only view of /etc/<client>/<reporter-id>.toml "
             "files across known clients.  Refresh re-walks the catalog.\n\n"
             "Add: creates per-instance config / env / sources files "
-            "(does NOT enable or start the unit — that's `smd instance "
+            "(does NOT enable or start the unit — that's `smd admin instance "
             "enable` after editing the config).\n\n"
             "Remove: deletes per-instance files.  Doesn't touch the "
-            "systemd unit (run `smd instance disable` first if "
+            "systemd unit (run `smd admin instance disable` first if "
             "the unit is running) or state/log/run dirs (use `--purge` "
             "from the CLI for that).\n\n"
             "Migrate: scans for legacy radiod-keyed deployments "
             "(`<client>@<radiod-id>.service`).  Dry-run lists "
             "candidates here; the actual interactive migration is "
-            "CLI-only — run `smd instance migrate --yes` in a "
+            "CLI-only — run `smd admin instance migrate --yes` in a "
             "terminal.",
         )
 
@@ -835,12 +835,12 @@ class SigmondApp(App):
             "plane or KiwiSDR (future: magnetometer, VLF) each recorder "
             "consumes from.\n\n"
             "Selections live at /etc/sigmond/clients/<client>.sources.toml. "
-            "Refresh re-runs `smd sources list`; Apply (dry-run) previews "
-            "what would be written; Apply runs `smd sources apply` "
+            "Refresh re-runs `smd admin sources list`; Apply (dry-run) previews "
+            "what would be written; Apply runs `smd admin sources apply` "
             "to render the selections into each client's config.\n\n"
             "Add/remove of individual selections is CLI-only for now:\n"
-            "  smd sources add <client> <kind>:<id>\n"
-            "  smd sources remove <client> <kind>:<id>\n"
+            "  smd admin sources add <client> <kind>:<id>\n"
+            "  smd admin sources remove <client> <kind>:<id>\n"
             "Then return here and press Apply.",
         )
 
@@ -953,7 +953,7 @@ class SigmondApp(App):
             "Classifies IGMP behavior so radiod multicast stays safe.\n\n"
             "Fast scan: unprivileged enumeration of interfaces + "
             "/proc/net/igmp (no wait).\n\n"
-            "Full listen: runs `smd diag net --listen <s>` to "
+            "Full listen: runs `smd admin diag net --listen <s>` to "
             "observe IGMP queries on the wire.  Requires passwordless "
             "sudo or you'll see an error here — fall back to a terminal "
             "if so.",

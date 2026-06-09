@@ -26,7 +26,7 @@ class SystemView:
     coordination: Coordination
     topology: Topology
     client_views: dict = field(default_factory=dict)    # component name -> ClientView
-    environment: Optional[EnvironmentView] = None       # populated only by `smd environment`
+    environment: Optional[EnvironmentView] = None       # populated only by `smd admin environment`
 
     def is_enabled(self, component: str) -> bool:
         return self.topology.is_enabled(component)

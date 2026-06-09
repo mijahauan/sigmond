@@ -1,4 +1,4 @@
-"""Verifier screen — TUI counterpart to `smd verifier {report,rehabilitate}`.
+"""Verifier screen — TUI counterpart to `smd admin verifier {report,rehabilitate}`.
 
 Two complementary actions on one screen because they share an
 operator workflow: see a spot wsprnet dropped → rehabilitate that
@@ -6,10 +6,10 @@ specific callsign so wsprd/jt9 are re-fed the call on the next
 cycle.  CLI-V2-SPEC.md §3 Data quality (`verifier`).
 
 Report section:
-  smd verifier report --window <DUR> --target <wspr|psk> [--lost ...]
+  smd admin verifier report --window <DUR> --target <wspr|psk> [--lost ...]
                       [--rx-call CALL]
 Rehabilitate section:
-  smd verifier rehabilitate <rx_call> <call>
+  smd admin verifier rehabilitate <rx_call> <call>
 """
 
 from __future__ import annotations
@@ -261,7 +261,7 @@ class VerifierScreen(Vertical):
         window = self.query_one("#vf-window", Input).value.strip() or "1h"
         rxcall = self.query_one("#vf-rxcall", Input).value.strip()
 
-        cmd = [_smd_binary(), 'verifier', 'report',
+        cmd = [_smd_binary(), 'admin', 'verifier', 'report',
                '--target', str(target),
                '--window', window]
         # wspr/psk delivery-audit flags don't apply to the timestd
@@ -324,7 +324,7 @@ class VerifierScreen(Vertical):
                 "[red]Rehabilitate: both RX call and TX call required[/]")
             return
 
-        cmd = [_smd_binary(), 'verifier', 'rehabilitate', rxcall, call]
+        cmd = [_smd_binary(), 'admin', 'verifier', 'rehabilitate', rxcall, call]
         confirm_and_run(
             self.app,
             title="Rehabilitate callsign?",

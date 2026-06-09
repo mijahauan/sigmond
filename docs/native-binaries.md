@@ -76,19 +76,19 @@ provenance moves out of the (un-ownable) upstream repo and into sigmond:
 | Pin the source | `.provenance` `upstream.sha` committed in the client repo | a pinned commit SHA in sigmond (`_ONION_COMMIT`, ka9q-radio pin) — never a bare branch / HEAD |
 | Record provenance | `bin/<binary>.provenance` committed to git | written to `/var/lib/sigmond/build-manifest/<component>.toml` after the build |
 | Idempotent build | `scripts/build-<binary>.sh` | the `_install_*_native` / `_build_*` helpers (they sha-check before rebuilding) |
-| Verify on host | `install.sh` provenance check | surfaced in `smd diag` (cf. the `ka9q_python_compat` cross-repo pin rule) |
+| Verify on host | `install.sh` provenance check | surfaced in `smd admin diag` (cf. the `ka9q_python_compat` cross-repo pin rule) |
 
 ### Current compliance
 
 | Component | Native dep | Source | Pinned? | Provenance? | Gap to close |
 |---|---|---|---|---|---|
 | `ka9q-radio` | radiod + `fobos` driver | `ka9q/ka9q-radio` (fobos in-tree) | tracks upstream | no | `fobos` disabled by default; `libfobos` is proprietary/external, so it stays opt-in |
-| `ka9q-web` | `onion` | `davidmoreno/onion` | **yes** — `_ONION_COMMIT` pinned | **yes** — `build-manifest/ka9q-web.toml` | ✓ fully migrated (pin + manifest + `smd diag` drift check) |
+| `ka9q-web` | `onion` | `davidmoreno/onion` | **yes** — `_ONION_COMMIT` pinned | **yes** — `build-manifest/ka9q-web.toml` | ✓ fully migrated (pin + manifest + `smd admin diag` drift check) |
 
 `onion` was the first migration: it is pinned (`_ONION_COMMIT`) and
 `_build_ka9q_web_with_onion` writes
 `/var/lib/sigmond/build-manifest/ka9q-web.toml` after each build. The
-`smd diag` now compares each installed build manifest against the current
+`smd admin diag` now compares each installed build manifest against the current
 pins (`_diag_build_manifests` / `_expected_build_pins`) — the
 upstream-built analogue of `install.sh`'s provenance check — and warns
 with a rebuild hint on drift. The remaining work is applying the same

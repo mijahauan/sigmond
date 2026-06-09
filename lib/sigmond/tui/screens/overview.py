@@ -429,7 +429,7 @@ class OverviewScreen(Vertical):
         if warnings:
             for w in warnings:
                 lines.append(f"  [yellow]⚠[/] {w}")
-            lines.append("  [dim]fix:  smd diag cpu-affinity --apply[/]")
+            lines.append("  [dim]fix:  smd admin diag cpu-affinity --apply[/]")
         else:
             lines.append("  [green]✔ plan applied; no contention or foreign drop-ins[/]")
         widget.update("\n".join(lines))

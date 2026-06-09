@@ -14,18 +14,18 @@ Configure (what should exist):
     smd disable     <name>...                                    set enabled=false + stop units
     smd remove      <name>...                                    remove from topology
     smd config      show | migrate | init <c> | edit <c>         per-client config
-    smd validate                                                 cross-client harmonization
+    smd admin validate                                                 cross-client harmonization
     (smd install / smd apply are kept as aliases for the software subverbs.)
 
 Observe (what is, read-only):
     smd list        [--update | --catalog] [--components C1,C2]  per-component status table
                     [--ref R] [--fetch] [--dry-run] [--json]
     smd status      [<component>]                                service health
-    smd log         [--files | --level LEVEL] [<client>]         tail journal or file logs
-    smd diag        [net | cpu-affinity | cpu-freq]              diagnostics
-    smd environment list | probe | describe                      discover network peers
+    smd admin log         [--files | --level LEVEL] [<client>]         tail journal or file logs
+    smd admin diag        [net | cpu-affinity | cpu-freq]              diagnostics
+    smd admin environment list | probe | describe                      discover network peers
     smd watch       <wspr|psk|hfdl|codar|hf-gps-tec|mag|ka9q|radiod|uploads|verifier> [args...] unified service watcher
-    smd sources     list | add | remove | apply                  per-client SDR source selection
+    smd admin sources     list | add | remove | apply                  per-client SDR source selection
 
 Operate (run things now, may need sudo):
     smd start       [<component> [<instance>]]
@@ -958,7 +958,7 @@ def _read_rac_frpc() -> tuple[str, int]:
     frpc.toml is the runtime source of truth for what the tunnel is actually
     configured with (the non-WEB proxy's name is the rac_id; its remotePort
     minus the port base is the rac_number).  Used so a re-run of
-    ``smd rac install`` treats existing values as already entered and does
+    ``smd admin rac install`` treats existing values as already entered and does
     not re-prompt for them.
     """
     if not _FRPC_CONFIG.exists():
@@ -1325,7 +1325,7 @@ def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> b
         tf.write(content)
         tf_path = tf.name
     # Group-own to `sigmond` (mode 0640) so operators can read it for
-    # `smd rac status` without sudo — frpc reads it as root (owner), and
+    # `smd admin rac status` without sudo — frpc reads it as root (owner), and
     # the only "secret" inside is the fleet-shared token that's already
     # hardcoded in this script.  Fall back to root:root if the sigmond
     # group is absent.
@@ -1453,7 +1453,7 @@ def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False,
     """Full wd-rac install: frpc binary + frpc.toml + systemd service.
 
     Resolves (rac_id, rac_number) by precedence:
-      1. CLI args  (``smd rac install <number> --id <id>``)
+      1. CLI args  (``smd admin rac install <number> --id <id>``)
       2. values already entered — topology.toml, then the live frpc.toml
       3. interactive prompt: RAC number FIRST (always assigned by the RAC
          administrator and supplied by the operator on this machine), then
@@ -1560,7 +1560,7 @@ def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False,
 
     if not rac_id or rac_number < 0:
         _warn('wd-rac: rac_id or rac_number not set — tunnel will not be started')
-        _warn('  To configure: run  smd rac install <number>  '
+        _warn('  To configure: run  smd admin rac install <number>  '
               '(prompts when omitted)')
         _warn('  Or:           smd tui  and press  a  (RAC screen)')
 
@@ -1635,13 +1635,13 @@ def _rac_show_status() -> int:
     _heading('wd-rac (frpc) remote-access tunnel')
     if not st['frpc_installed']:
         _warn('frpc binary not installed')
-        _info('provision with:  smd rac install')
+        _info('provision with:  smd admin rac install')
         return 0
     _ok(f"frpc binary : {_FRPC_BIN} "
         f"({st['frpc_version'] or 'unknown version'})")
     if not st['config_exists'] or not unit_path.exists():
         _warn(f'not configured on this host ({_FRPC_CONFIG} / {unit} missing)')
-        _info('provision with:  smd rac install'
+        _info('provision with:  smd admin rac install'
               '   (or  smd tui  → RAC screen)')
         return 0
     rnum = st['rac_number']
@@ -1650,7 +1650,7 @@ def _rac_show_status() -> int:
     _ok(f"config      : {_FRPC_CONFIG}")
     if st.get('config_unreadable'):
         _warn(f"            : not readable as {os.getenv('USER', 'this user')} "
-              f"— re-run as root, or  smd rac install  to fix group perms")
+              f"— re-run as root, or  smd admin rac install  to fix group perms")
     else:
         _info(f"rac_id      : {st['rac_id'] or '(unset)'}")
         _info(f"rac_number  : {rnum if rnum >= 0 else '(unset)'}")
@@ -1665,7 +1665,7 @@ def _rac_show_status() -> int:
                   f"— service up but tunnel not established")
     else:
         _warn(f"service     : {unit} inactive  "
-              f"(bring up with  smd rac start)")
+              f"(bring up with  smd admin rac start)")
     r = _run(['systemctl', 'is-enabled', unit])
     _info(f"boot        : {r.stdout.strip() or 'unknown'}")
     return 0
@@ -1701,7 +1701,7 @@ def _rac_configure(reconfigure: bool, args) -> int:
 def cmd_rac(args) -> int:
     """State-aware lifecycle for the wd-rac (frpc) remote-access tunnel.
 
-    Bare ``smd rac`` dispatches on the current state of the service:
+    Bare ``smd admin rac`` dispatches on the current state of the service:
       * not installed          → offer to install + configure, then status
       * installed, unconfigured → configure, then status
       * installed + configured  → show status
@@ -1715,7 +1715,7 @@ def cmd_rac(args) -> int:
     unit = f'{_RAC_SERVICE}.service'
     unit_path = Path(f'/etc/systemd/system/{unit}')
 
-    # --- bare `smd rac`: do the right thing for the current state --------
+    # --- bare `smd admin rac`: do the right thing for the current state --------
     if action is None:
         st = rac_status()
         installed  = st['frpc_installed']
@@ -1738,7 +1738,7 @@ def cmd_rac(args) -> int:
                 ans = ''
             if ans not in ('y', 'yes'):
                 _info('Nothing changed.  Install later with:  '
-                      'smd rac install <number>')
+                      'smd admin rac install <number>')
                 return 0
         # State A (confirmed) or State B (installed-but-unconfigured): go
         # configure.  _install_wd_rac prompts for whatever is still missing.
@@ -1754,7 +1754,7 @@ def cmd_rac(args) -> int:
     if action in ('start', 'stop', 'restart'):
         if not unit_path.exists():
             _err(f'{unit} is not installed on this host')
-            _info('provision the tunnel first:  smd rac install')
+            _info('provision the tunnel first:  smd admin rac install')
             return 1
         if _need_root(f'rac {action}'):
             return 1
@@ -2205,7 +2205,7 @@ def cmd_uninstall(args) -> int:
     try:
         from sigmond.uninstall import plan_uninstall, execute_uninstall, render_plan
     except Exception as exc:  # noqa: BLE001
-        print(f'smd uninstall: sigmond.uninstall unavailable: {exc}', file=sys.stderr)
+        print(f'smd admin uninstall: sigmond.uninstall unavailable: {exc}', file=sys.stderr)
         return 1
     keep_config = bool(getattr(args, 'keep_config', False))
     full = not keep_config
@@ -2231,8 +2231,8 @@ def cmd_uninstall(args) -> int:
         print('  DRY RUN — nothing removed.  Re-run with --yes (as root) to execute.')
         return 0
     if os.geteuid() != 0:
-        print('smd uninstall: must run as root to execute '
-              '(sudo smd uninstall --yes)', file=sys.stderr)
+        print('smd admin uninstall: must run as root to execute '
+              '(sudo smd admin uninstall --yes)', file=sys.stderr)
         return 1
     print()
     print('  EXECUTING uninstall ...')
@@ -2610,7 +2610,7 @@ def cmd_bringup(args) -> int:
 
     print()
     _ok(f"bringup '{prof.name}' complete")
-    _info('verify anytime with: smd validate')
+    _info('verify anytime with: smd admin validate')
     return 0
 
 
@@ -3450,7 +3450,7 @@ def cmd_apply(args) -> int:
                 # boots as 'powersave'; radiod needs 'performance' pinned
                 # or its FFT cores throttle after every reboot.  The
                 # affinity writer above only sets CPUAffinity — without
-                # this the governor reverted until someone ran `smd diag
+                # this the governor reverted until someone ran `smd admin diag
                 # cpu-affinity --apply` by hand.  Idempotent; same writer.
                 try:
                     _radiod_cpus = _get_radiod_cpus()
@@ -4072,10 +4072,10 @@ def _disable_hftimestd_affinity_watcher() -> bool:
 def _apply_radiod_governor(radiod_cpus, governor='performance') -> int:
     """Set scaling_governor on radiod CPUs (runtime sysfs + boot-time service).
 
-    Runs as part of `smd diag cpu-affinity --apply`.  Closes the gap
+    Runs as part of `smd admin diag cpu-affinity --apply`.  Closes the gap
     between sigmond's CPU-affinity surface (which already manages
     systemd AllowedCPUs drop-ins) and the cpufreq governor (which
-    `smd validate` checks via `_aff_report.capabilities.governors`).
+    `smd admin validate` checks via `_aff_report.capabilities.governors`).
 
     - Writes ``performance`` (or the operator's choice) to each
       radiod CPU's ``scaling_governor`` sysfs node for immediate effect.
@@ -4114,12 +4114,12 @@ def _apply_radiod_governor(radiod_cpus, governor='performance') -> int:
         _ok(f'cpu{cpu:2d}: governor {prev} → {governor}')
 
     # Boot-time persistence via a one-shot service.  CPU list is
-    # embedded into the unit at apply time; re-run `smd diag
+    # embedded into the unit at apply time; re-run `smd admin diag
     # cpu-affinity --apply` after editing topology.toml's
     # [cpu_affinity] radiod_cpus or radiod_governor.
     cpu_list = ' '.join(str(c) for c in sorted(radiod_cpus))
     unit_content = (
-        '# Managed by `smd diag cpu-affinity --apply`.  Sets cpufreq\n'
+        '# Managed by `smd admin diag cpu-affinity --apply`.  Sets cpufreq\n'
         '# scaling_governor on radiod CPUs at boot so the setting\n'
         '# survives reboot.  Re-run the apply verb after editing\n'
         '# /etc/sigmond/topology.toml [cpu_affinity] to refresh this\n'
@@ -4932,7 +4932,7 @@ def cmd_status(args) -> int:
             if unenforced:
                 warnings.append(
                     f'{len(unenforced)} radiod unit(s) unenforced — run '
-                    f'smd diag cpu-affinity --apply')
+                    f'smd admin diag cpu-affinity --apply')
             if foreign_count:
                 warnings.append(f'{foreign_count} foreign drop-in(s) present')
             if pinned:
@@ -4955,7 +4955,7 @@ def cmd_status(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# smd log
+# smd admin log
 # ---------------------------------------------------------------------------
 
 def cmd_log(args) -> int:
@@ -4995,7 +4995,7 @@ def cmd_log(args) -> int:
 
     # --- follow mode (requires a client name) ---
     if not client:
-        _err('smd log: specify a client name (e.g. smd log psk-recorder)')
+        _err('smd admin log: specify a client name (e.g. smd admin log psk-recorder)')
         return 1
 
     if files:
@@ -5739,7 +5739,7 @@ def cmd_list(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# smd diag
+# smd admin diag
 # ---------------------------------------------------------------------------
 
 def _netdiag_auto_refresh(verb: str) -> None:
@@ -5821,7 +5821,7 @@ def _netdiag_status_line() -> None:
     cache = net_diag.load_cache()
     print('\n  network:')
     if cache is None:
-        _info('no cached diagnosis — run: smd diag net')
+        _info('no cached diagnosis — run: smd admin diag net')
         return
     report = net_diag._report_from_dict(cache['report'])
     age_min = int(cache['age_s'] / 60)
@@ -5873,7 +5873,7 @@ def cmd_diag_net(args) -> int:
     except KeyboardInterrupt:
         _warn('interrupted before classification could complete')
         return 130
-    # Explicit `smd diag net` always refreshes the cache so subsequent
+    # Explicit `smd admin diag net` always refreshes the cache so subsequent
     # fast verbs (status, list, validate) see the latest classification.
     if report.listen_root and report.classification != 'unknown':
         net_diag.save_cache(report)
@@ -5957,7 +5957,7 @@ def cmd_diag_net(args) -> int:
 
 
 def cmd_diag_drop_in(args) -> int:
-    """`smd diag drop-in <client>` — lint a single client's drop-in
+    """`smd admin diag drop-in <client>` — lint a single client's drop-in
     surface (repo present, deploy.toml parses, contract subcommands
     callable, [client_features] declarations sane, catalog/topology
     pickup, end-to-end ContractAdapter view).  Exits non-zero if any
@@ -6055,13 +6055,13 @@ def cmd_diag(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# smd completion
+# smd admin completion
 # ---------------------------------------------------------------------------
 
 _BASH_COMPLETION = r"""
 # bash completion for smd
 # Source this file or drop it in /etc/bash_completion.d/smd
-# Generate with: smd completion bash
+# Generate with: smd admin completion bash
 
 _smd_complete() {
     local cur prev words cword
@@ -6075,7 +6075,8 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier rac wisdom timestd-tune-storage storage sources public-ip completion component instance"
+    local top_cmds="install apply enable disable start stop restart reload status list config tui watch bringup component admin"
+    local admin_cmds="diag validate verifier wisdom storage environment sources public-ip log rac timing radiod instance uninstall completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web wd-rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
 
@@ -6127,50 +6128,17 @@ _smd_complete() {
                 list)
                     COMPREPLY=($(compgen -W "--update --apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
                     ;;
-                log)
-                    COMPREPLY=($(compgen -W "$log_clients set-level --files --level --topology" -- "$cur"))
-                    ;;
-                diag)
-                    COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
-                    ;;
-                cpu)
-                    COMPREPLY=($(compgen -W "--apply --reapply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
-                    ;;
-                validate)
-                    COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
-                    ;;
                 config)
                     COMPREPLY=($(compgen -W "show migrate backup restore init edit" -- "$cur"))
-                    ;;
-                storage)
-                    COMPREPLY=($(compgen -W "migrate-to-sqlite trim tune-timestd" -- "$cur"))
                     ;;
                 component)
                     COMPREPLY=($(compgen -W "list install update add remove enable disable" -- "$cur"))
                     ;;
-                instance)
-                    COMPREPLY=($(compgen -W "list show add remove edit enable disable migrate" -- "$cur"))
-                    ;;
-                software)
-                    COMPREPLY=($(compgen -W "install apply" -- "$cur"))
-                    ;;
                 watch)
                     COMPREPLY=($(compgen -W "wspr psk hfdl codar hf-gps-tec mag ka9q radiod uploads verifier" -- "$cur"))
                     ;;
-                verifier)
-                    COMPREPLY=($(compgen -W "report" -- "$cur"))
-                    ;;
-                rac)
-                    COMPREPLY=($(compgen -W "status start stop restart install" -- "$cur"))
-                    ;;
-                completion)
-                    COMPREPLY=($(compgen -W "bash" -- "$cur"))
-                    ;;
-                public-ip)
-                    COMPREPLY=($(compgen -W "--no-v6 -q --quiet" -- "$cur"))
-                    ;;
-                sources)
-                    COMPREPLY=($(compgen -W "list add remove apply" -- "$cur"))
+                admin)
+                    COMPREPLY=($(compgen -W "$admin_cmds" -- "$cur"))
                     ;;
                 tui)
                     COMPREPLY=()
@@ -6179,16 +6147,6 @@ _smd_complete() {
             ;;
         *)
             case "${words[1]}" in
-                storage)
-                    case "${words[2]}" in
-                        migrate-to-sqlite)
-                            COMPREPLY=($(compgen -W "--yes" -- "$cur"))
-                            ;;
-                        trim)
-                            COMPREPLY=($(compgen -W "--max-age --db --target-db --target-table --yes" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
                 watch)
                     case "${words[2]}" in
                         wspr)
@@ -6202,16 +6160,6 @@ _smd_complete() {
                             ;;
                         radiod)
                             COMPREPLY=($(compgen -W "--host -n --lines --all-lines" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                software)
-                    case "${words[2]}" in
-                        install)
-                            COMPREPLY=($(compgen -W "$components --components --client-dir --dry-run --yes --force --topology" -- "$cur"))
-                            ;;
-                        apply)
-                            COMPREPLY=($(compgen -W "--dry-run --topology" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -6229,28 +6177,6 @@ _smd_complete() {
                     ;;
                 list)
                     COMPREPLY=($(compgen -W "--update --apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
-                    ;;
-                log)
-                    COMPREPLY=($(compgen -W "$log_clients set-level --files --level --topology" -- "$cur"))
-                    ;;
-                diag)
-                    case "${words[2]}" in
-                        cpu-affinity)
-                            COMPREPLY=($(compgen -W "--components --threads --apply --json --topology" -- "$cur"))
-                            ;;
-                        cpu-freq)
-                            COMPREPLY=($(compgen -W "--apply --reapply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
-                            ;;
-                        net)
-                            COMPREPLY=($(compgen -W "--interface --listen --json --topology" -- "$cur"))
-                            ;;
-                        *)
-                            COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                validate)
-                    COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
                     ;;
                 config)
                     case "${words[2]}" in
@@ -6271,29 +6197,6 @@ _smd_complete() {
                             ;;
                         *)
                             COMPREPLY=($(compgen -W "show migrate backup restore init edit" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                completion)
-                    case "${words[2]}" in
-                        bash)
-                            COMPREPLY=($(compgen -W "--install" -- "$cur"))
-                            ;;
-                        *)
-                            COMPREPLY=($(compgen -W "bash" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                verifier)
-                    case "${words[2]}" in
-                        report)
-                            COMPREPLY=($(compgen -W "--window --rx-call --lost --in-flight --delivered --cadence --rejected --silent-drop --suppressed --json --db" -- "$cur"))
-                            ;;
-                        rehabilitate)
-                            COMPREPLY=($(compgen -W "--db" -- "$cur"))
-                            ;;
-                        *)
-                            COMPREPLY=($(compgen -W "report rehabilitate" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -6319,100 +6222,174 @@ _smd_complete() {
                             ;;
                     esac
                     ;;
-                instance)
+                admin)
+                    # `smd admin <subverb> ...` — deeper completion keyed on
+                    # the relocated subverb (words[2]); operand positions are
+                    # shifted one slot right vs the old top-level forms.
                     case "${words[2]}" in
-                        list)
-                            COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                        diag)
+                            case "${words[3]}" in
+                                cpu-affinity)
+                                    COMPREPLY=($(compgen -W "--components --threads --apply --json --topology" -- "$cur"))
+                                    ;;
+                                cpu-freq)
+                                    COMPREPLY=($(compgen -W "--apply --reapply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
+                                    ;;
+                                net)
+                                    COMPREPLY=($(compgen -W "--interface --listen --json --topology" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
+                                    ;;
+                            esac
                             ;;
-                        show|edit|enable|disable)
-                            # Position 3 = client; position 4 = reporter ID (operator-typed).
-                            if [[ $cword -eq 3 ]]; then
-                                COMPREPLY=($(compgen -W "$components" -- "$cur"))
-                            fi
+                        validate)
+                            COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
                             ;;
-                        add)
-                            if [[ $cword -eq 3 ]]; then
-                                COMPREPLY=($(compgen -W "$components" -- "$cur"))
-                            elif [[ $cword -ge 5 ]]; then
-                                COMPREPLY=($(compgen -W "--force --dry-run" -- "$cur"))
-                            fi
+                        storage)
+                            case "${words[3]}" in
+                                migrate-to-sqlite)
+                                    COMPREPLY=($(compgen -W "--yes" -- "$cur"))
+                                    ;;
+                                trim)
+                                    COMPREPLY=($(compgen -W "--max-age --db --target-db --target-table --yes --all" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "migrate-to-sqlite trim tune-timestd" -- "$cur"))
+                                    ;;
+                            esac
                             ;;
-                        remove)
-                            if [[ $cword -eq 3 ]]; then
-                                COMPREPLY=($(compgen -W "$components" -- "$cur"))
-                            elif [[ $cword -ge 5 ]]; then
-                                COMPREPLY=($(compgen -W "--purge --yes --dry-run" -- "$cur"))
-                            fi
+                        verifier)
+                            case "${words[3]}" in
+                                report)
+                                    COMPREPLY=($(compgen -W "--window --rx-call --lost --in-flight --delivered --cadence --rejected --silent-drop --suppressed --json --db --target" -- "$cur"))
+                                    ;;
+                                rehabilitate)
+                                    COMPREPLY=($(compgen -W "--db" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "report rehabilitate" -- "$cur"))
+                                    ;;
+                            esac
                             ;;
-                        migrate)
-                            COMPREPLY=()
+                        wisdom)
+                            COMPREPLY=($(compgen -W "plan status" -- "$cur"))
+                            ;;
+                        public-ip)
+                            COMPREPLY=($(compgen -W "--no-v6 -q --quiet" -- "$cur"))
+                            ;;
+                        rac)
+                            COMPREPLY=($(compgen -W "status start stop restart install configure reconfigure" -- "$cur"))
+                            ;;
+                        timing)
+                            COMPREPLY=($(compgen -W "status reconcile --dry-run" -- "$cur"))
+                            ;;
+                        radiod)
+                            COMPREPLY=($(compgen -W "migrate --yes" -- "$cur"))
+                            ;;
+                        uninstall)
+                            COMPREPLY=($(compgen -W "--keep-config --wipe-data --keep-data --revert-host --keep-host --remove-users --keep-users --remove-source --keep-source --yes --dry-run" -- "$cur"))
+                            ;;
+                        completion)
+                            case "${words[3]}" in
+                                bash)
+                                    COMPREPLY=($(compgen -W "--install" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "bash" -- "$cur"))
+                                    ;;
+                            esac
+                            ;;
+                        environment)
+                            COMPREPLY=($(compgen -W "list probe describe" -- "$cur"))
+                            ;;
+                        log)
+                            case "${words[3]}" in
+                                set-level)
+                                    # Position 4 = client; position 5 = level.
+                                    if [[ $cword -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$log_clients" -- "$cur"))
+                                    elif [[ $cword -eq 5 ]]; then
+                                        COMPREPLY=($(compgen -W "DEBUG INFO WARNING ERROR CRITICAL" -- "$cur"))
+                                    fi
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "$log_clients set-level --files --level --topology" -- "$cur"))
+                                    ;;
+                            esac
+                            ;;
+                        instance)
+                            case "${words[3]}" in
+                                list)
+                                    COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                                    ;;
+                                show|edit|enable|disable)
+                                    # Position 4 = client; position 5 = reporter ID (operator-typed).
+                                    if [[ $cword -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                                    fi
+                                    ;;
+                                add)
+                                    if [[ $cword -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                                    elif [[ $cword -ge 6 ]]; then
+                                        COMPREPLY=($(compgen -W "--force --dry-run" -- "$cur"))
+                                    fi
+                                    ;;
+                                remove)
+                                    if [[ $cword -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                                    elif [[ $cword -ge 6 ]]; then
+                                        COMPREPLY=($(compgen -W "--purge --yes --dry-run" -- "$cur"))
+                                    fi
+                                    ;;
+                                migrate)
+                                    COMPREPLY=($(compgen -W "--yes" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "list show add remove edit enable disable migrate" -- "$cur"))
+                                    ;;
+                            esac
+                            ;;
+                        sources)
+                            case "${words[3]}" in
+                                list)
+                                    COMPREPLY=($(compgen -W "--clients-only --inventory --keys" -- "$cur"))
+                                    ;;
+                                add|remove)
+                                    # Position 4 = client; position 5+ = source key.
+                                    if [[ $cword -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "wspr-recorder psk-recorder hfdl-recorder codar-sounder" -- "$cur"))
+                                    elif [[ $cword -ge 5 ]]; then
+                                        # Re-glue the partial colon-broken key.
+                                        local _partial="" _i
+                                        for ((_i = 5; _i <= cword; _i++)); do
+                                            _partial="${_partial}${words[_i]}"
+                                        done
+                                        local _keys
+                                        _keys=$(smd admin sources list --keys 2>/dev/null)
+                                        COMPREPLY=($(compgen -W "$_keys" -- "$_partial"))
+                                        if type -t __ltrim_colon_completions &>/dev/null; then
+                                            __ltrim_colon_completions "$_partial"
+                                        elif [[ "$_partial" == *:* ]]; then
+                                            local _strip="${_partial%:*}:"
+                                            local _j
+                                            for _j in "${!COMPREPLY[@]}"; do
+                                                COMPREPLY[_j]="${COMPREPLY[_j]#$_strip}"
+                                            done
+                                        fi
+                                    fi
+                                    ;;
+                                apply)
+                                    COMPREPLY=($(compgen -W "--dry-run" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "list add remove apply" -- "$cur"))
+                                    ;;
+                            esac
                             ;;
                         *)
-                            COMPREPLY=($(compgen -W "list show add remove edit enable disable migrate" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                log)
-                    case "${words[2]}" in
-                        set-level)
-                            # Position 3 = client; position 4 = level.
-                            if [[ $cword -eq 3 ]]; then
-                                COMPREPLY=($(compgen -W "$log_clients" -- "$cur"))
-                            elif [[ $cword -eq 4 ]]; then
-                                COMPREPLY=($(compgen -W "DEBUG INFO WARNING ERROR CRITICAL" -- "$cur"))
-                            fi
-                            ;;
-                    esac
-                    ;;
-                sources)
-                    case "${words[2]}" in
-                        list)
-                            COMPREPLY=($(compgen -W "--clients-only --inventory --keys" -- "$cur"))
-                            ;;
-                        add|remove)
-                            # Position 3 = client; position 4+ = source key.
-                            # Static list of well-known clients (matches sources.KNOWN_CLIENTS).
-                            if [[ $cword -eq 3 ]]; then
-                                COMPREPLY=($(compgen -W "wspr-recorder psk-recorder hfdl-recorder codar-sounder" -- "$cur"))
-                            elif [[ $cword -ge 4 ]]; then
-                                # Bash's COMP_WORDBREAKS includes ':' by default,
-                                # so `radiod:bee1` arrives as three words
-                                # ("radiod" ":" "bee1") with cword=6.  Re-glue
-                                # everything past the client position into the
-                                # partial key, then strip the pre-colon prefix
-                                # from each reply so bash inserts only the
-                                # post-colon portion.
-                                local _partial="" _i
-                                for ((_i = 4; _i <= cword; _i++)); do
-                                    _partial="${_partial}${words[_i]}"
-                                done
-                                # Costs one mDNS round-trip (~1 s).  Acceptable
-                                # since the operator already typed a verb +
-                                # client and is committed to the action; cache
-                                # would help if it gets annoying.
-                                local _keys
-                                _keys=$(smd sources list --keys 2>/dev/null)
-                                COMPREPLY=($(compgen -W "$_keys" -- "$_partial"))
-                                if type -t __ltrim_colon_completions &>/dev/null; then
-                                    __ltrim_colon_completions "$_partial"
-                                elif [[ "$_partial" == *:* ]]; then
-                                    # Manual strip: drop everything up to and
-                                    # including the last colon from each reply,
-                                    # because bash will substitute starting at
-                                    # the colon (the wordbreak).
-                                    local _strip="${_partial%:*}:"
-                                    local _j
-                                    for _j in "${!COMPREPLY[@]}"; do
-                                        COMPREPLY[_j]="${COMPREPLY[_j]#$_strip}"
-                                    done
-                                fi
-                            fi
-                            ;;
-                        apply)
-                            COMPREPLY=($(compgen -W "--dry-run" -- "$cur"))
-                            ;;
-                        *)
-                            COMPREPLY=($(compgen -W "list add remove apply" -- "$cur"))
+                            COMPREPLY=($(compgen -W "$admin_cmds" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -6424,7 +6401,7 @@ _smd_complete() {
 complete -F _smd_complete smd
 
 # Short aliases for common smd subcommands.
-# Add to your shell with: source <(smd completion bash)
+# Add to your shell with: source <(smd admin completion bash)
 smdt()   { smd tui "$@"; }
 smdtui() { smd tui "$@"; }
 
@@ -6435,7 +6412,7 @@ smdtui() { smd tui "$@"; }
 # because `source <(...)` only takes effect when run in the caller's own
 # scope, which aliases don't provide.
 smdrefresh() {
-    source <(smd completion bash) && echo "smd: tab-completion refreshed"
+    source <(smd admin completion bash) && echo "smd: tab-completion refreshed"
 }
 
 # smdt / smdtui take no subcommands; just complete --topology via file completion.
@@ -6813,7 +6790,7 @@ def cmd_wisdom_plan(args) -> int:
         if len(busy) > 6:
             print(f'      … and {len(busy) - 6} more')
         _info('Run:  smd stop')
-        _info('Then re-run:  smd wisdom plan')
+        _info('Then re-run:  smd admin wisdom plan')
         return 1
 
     WISDOM_TMP.parent.mkdir(parents=True, exist_ok=True)
@@ -6882,7 +6859,7 @@ def cmd_wisdom_plan(args) -> int:
         try:
             with open(WISDOM_LOG, 'a') as logf:
                 logf.write(f'\n# {time.strftime("%Y-%m-%dT%H:%M:%S%z")} '
-                           f'— smd wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)\n')
+                           f'— smd admin wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)\n')
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, bufsize=1,
@@ -6950,7 +6927,7 @@ def cmd_wisdom_status(args) -> int:
     if not WISDOM_FILE.exists():
         _warn(f'{WISDOM_FILE} does not exist — radiod will fall back to a '
               'fast (but suboptimal) "measure"-level plan at startup')
-        _info('To generate:  smd wisdom plan   (after smd stop)')
+        _info('To generate:  smd admin wisdom plan   (after smd stop)')
         return 1
     st = WISDOM_FILE.stat()
     age_s = time.time() - st.st_mtime
@@ -7034,7 +7011,7 @@ def _sources_inventory():
     """
     if not _HAS_SIGMOND_LIB:
         return None, ('sigmond library not found; install lib/sigmond '
-                      'alongside bin/smd to use `smd sources`')
+                      'alongside bin/smd to use `smd admin sources`')
     from sigmond.environment import Environment
     from sigmond.discovery import mdns
     from sigmond import sources as _sources_mod
@@ -7069,7 +7046,7 @@ def _sources_resolve_key(token: str, inventory_rows):
     if not matches:
         return None, (
             f"no source matches {token!r}; pass a full "
-            "'<type>:<identifier>' key, or run `smd sources list` "
+            "'<type>:<identifier>' key, or run `smd admin sources list` "
             "to see what's available"
         )
     return None, (
@@ -7159,7 +7136,7 @@ def cmd_sources_add(args) -> int:
     client = args.client
     # Normalize a per-instance arg `<client>@<reporter-id>` so a slashed
     # WSPRnet reporter id (AC0G/SIGMA) is stored in its canonical `=` form
-    # (AC0G=SIGMA) — the same encoder `smd instance add` uses.  Without this
+    # (AC0G=SIGMA) — the same encoder `smd admin instance add` uses.  Without this
     # the raw '/' lands in the .sources.toml path and the write blows up.
     if '@' in client:
         from sigmond import instance as _inst
@@ -7188,7 +7165,7 @@ def cmd_sources_add(args) -> int:
         return 0
     cs.save()
     print(f'{client}: added {key} ({len(cs.selected)} source(s) total)')
-    _info('  run `smd sources apply` to render the change into the client config')
+    _info('  run `smd admin sources apply` to render the change into the client config')
     return 0
 
 
@@ -7226,7 +7203,7 @@ def cmd_sources_remove(args) -> int:
         return 0
     cs.save()
     print(f'{client}: removed {key} ({len(cs.selected)} source(s) remain)')
-    _info('  run `smd sources apply` to render the change into the client config')
+    _info('  run `smd admin sources apply` to render the change into the client config')
     return 0
 
 
@@ -7456,7 +7433,7 @@ def cmd_sources_apply(args) -> int:
         inst_config = _IP('/etc/wspr-recorder') / f'{rid}.toml'
         if not inst_config.exists():
             _info(f'  ⚠ {stem}: no per-instance config at {inst_config} — '
-                  f'run `smd instance add wspr-recorder {rid}` first')
+                  f'run `smd admin instance add wspr-recorder {rid}` first')
             continue
         changed, message = _apply_sources_to_wspr_recorder(
             sel, inventory_rows, inst_config, dry_run=dry_run)
@@ -11251,20 +11228,20 @@ def cmd_completion(args) -> int:
             dest.write_text(_BASH_COMPLETION.strip() + '\n')
             print(f'Installed to {dest}')
             print('Activate in your current session with:')
-            print('  source <(smd completion bash)')
+            print('  source <(smd admin completion bash)')
             return 0
         print(_BASH_COMPLETION.strip())
         return 0
-    print('Usage: smd completion bash [--install]')
+    print('Usage: smd admin completion bash [--install]')
     print()
     print('To activate in the current session:')
-    print('  source <(smd completion bash)')
+    print('  source <(smd admin completion bash)')
     print()
     print('To install for your user (creates the directory automatically):')
-    print('  smd completion bash --install')
+    print('  smd admin completion bash --install')
     print()
     print('To install system-wide:')
-    print('  smd completion bash | sudo tee /etc/bash_completion.d/smd >/dev/null')
+    print('  smd admin completion bash | sudo tee /etc/bash_completion.d/smd >/dev/null')
     print()
     print('The completion script also defines short aliases:')
     print('  smdt   →  smd tui')
@@ -11368,7 +11345,7 @@ def cmd_config_edit(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# smd instance — per-reporter client instance lifecycle
+# smd admin instance — per-reporter client instance lifecycle
 # (MULTI-INSTANCE-ARCHITECTURE.md §6)
 # ---------------------------------------------------------------------------
 
@@ -11453,7 +11430,7 @@ def cmd_instance_list(args) -> int:
             _info(f'no instances of {client_filter} on this host')
         else:
             _info('no per-reporter instances on this host yet '
-                  '(see `smd instance add --help`)')
+                  '(see `smd admin instance add --help`)')
         return 0
     _heading('instances')
     print(f'  {"CLIENT":<22} {"REPORTER ID":<18} '
@@ -11481,7 +11458,7 @@ def cmd_instance_show(args) -> int:
     display_rid = _display_reporter(args.reporter_id, inst)
     if i is None:
         _err(f'{args.client}@{display_rid}: no per-instance files '
-             f'(use `smd instance add` to create)')
+             f'(use `smd admin instance add` to create)')
         return 1
     _heading(f'instance: {args.client}@{display_rid}')
     print(f'  reporter ID:  {display_rid}')
@@ -11530,7 +11507,7 @@ def cmd_instance_add(args) -> int:
         return 1
     if not _check_systemd_template(client):
         _warn(f'{client}@.service systemd template is NOT installed; '
-              f'`smd instance enable` will fail until it is')
+              f'`smd admin instance enable` will fail until it is')
         _info(f'  install with: smd component install {client}')
     try:
         paths = inst.create_instance(client, reporter_id,
@@ -11550,9 +11527,9 @@ def cmd_instance_add(args) -> int:
     if not getattr(args, 'dry_run', False):
         _info('')
         _info(f'next: wire sources and edit the config, then enable:')
-        _info(f'  smd sources add {client}@{display_rid} <kind>:<id>')
-        _info(f'  smd instance edit {client} {display_rid}')
-        _info(f'  smd instance enable {client} {display_rid}')
+        _info(f'  smd admin sources add {client}@{display_rid} <kind>:<id>')
+        _info(f'  smd admin instance edit {client} {display_rid}')
+        _info(f'  smd admin instance enable {client} {display_rid}')
     return 0
 
 
@@ -11598,7 +11575,7 @@ def cmd_instance_remove(args) -> int:
     if not dry_run:
         _info('')
         _info(f'unit {i.paths.unit_name} is NOT touched; '
-              f'run `smd instance disable {args.client} {display_rid}` '
+              f'run `smd admin instance disable {args.client} {display_rid}` '
               f'separately if needed')
     return 0
 
@@ -11621,7 +11598,7 @@ def cmd_instance_enable(args) -> int:
              f'cannot enable')
         return 1
     if not paths.config.exists():
-        _err(f'{paths.config} missing — run `smd instance add` first')
+        _err(f'{paths.config} missing — run `smd admin instance add` first')
         return 1
     import subprocess
     for action in ('enable', 'start'):
@@ -11682,7 +11659,7 @@ def cmd_instance_edit(args) -> int:
         _err(str(exc))
         return 1
     if not paths.config.exists():
-        _err(f'{paths.config} missing — run `smd instance add` first')
+        _err(f'{paths.config} missing — run `smd admin instance add` first')
         return 1
     _warn('Phase-2 stub: clients have not yet been refactored to read '
           'per-instance config.  Edit the per-instance config directly:')
@@ -12417,18 +12394,18 @@ def _add_ka9q_watch_args(p) -> None:
 
 
 def main() -> int:
-    # v2 canonical `smd log set-level [<client>] <level>` — pre-argparse
+    # v2 canonical `smd admin log set-level [<client>] <level>` — pre-argparse
     # intercept because argparse can't cleanly mix a sub-verb with the
-    # legacy positional-client shape (`smd log [<client>]`), which must
+    # legacy positional-client shape (`smd admin log [<client>]`), which must
     # keep working.  Routes the same write semantics as the legacy
-    # `smd log [<client>] --level <level>` path.
+    # `smd admin log [<client>] --level <level>` path.
     # Narrow intercept: only matches when `log` is the FIRST positional
     # (no `--topology` etc. before it).  Operators needing a topology
     # override should use the legacy `log <client> --level X` shape
     # during the deprecation window.
     # Two argv shapes:
-    #   smd log set-level <level>            — global CLIENT_LOG_LEVEL default
-    #   smd log set-level <client> <level>   — per-client override + SIGHUP
+    #   smd admin log set-level <level>            — global CLIENT_LOG_LEVEL default
+    #   smd admin log set-level <client> <level>   — per-client override + SIGHUP
     if len(sys.argv) >= 3 and sys.argv[1] == 'log' and sys.argv[2] == 'set-level':
         if len(sys.argv) == 4:
             return cmd_log(argparse.Namespace(
@@ -12446,7 +12423,7 @@ def main() -> int:
                 files=False,
                 topology=None,
             ))
-        print('smd log set-level: requires <level> (global default) '
+        print('smd admin log set-level: requires <level> (global default) '
               'or <client> <level> (per-client)',
               file=sys.stderr)
         return 2
@@ -12472,10 +12449,6 @@ def main() -> int:
               Operator (daily, read-mostly):
                 status     service health snapshot
                 watch      live tail (wspr | psk | hfdl | codar | ka9q | uploads | verifier)
-                log        tail journal or file logs
-                           (`log set-level <client> <lvl>` to mutate)
-                validate   cross-client harmonization checks
-                public-ip  external IP probe
                 tui        launch interactive TUI
 
               Operator (mutating — needs sudo):
@@ -12484,24 +12457,19 @@ def main() -> int:
                 enable / disable                  toggle component in topology
 
               Installer / maintenance:
+                install    install and configure components
+                list       per-component status (lifecycle + git + version policy)
                 component  catalog (list | install | update | add | remove | enable | disable)
-                instance   per-reporter client instance lifecycle
-                           (list | show | add | remove | edit | enable | disable | migrate)
                 config     show / migrate / init / edit per-client config
-                sources    per-client sensor feed selection (radiod / KiwiSDR / mag / vlf)
-                environment    declared vs observed network peers (list | probe | describe)
-                wisdom     FFTW3 wisdom planner (plan | status)
-                storage    sink backend (migrate-to-sqlite | trim | tune-timestd)
+                bringup    guided station bring-up from a catalog profile
 
-              Diagnostics / debug:
-                diag       cpu-affinity | cpu-freq | net
-                verifier   wsprnet upload audit (report | rehabilitate)
-                rac        wd-rac tunnel lifecycle (status | start | stop | restart | install)
+              Diagnostics & maintenance (under `admin`):
+                admin diag | validate | verifier | wisdom | storage |
+                      environment | sources | public-ip | log | rac |
+                      timing | radiod | instance | uninstall | completion
 
-              Meta:
-                completion bash    emit bash tab-completion script
-
-            Run  smd <verb> --help  for verb-specific options.
+            Run  smd <verb> --help  (or  smd admin <verb> --help)  for
+            verb-specific options.
             Verbs deprecated in v2 still work but emit a warning naming
             their replacement; see CLI-V2-SPEC.md §5 for the full list.
         '''),
@@ -12510,9 +12478,14 @@ def main() -> int:
                         help=f'topology file (default: {TOPOLOGY_PATH})')
     sub = parser.add_subparsers(dest='command')
 
-    # add — clone (or pull) a component repo into /opt/git/sigmond/<name>/
-    p = sub.add_parser('add', help='clone a component repo (run smd install + enable to bring it online)')
-    p.add_argument('url', help='git URL of the component repo (e.g. git@github.com:owner/foo.git)')
+    # admin — umbrella for diagnostic / maintenance / occasional verbs, kept
+    # off the small daily top-level surface.  Each subcommand is a relocated
+    # former top-level verb and keeps its own sub-subparsers unchanged.
+    p_admin = sub.add_parser('admin',
+        help='diagnostics & maintenance (diag | validate | verifier | wisdom | '
+             'storage | environment | sources | public-ip | log | rac | timing | '
+             'radiod | instance | uninstall | completion)')
+    admin_sub = p_admin.add_subparsers(dest='admin_command')
 
     # enable — set [component.<name>].enabled = true in topology.toml
     p = sub.add_parser('enable', help='enable component(s) in /etc/sigmond/topology.toml')
@@ -12522,29 +12495,9 @@ def main() -> int:
     p = sub.add_parser('disable', help='disable component(s) and stop their units')
     p.add_argument('names', nargs='+', help='one or more component names')
 
-    # remove — delete the [component.<name>] section AND stop units;
-    # `--purge` (or any deprecated name) escalates to a full clean
-    p = sub.add_parser(
-        'remove',
-        help='remove component (default: topology section + stop units; '
-             '--purge or deprecated names: full clean)',
-    )
-    p.add_argument('names', nargs='+', help='one or more component names')
-    p.add_argument('--purge', action='store_true',
-                   help='full clean: stop+disable units, rm source / venv / '
-                        '/etc/<name>/.  Implied for names in the deprecation list.')
-    p.add_argument('--force', '-f', action='store_true',
-                   help='allow --purge against a name not in the deprecation list')
-    p.add_argument('--yes', '-y', action='store_true',
-                   help='skip the interactive confirmation prompt')
-    p.add_argument('--dry-run', action='store_true',
-                   help='with --purge: show the plan without making changes')
-
-    # install + apply share their option set between the top-level form
-    # (`smd install`, `smd apply` — kept for muscle memory) and the
-    # grouped form (`smd software install`, `smd software apply` — the
-    # preferred form going forward; "software" reads as a noun verb-pair
-    # the way operators already think about it).
+    # install + apply share their option set, defined once here and
+    # reused by the top-level `smd install` / `smd apply` and the
+    # `smd component install` form.
     def _add_install_args(p):
         p.add_argument('client', nargs='?', default=None,
                        help='specific client to install from catalog (e.g. psk-recorder)')
@@ -12580,21 +12533,8 @@ def main() -> int:
                            help='print the staged plan without running it')
 
     _add_install_args(sub.add_parser(
-        'install', help='install and configure components '
-                       '(alias for `smd software install`)'))
-    _add_apply_args(sub.add_parser(
-        'apply', help='reconcile services with current config '
-                      '(alias for `smd software apply`)'))
-
-    # software — grouped parent for the install/apply pair.  Both
-    # subverbs accept the exact same flags as the top-level forms.
-    p_software = sub.add_parser(
-        'software',
-        help='install or reconcile sigmond-managed software components')
-    software_sub = p_software.add_subparsers(dest='software_command')
-    _add_install_args(software_sub.add_parser(
         'install', help='install and configure components'))
-    _add_apply_args(software_sub.add_parser(
+    _add_apply_args(sub.add_parser(
         'apply', help='reconcile services with current config'))
 
     # component — v2 canonical namespace for catalog operations.
@@ -12671,7 +12611,7 @@ def main() -> int:
 
     # instance — v2 per-reporter client instances
     # (MULTI-INSTANCE-ARCHITECTURE.md §6)
-    p_instance = sub.add_parser(
+    p_instance = admin_sub.add_parser(
         'instance',
         help='per-reporter client instance lifecycle '
              '(list / show / add / remove / edit / enable / disable / migrate)')
@@ -12743,8 +12683,8 @@ def main() -> int:
         help='actually perform the migration (requires root); '
              'without this, only the candidate list is printed')
 
-    # smd radiod — RADIOD-IDENTIFICATION.md §6 Phase 5
-    p_radiod = sub.add_parser(
+    # smd admin radiod — RADIOD-IDENTIFICATION.md §6 Phase 5
+    p_radiod = admin_sub.add_parser(
         'radiod',
         help='radiod identification / canonical-naming operations '
              '(see docs/RADIOD-IDENTIFICATION.md)')
@@ -12827,7 +12767,7 @@ def main() -> int:
                    help='emit machine-readable JSON')
 
     # log
-    p = sub.add_parser('log', help='view logs or set log level for a client')
+    p = admin_sub.add_parser('log', help='view logs or set log level for a client')
     p.add_argument('client', nargs='?', default=None,
                    help='client name (e.g. psk-recorder, hf-timestd)')
     p.add_argument('--files', action='store_true',
@@ -12836,7 +12776,7 @@ def main() -> int:
                    help='set log level (DEBUG/INFO/WARNING/ERROR/CRITICAL) in coordination.env + SIGHUP')
 
     # wisdom — FFTW3 wisdom-file planner
-    p_wisdom = sub.add_parser('wisdom',
+    p_wisdom = admin_sub.add_parser('wisdom',
                               help='FFTW3 wisdom-file planner (radiod uses /etc/fftw/wisdomf)')
     wisdom_sub = p_wisdom.add_subparsers(dest='wisdom_command')
 
@@ -12849,7 +12789,7 @@ def main() -> int:
                               help='show whether /etc/fftw/wisdomf exists and how old it is')
 
     # diag  (with its own sub-commands)
-    p_diag = sub.add_parser('diag', help='run cross-component diagnostics')
+    p_diag = admin_sub.add_parser('diag', help='run cross-component diagnostics')
     p_diag.add_argument('--components', metavar='C1,C2')
     diag_sub = p_diag.add_subparsers(dest='diag_command')
 
@@ -12884,57 +12824,6 @@ def main() -> int:
     p.add_argument('--other-max-mhz', type=int, metavar='MHZ',
                    help='override other CPU max frequency (default: from topology.toml or 1400)')
 
-    # `smd cpu` — short alias for `smd diag cpu-freq`.  When running in a
-    # Proxmox VM, fetches live per-pCPU freqs from the host via the same
-    # SSH path install.sh used for grub edits.  No sub-command needed: it
-    # just shows the live table.
-    p_cpu = sub.add_parser(
-        'cpu',
-        help='show + manage per-CPU frequency caps (live data via SSH on Proxmox VMs)',
-        description=(
-            'Show per-CPU frequencies and apply the radiod/worker freq cap '
-            'policy.  By default just prints the live table: cur/max/hw_max '
-            'MHz per CPU + governor.  On a Proxmox VM the live data comes '
-            'from the host over SSH (the VM kernel cannot see real freqs).  '
-            'On bare metal it reads /sys/devices/system/cpu/cpu*/cpufreq.'
-        ),
-        epilog=(
-            'Examples:\n'
-            '  smd cpu                  # show live table (no changes)\n'
-            '  smd cpu --apply     # bare-metal: write the caps to /sys\n'
-            '  smd cpu --reapply   # VM: re-run the host hookscript\n'
-            '\n'
-            'Policy comes from /etc/sigmond/topology.toml [cpu_freq]:\n'
-            '  radiod_max_mhz (default 3200)  applied to CPUs running radiod\n'
-            '  other_max_mhz  (default 1400)  applied to every other CPU\n'
-            'Override per-invocation with --radiod-max-mhz / --other-max-mhz.\n'
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p_cpu.add_argument(
-        '--apply', action='store_true',
-        help=('BARE-METAL ONLY: write the policy caps to '
-              '/sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq.  '
-              'No effect inside a Proxmox VM (the VM does not own the '
-              'real CPU policy — use --reapply there instead).  '
-              'Requires root.'))
-    p_cpu.add_argument(
-        '--reapply', action='store_true',
-        help=('PROXMOX VM ONLY: SSH to the host and re-execute the '
-              'cpu-pin hookscript (/var/lib/vz/snippets/cpu-pin-<VMID>.sh).  '
-              'That rewrites scaling_max_freq for every pinned pCPU AND '
-              're-pins KVM vCPU threads — the same operation the hookscript '
-              'performs at VM start.  Use this when host-side tuned or a '
-              'host reboot has reset the caps; avoids bouncing the VM.'))
-    p_cpu.add_argument(
-        '--radiod-max-mhz', type=int, metavar='MHZ',
-        help='override radiod CPU max frequency for this invocation '
-             '(default: topology.toml cpu_freq.radiod_max_mhz, else 3200)')
-    p_cpu.add_argument(
-        '--other-max-mhz', type=int, metavar='MHZ',
-        help='override other CPU max frequency for this invocation '
-             '(default: topology.toml cpu_freq.other_max_mhz, else 1400)')
-
     p = diag_sub.add_parser('net',
                              help='classify network for multi-host radiod (IGMP, multicast)')
     p.add_argument('--interface', metavar='IFACE',
@@ -12958,8 +12847,8 @@ def main() -> int:
         ),
         epilog=(
             'Examples:\n'
-            '  smd diag drop-in psk-recorder\n'
-            '  smd diag drop-in your-new-client\n'
+            '  smd admin diag drop-in psk-recorder\n'
+            '  smd admin diag drop-in your-new-client\n'
             '\n'
             'See docs/ADD-A-CLIENT.md for the full checklist.\n'
         ),
@@ -12969,7 +12858,7 @@ def main() -> int:
                       help='client name (catalog key, e.g. psk-recorder)')
 
     # public-ip — quick outbound-IP lookup
-    p_pip = sub.add_parser(
+    p_pip = admin_sub.add_parser(
         'public-ip',
         help='show this host\'s outbound public IP (IPv4 + IPv6)',
         description=(
@@ -12984,10 +12873,10 @@ def main() -> int:
                        help='skip IPv6 probe (default: try both)')
     p_pip.add_argument('-q', '--quiet', action='store_true',
                        help='print only the IP(s) on stdout, no decorations '
-                            '(scriptable: `MY_IP=$(smd public-ip -q --no-v6)`)')
+                            '(scriptable: `MY_IP=$(smd admin public-ip -q --no-v6)`)')
 
     # sources — per-client SDR source selection (multi-RX888 plan, phase 2)
-    p_sources = sub.add_parser(
+    p_sources = admin_sub.add_parser(
         'sources',
         help='select which SDR sources each client (wspr-recorder, '
              'psk-recorder, …) consumes from',
@@ -13036,18 +12925,18 @@ def main() -> int:
     )
 
     # completion
-    p_completion = sub.add_parser('completion', help='emit shell tab-completion script')
+    p_completion = admin_sub.add_parser('completion', help='emit shell tab-completion script')
     completion_sub = p_completion.add_subparsers(dest='completion_command')
     p_bash = completion_sub.add_parser('bash', help='emit bash completion script (source or install)')
     p_bash.add_argument('--install', action='store_true',
                         help='install to ~/.local/share/bash-completion/completions/smd (creates dir)')
 
     # validate (Phase 1)
-    p = sub.add_parser('validate',
+    p = admin_sub.add_parser('validate',
                        help='run cross-client harmonization rules (read-only)')
     p.add_argument('--json', action='store_true',
                    help='emit machine-readable JSON')
-    p_timing = sub.add_parser('timing',
+    p_timing = admin_sub.add_parser('timing',
                               help='timing-chain reconciler (GPSDO/gpsd/chrony/hf-timestd)')
     p_timing.add_argument('timing_cmd', nargs='?', choices=['status', 'reconcile'],
                           default='status',
@@ -13055,7 +12944,7 @@ def main() -> int:
     p_timing.add_argument('--dry-run', action='store_true',
                           help='reconcile: show the actions without applying them')
 
-    p_uninstall = sub.add_parser('uninstall',
+    p_uninstall = admin_sub.add_parser('uninstall',
         help='tear down the whole sigmond install (plan-first; --yes to execute)')
     p_uninstall.add_argument('--keep-config', action='store_true',
         help='preserve /etc config + /var/lib data + source checkouts + users')
@@ -13070,21 +12959,14 @@ def main() -> int:
     p_uninstall.add_argument('--yes', action='store_true', help='execute (default: plan only)')
     p_uninstall.add_argument('--dry-run', action='store_true', help='print plan and exit')
 
-    # psk-watch — live tail of psk-recorder's PSK Reporter upload activity
-    p_tts = sub.add_parser('timestd-tune-storage',
-                           help='size hf-timestd retention policy to local '
-                                'disk (writes timestd-prune drop-ins)')
-    p_tts.add_argument('--apply', action='store_true',
-                       help='write the drop-ins (default: print recommendation only)')
-
     # storage — local sink backend management (SQLite is now the default;
     # this verb removes leftover ClickHouse installs on migrated hosts).
-    # smd verifier report — windowed audit of "uploaded but never
+    # smd admin verifier report — windowed audit of "uploaded but never
     # appeared in wspr.rx" cohort.  Source data lives in
     # ``/var/lib/sigmond/sink.db``'s ``wsprnet_audit`` +
     # ``wsprnet_audit_batch`` tables, populated by wspr-recorder when
     # ``WSPRNET_AUDIT=1`` is set in its env file.
-    p_verifier = sub.add_parser(
+    p_verifier = admin_sub.add_parser(
         'verifier',
         help='report on wsprnet upload audit (uploaded → verified '
              'in wspr.rx → lost / dropped)',
@@ -13143,7 +13025,7 @@ def main() -> int:
         help='list callsigns the negative cache has marked as '
              'consistently-rejected by wsprnet — these are filtered '
              'out of hashtable.txt / fst4w_calls.txt automatically. '
-             'Use `smd verifier rehabilitate <rx_call> <call>` to '
+             'Use `smd admin verifier rehabilitate <rx_call> <call>` to '
              'undo a suppression manually.',
     )
     p_v_report.add_argument(
@@ -13211,9 +13093,9 @@ def main() -> int:
         help='sink.db path (default /var/lib/sigmond/sink.db)',
     )
 
-    p_rac = sub.add_parser(
+    p_rac = admin_sub.add_parser(
         'rac',
-        help='wd-rac (frpc) remote-access tunnel — bare `smd rac` is '
+        help='wd-rac (frpc) remote-access tunnel — bare `smd admin rac` is '
              'state-aware (installs/configures/shows status); also: '
              'status | configure | reconfigure | install | start | stop | '
              'restart',
@@ -13270,10 +13152,10 @@ def main() -> int:
     ))
     _add_rac_provision_args(rac_sub.add_parser(
         'reconfigure',
-        help='alias for `smd rac configure`',
+        help='alias for `smd admin rac configure`',
     ))
 
-    p_storage = sub.add_parser('storage',
+    p_storage = admin_sub.add_parser('storage',
                                help='manage the local sink backend '
                                     '(SQLite default; remove leftover '
                                     'ClickHouse install)')
@@ -13517,7 +13399,7 @@ def main() -> int:
                    help='optional instance name for multi-source clients')
 
     # environment — situational awareness (site inventory + reconciliation).
-    p_env = sub.add_parser('environment',
+    p_env = admin_sub.add_parser('environment',
                            help='inventory peers declared in environment.toml vs what is observed')
     env_sub = p_env.add_subparsers(dest='env_command')
 
@@ -13563,11 +13445,17 @@ def main() -> int:
         parser.print_help()
         return 0
 
+    # admin — umbrella verb.  Rewrite into the relocated former top-level
+    # verb so every existing per-verb dispatch branch below works unchanged.
+    if args.command == 'admin':
+        args.command = getattr(args, 'admin_command', None)
+        if not args.command:
+            p_admin.print_help()
+            return 0
+
     dispatch = {
-        'add':     cmd_add,
         'enable':  cmd_enable,
         'disable': cmd_disable,
-        'remove':  cmd_remove,
         'install': cmd_install,
         'bringup': cmd_bringup,
         'apply':   cmd_apply,
@@ -13608,18 +13496,6 @@ def main() -> int:
             return cmd_wisdom_status(args)
         p_wisdom.print_help()
         return 0
-
-    if args.command == 'cpu':
-        # Shortcut: `smd cpu` → cmd_diag_cpu_freq with the same topology
-        # override pipeline as `smd diag cpu-freq`.
-        _deprecated('cpu', 'diag cpu-freq')
-        topo = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-        if getattr(args, 'radiod_max_mhz', None):
-            topo['cpu_freq']['radiod_max_mhz'] = args.radiod_max_mhz
-        if getattr(args, 'other_max_mhz', None):
-            topo['cpu_freq']['other_max_mhz'] = args.other_max_mhz
-        args._topology_override = topo
-        return cmd_diag_cpu_freq(args)
 
     if args.command == 'diag':
         diag_cmd = getattr(args, 'diag_command', None)
@@ -13729,10 +13605,6 @@ def main() -> int:
         p_verifier.print_help()
         return 0
 
-    if args.command == 'timestd-tune-storage':
-        _deprecated('timestd-tune-storage', 'storage tune-timestd')
-        return cmd_timestd_tune_storage(args)
-
     if args.command in ('validate', 'config', 'environment', 'timing', 'uninstall'):
         if not _HAS_SIGMOND_LIB:
             print('smd: sigmond library not found; install lib/sigmond alongside bin/smd',
@@ -13805,7 +13677,7 @@ def main() -> int:
         p_config.print_help()
         return 0
 
-    # `smd instance <verb>` — v2 per-reporter client instance lifecycle
+    # `smd admin instance <verb>` — v2 per-reporter client instance lifecycle
     # (MULTI-INSTANCE-ARCHITECTURE.md §6).  All verbs handle their own
     # root-check via _need_root in the handler.
     if args.command == 'instance':
@@ -13829,7 +13701,7 @@ def main() -> int:
         p_instance.print_help()
         return 0
 
-    # `smd radiod <verb>` — radiod-identification canonical naming
+    # `smd admin radiod <verb>` — radiod-identification canonical naming
     # (RADIOD-IDENTIFICATION.md §6 Phase 5).
     if args.command == 'radiod':
         rc = getattr(args, 'radiod_command', None)
@@ -13878,30 +13750,8 @@ def main() -> int:
             p_component.print_help()
             return 0
 
-    # `smd software <install|apply>` — rewrite into the corresponding
-    # top-level command so the rest of the dispatch (mutating-lock,
-    # root check, sigmond-lib gate) and the cmd_install/cmd_apply
-    # handlers themselves can stay unaware of the new grouping.  The
-    # arg namespaces are identical because both forms share the same
-    # _add_install_args / _add_apply_args definitions.
-    if args.command == 'software':
-        sub_cmd = getattr(args, 'software_command', None)
-        if sub_cmd in ('install', 'apply'):
-            _deprecated(f'software {sub_cmd}', sub_cmd)
-            args.command = sub_cmd  # fall through to dispatch below
-        else:
-            p_software.print_help()
-            return 0
-
-    # v2 deprecations for bare verbs and mutating-flag-on-read.
-    # Component-namespace forms (`component add`, etc.) bypass this
-    # check because their dispatch returns earlier — these only fire
-    # on the bare top-level path being phased out.
-    if args.command == 'add':
-        _deprecated('add', 'component add')
-    elif args.command == 'remove':
-        _deprecated('remove', 'component remove')
-    elif args.command == 'list' and getattr(args, 'update', False):
+    # v2 deprecations for mutating-flag-on-read.
+    if args.command == 'list' and getattr(args, 'update', False):
         _deprecated('list --update / --apply', 'component update')
     elif args.command == 'log' and getattr(args, 'level', None):
         _deprecated('log --level', 'log set-level <client> <level>')

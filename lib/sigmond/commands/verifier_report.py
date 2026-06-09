@@ -1,4 +1,4 @@
-"""`smd verifier report` — windowed report of wsprnet upload audit.
+"""`smd admin verifier report` — windowed report of wsprnet upload audit.
 
 Reads the ``wsprnet_audit`` and ``wsprnet_audit_batch`` tables in
 ``/var/lib/sigmond/sink.db`` (populated by
@@ -563,18 +563,18 @@ def _detect_default_rx_call(conn: sqlite3.Connection) -> Optional[str]:
 
 
 def cmd_verifier_report(args) -> int:
-    """`smd verifier report` entry point."""
+    """`smd admin verifier report` entry point."""
     try:
         window = _parse_window(args.window)
     except ValueError as exc:
-        print(f"smd verifier report: {exc}", file=sys.stderr)
+        print(f"smd admin verifier report: {exc}", file=sys.stderr)
         return 2
 
     db_path = Path(args.db if hasattr(args, "db") and args.db
                    else DEFAULT_SINK_DB)
     if not db_path.exists():
         print(
-            f"smd verifier report: sink db not found at {db_path}",
+            f"smd admin verifier report: sink db not found at {db_path}",
             file=sys.stderr,
         )
         return 2
@@ -585,7 +585,7 @@ def cmd_verifier_report(args) -> int:
         )
     except sqlite3.Error as exc:
         print(
-            f"smd verifier report: open sink db failed: {exc}",
+            f"smd admin verifier report: open sink db failed: {exc}",
             file=sys.stderr,
         )
         return 2
@@ -599,7 +599,7 @@ def cmd_verifier_report(args) -> int:
         ).fetchone()
         if not existing:
             print(
-                "smd verifier report: wsprnet_audit table not present.\n"
+                "smd admin verifier report: wsprnet_audit table not present.\n"
                 "  Enable per-spot auditing by setting WSPRNET_AUDIT=1 in\n"
                 "  /etc/wspr-recorder/env/<id>.env and restarting\n"
                 "  wspr-recorder@<id>.  The table is created on first\n"
@@ -787,7 +787,7 @@ def cmd_verifier_report(args) -> int:
                     )
                 print()
                 print(
-                    "  manual override: smd verifier rehabilitate "
+                    "  manual override: smd admin verifier rehabilitate "
                     "<rx_call> <call>"
                 )
             else:
@@ -834,7 +834,7 @@ def _suppressed_query(conn, rx_call):
 
 
 def cmd_verifier_rehabilitate(args) -> int:
-    """`smd verifier rehabilitate <rx_call> <call>` — operator override.
+    """`smd admin verifier rehabilitate <rx_call> <call>` — operator override.
 
     Clears ``suppressed_at`` and zeros the counters for one row in
     ``wsprnet_reject_cache``.  The next ``CallsignDB.write_*`` pass
@@ -849,7 +849,7 @@ def cmd_verifier_rehabilitate(args) -> int:
     )
     if not db_path.exists():
         print(
-            f"smd verifier rehabilitate: sink db not found at {db_path}",
+            f"smd admin verifier rehabilitate: sink db not found at {db_path}",
             file=sys.stderr,
         )
         return 2
@@ -857,7 +857,7 @@ def cmd_verifier_rehabilitate(args) -> int:
     call = (args.call or "").strip().upper()
     if not rx_call or not call:
         print(
-            "smd verifier rehabilitate: both rx_call and call are required",
+            "smd admin verifier rehabilitate: both rx_call and call are required",
             file=sys.stderr,
         )
         return 2
@@ -865,7 +865,7 @@ def cmd_verifier_rehabilitate(args) -> int:
         conn = sqlite3.connect(str(db_path), timeout=5.0)
     except sqlite3.Error as exc:
         print(
-            f"smd verifier rehabilitate: open sink db failed: {exc}",
+            f"smd admin verifier rehabilitate: open sink db failed: {exc}",
             file=sys.stderr,
         )
         return 2
@@ -876,7 +876,7 @@ def cmd_verifier_rehabilitate(args) -> int:
         ).fetchone()
         if not existing:
             print(
-                "smd verifier rehabilitate: wsprnet_reject_cache "
+                "smd admin verifier rehabilitate: wsprnet_reject_cache "
                 "table not present yet — nothing to rehabilitate."
             )
             return 0

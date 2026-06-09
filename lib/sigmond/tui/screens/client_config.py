@@ -173,7 +173,7 @@ class ClientConfigScreen(Vertical):
 
         # Per-instance row (sigmond MULTI-INSTANCE-ARCHITECTURE.md §8).
         # Populated when a templated recorder row is selected; "Edit
-        # per-instance" runs `smd instance edit <client> <reporter-id>`
+        # per-instance" runs `smd admin instance edit <client> <reporter-id>`
         # (Phase-2 stub today — points at $EDITOR — see spec §6).
         with Horizontal(id="cc-instance-row"):
             yield Select(
@@ -237,7 +237,7 @@ class ClientConfigScreen(Vertical):
                 "use the regular Edit buttons above for client-wide "
                 "config[/]")
             return
-        cmd = [_smd_binary(), 'instance', 'edit', entry.name,
+        cmd = [_smd_binary(), 'admin', 'instance', 'edit', entry.name,
                str(instance_val)]
         # Phase-2 stub today — points at $EDITOR — but the wiring is
         # ready for when the per-client refactor (post-Phase 5) lets

@@ -4,7 +4,7 @@ Shared between:
 
   * The TUI screen (``lib/sigmond/tui/screens/fft_wisdom.py``) — runs
     the planner in a worker thread with live progress in a RichLog.
-  * The CLI verb (``smd wisdom plan``) — runs it in the foreground for
+  * The CLI verb (``smd admin wisdom plan``) — runs it in the foreground for
     operators on a tmux/screen session who want to disconnect and
     reconnect over an hours-long planning job.
 
