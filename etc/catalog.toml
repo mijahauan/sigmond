@@ -67,6 +67,7 @@ uses            = []
 requires        = ["hs-uploader"]                     # sibling pkg for uv editable install
 contract        = "0.8"
 start_priority  = 200                                 # parallel with decoder chain
+hardware_gated  = "magnetometer (RM3100 / Pololu USB-I2C)"  # Phase D: dormant when absent
 # No install_script: install via `smd install mag-recorder` (deploy.toml drives the steps).
 # No topology_alias: avoid the deprecated alias surface for a brand-new client.
 # The `mag-usb` C binary is bundled inside mag-recorder (bin/mag-usb +
@@ -152,6 +153,7 @@ uses            = []
 requires        = []
 install_script  = "/opt/git/sigmond/gpsdo-monitor/install.sh"
 start_priority  = 0                                   # local-radiod timing infra: up with radiod
+hardware_gated  = "GPSDO (Leo Bodnar, USB/HID)"       # Phase D: dormant when no USB GPSDO attached
 # Richer metadata is auto-discovered from the repo's own deploy.toml once cloned.
 
 [client.igmp-querier]

@@ -823,16 +823,33 @@ def _hardware_ready(component: str):
     return hardware.hardware_ready(component)
 
 
-# Core components that require host-specific hardware to run, mapped to a human
-# hardware label.  Readiness now comes from the client's own
-# `inventory --json hardware_present` self-describe (CONTRACT §3 / Phase D) via
-# sigmond.hardware, with an lsusb fallback there for clients that don't yet
-# emit it.  Tests monkeypatch _hardware_ready (and _unit_active) to stay
-# hermetic.
-_HARDWARE_GATED = {
-    "mag-recorder":  "magnetometer (RM3100 / Pololu USB-I2C)",
-    "gpsdo-monitor": "GPSDO (Leo Bodnar, USB/HID)",
-}
+# Map of component -> human hardware label for hardware-gated core components.
+# DECLARED IN CONFIG, not code: each is the `hardware_gated` field of the
+# component's catalog entry (etc/catalog.toml [client.<name>]).  Readiness comes
+# from the client's own `inventory --json hardware_present` self-describe
+# (CONTRACT §3 / Phase D) via sigmond.hardware.  Cached per-process; tests
+# monkeypatch _hardware_gated_registry (and _hardware_ready / _unit_active) to
+# stay hermetic.
+_HW_GATED_CACHE: Optional[dict] = None
+
+
+def _hardware_gated_registry() -> dict:
+    """Load {component: hardware_label} from the catalog's `hardware_gated`
+    declarations.  Cached; empty on any load error (gating simply goes dark
+    rather than crashing a rule)."""
+    global _HW_GATED_CACHE
+    if _HW_GATED_CACHE is None:
+        reg: dict = {}
+        try:
+            from .catalog import load_catalog
+            for name, entry in load_catalog().items():
+                label = getattr(entry, "hardware_gated", None)
+                if label:
+                    reg[name] = label
+        except Exception:                              # noqa: BLE001
+            reg = {}
+        _HW_GATED_CACHE = reg
+    return _HW_GATED_CACHE
 
 
 def _unit_active(pattern: str) -> bool:
@@ -862,7 +879,7 @@ def rule_hardware_gated_core(view: SystemView) -> RuleResult:
     dormant: list = []
     not_running: list = []
     affected: list = []
-    for comp, hw_label in _HARDWARE_GATED.items():
+    for comp, hw_label in _hardware_gated_registry().items():
         if not view.is_enabled(comp):
             continue                       # not expected on this host
         ready = _hardware_ready(comp)
@@ -898,7 +915,7 @@ def dormant_reason(component: str, *, enabled: bool):
     truth so the components table and ``smd validate`` never disagree."""
     if not enabled:
         return None
-    label = _HARDWARE_GATED.get(component)
+    label = _hardware_gated_registry().get(component)
     if label is None:
         return None
     return label if _hardware_ready(component) is False else None

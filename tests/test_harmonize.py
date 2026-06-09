@@ -368,13 +368,20 @@ class TestRuleHardwareGatedCore(unittest.TestCase):
         return SystemView(coordination=Coordination(), topology=topo,
                           client_views={})
 
-    def _patch(self, *, ready, running: bool) -> None:
-        """Swap the readiness self-probe + unit probe for hermetic ones.
-        ``ready`` is the tri-state returned by _hardware_ready (True/False/None)."""
+    def _patch(self, *, ready, running: bool, registry=None) -> None:
+        """Swap the gated registry + readiness self-probe + unit probe for
+        hermetic ones (no catalog / host access).  ``ready`` is the tri-state
+        _hardware_ready returns; ``registry`` defaults to mag/gpsdo labels."""
+        if registry is None:
+            registry = {"mag-recorder": "magnetometer (test)",
+                        "gpsdo-monitor": "GPSDO (test)"}
+        orig_reg = harmonize._hardware_gated_registry
         orig_ready = harmonize._hardware_ready
         orig_active = harmonize._unit_active
+        harmonize._hardware_gated_registry = lambda: registry
         harmonize._hardware_ready = lambda comp: ready
         harmonize._unit_active = lambda pattern: running
+        self.addCleanup(lambda: setattr(harmonize, "_hardware_gated_registry", orig_reg))
         self.addCleanup(lambda: setattr(harmonize, "_hardware_ready", orig_ready))
         self.addCleanup(lambda: setattr(harmonize, "_unit_active", orig_active))
 
@@ -414,9 +421,14 @@ class TestRuleHardwareGatedCore(unittest.TestCase):
 
     def test_dormant_reason_for_component_status(self):
         # The TUI/CLI per-component overlay: enabled + gated + hardware absent
-        # -> the hardware label; everything else -> None.
-        orig = harmonize._hardware_ready
-        self.addCleanup(lambda: setattr(harmonize, "_hardware_ready", orig))
+        # -> the hardware label; everything else -> None.  Registry is patched
+        # so the test doesn't depend on the real catalog.
+        reg = {"mag-recorder": "magnetometer (test)"}
+        orig_reg = harmonize._hardware_gated_registry
+        orig_ready = harmonize._hardware_ready
+        self.addCleanup(lambda: setattr(harmonize, "_hardware_gated_registry", orig_reg))
+        self.addCleanup(lambda: setattr(harmonize, "_hardware_ready", orig_ready))
+        harmonize._hardware_gated_registry = lambda: reg
 
         harmonize._hardware_ready = lambda comp: False   # hardware absent
         self.assertIsNotNone(harmonize.dormant_reason("mag-recorder", enabled=True))
@@ -431,16 +443,26 @@ class TestRuleHardwareGatedCore(unittest.TestCase):
         harmonize._hardware_ready = lambda comp: False
         self.assertIsNone(harmonize.dormant_reason("ka9q-radio", enabled=True))  # not gated
 
-    def test_gpsdo_monitor_is_registered_and_gated(self):
-        # gpsdo-monitor is hardware-gated too (Leo Bodnar GPSDO).  Enabled
-        # with hardware absent -> core-but-gated dormant, like mag-recorder.
-        self.assertIn("gpsdo-monitor", harmonize._HARDWARE_GATED)
+    def test_gpsdo_monitor_gated_via_registry(self):
+        # gpsdo-monitor is hardware-gated (Leo Bodnar GPSDO).  Enabled with
+        # hardware absent -> core-but-gated dormant, like mag-recorder.
         self._patch(ready=False, running=True)   # daemon runs but no device
         r = harmonize.rule_hardware_gated_core(
             self._view(enabled=True, comp="gpsdo-monitor"))
         self.assertEqual(r.severity, "pass")
         self.assertIn("core-but-gated", r.message)
         self.assertIn("gpsdo-monitor", r.message)
+
+    def test_registry_is_loaded_from_catalog(self):
+        # Integration: the gated set is DECLARED in etc/catalog.toml
+        # (hardware_gated field), not hard-coded.  Reset the cache so the real
+        # loader runs against the repo catalog.
+        harmonize._HW_GATED_CACHE = None
+        self.addCleanup(lambda: setattr(harmonize, "_HW_GATED_CACHE", None))
+        reg = harmonize._hardware_gated_registry()
+        self.assertIn("mag-recorder", reg)
+        self.assertIn("gpsdo-monitor", reg)
+        self.assertTrue(reg["mag-recorder"] and reg["gpsdo-monitor"])
 
 
 class TestRuleGpsdoGovernorCoverage(unittest.TestCase):
