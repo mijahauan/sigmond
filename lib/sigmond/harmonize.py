@@ -815,30 +815,22 @@ def rule_wspr_decode_enabled(view: SystemView) -> RuleResult:
                       f"decode enabled on {len(active)} active instance(s)", [])
 
 
-def _magnetometer_present() -> bool:
-    """True when the RM3100's Pololu USB-I2C adapter is on the bus (or its udev
-    symlink exists).  Mirrors smd's bringup-side ``_detect_magnetometer`` —
-    Phase D will unify both on the client's own ``inventory --json``
-    self-describe (see docs/install-orchestration-design.md)."""
-    import re as _re
-    import subprocess
-    if Path("/dev/ttyMAG0").exists():
-        return True
-    try:
-        out = subprocess.run(["lsusb"], capture_output=True, text=True,
-                             timeout=10).stdout
-    except Exception:                                  # noqa: BLE001
-        return False
-    return bool(_re.search(r"1ffb:250[23]|pololu", out, _re.I))
+from . import hardware
 
 
-# Core components that require host-specific hardware to run.  Each maps to a
-# (human hardware label, presence-probe) pair.  Probes are hardcoded today;
-# Phase D ("environment-aware preflight") replaces them with the client's own
-# `inventory --json hardware_present` self-describe.  Tests monkeypatch this
-# dict (and _unit_active) to stay hermetic.
+def _hardware_ready(component: str):
+    """Tri-state hardware readiness — indirection so tests can monkeypatch."""
+    return hardware.hardware_ready(component)
+
+
+# Core components that require host-specific hardware to run, mapped to a human
+# hardware label.  Readiness now comes from the client's own
+# `inventory --json hardware_present` self-describe (CONTRACT §3 / Phase D) via
+# sigmond.hardware, with an lsusb fallback there for clients that don't yet
+# emit it.  Tests monkeypatch _hardware_ready (and _unit_active) to stay
+# hermetic.
 _HARDWARE_GATED = {
-    "mag-recorder": ("magnetometer (RM3100 / Pololu USB-I2C)", _magnetometer_present),
+    "mag-recorder": "magnetometer (RM3100 / Pololu USB-I2C)",
 }
 
 
@@ -869,10 +861,13 @@ def rule_hardware_gated_core(view: SystemView) -> RuleResult:
     dormant: list = []
     not_running: list = []
     affected: list = []
-    for comp, (hw_label, probe) in _HARDWARE_GATED.items():
+    for comp, hw_label in _HARDWARE_GATED.items():
         if not view.is_enabled(comp):
             continue                       # not expected on this host
-        if not probe():
+        ready = _hardware_ready(comp)
+        if ready is None:
+            continue                       # readiness unknown — don't guess
+        if not ready:
             dormant.append(f"{comp} (no {hw_label})")
         elif not _unit_active(f"{comp}.service"):
             not_running.append(f"{comp} ({hw_label} present)")

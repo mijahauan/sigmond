@@ -2361,27 +2361,25 @@ def _detect_local_radiod() -> bool:
     return False
 
 
-def _lsusb() -> str:
-    try:
-        return subprocess.run(['lsusb'], capture_output=True, text=True,
-                              timeout=5).stdout
-    except Exception:
-        return ''
-
-
 def _detect_local_sdr() -> bool:
-    """True when a radiod-capable SDR is on the USB bus.  The upfront check for
-    a local-radiod profile — hardware, not whether ka9q-radio is built yet.
-    RX888 / RX888mk2 present as a Cypress FX3 (04b4:00f0/00f1/00f3)."""
-    return bool(re.search(r'rx888|04b4:00f[013]', _lsusb(), re.I))
+    """True when a radiod-capable SDR is present.  The upfront check for a
+    local-radiod profile — hardware, not whether ka9q-radio is built yet.
+    Delegates to the shared readiness probe (CONTRACT §3 / Phase D); ka9q-radio
+    has no inventory CLI so this resolves via the lsusb fallback (RX888 =
+    Cypress FX3 04b4:00f0/00f1/00f3).  Unknown (None) is treated as absent —
+    don't claim a local radiod stack without a confirmed SDR."""
+    from sigmond.hardware import hardware_ready
+    return hardware_ready('ka9q-radio') is True
 
 
 def _detect_magnetometer() -> bool:
-    """True when the RM3100's Pololu USB-I2C adapter (1ffb:2502/2503) is on the
-    bus (or its udev symlink exists).  mag-recorder can't run without it."""
-    if os.path.exists('/dev/ttyMAG0'):
-        return True
-    return bool(re.search(r'1ffb:250[23]|pololu', _lsusb(), re.I))
+    """True when mag-recorder's data source is available, per its own
+    `inventory --json hardware_present` self-describe (CONTRACT §3 / Phase D),
+    falling back to the Pololu USB-I2C / `/dev/ttyMAG0` lsusb probe.  Unknown
+    (None) is treated as absent — don't scaffold a client whose hardware we
+    can't confirm."""
+    from sigmond.hardware import hardware_ready
+    return hardware_ready('mag-recorder') is True
 
 
 def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -> bool:

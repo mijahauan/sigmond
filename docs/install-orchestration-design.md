@@ -191,15 +191,22 @@ Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remot
   the client's `inventory --json` self-describe; hf-timestd's setup-station.sh
   gained `--non-interactive`.  §14 commons env bag was already wired.  All four
   DASI2 clients now drive non-interactively.
-- **Phase D (planned): environment-aware preflight.** Extend the contract §3
-  self-describe so a client reports hardware readiness (`inventory --json`
-  `hardware_present`, or a `probe` verb — the client detects its own
-  hardware). `smd bringup` runs a preflight and **skips or flags** any
-  client whose hardware is absent (mag-recorder→RM3100, gpsdo-monitor→GPSDO,
-  radiod→RX888); profiles mark which components are hardware-gated; surface
-  in `smd validate` + the TUI. Until built, the operator decides (read the
-  environment and act — the sigma host has no magnetometer, so mag-recorder
-  was correctly NOT brought up).
+- **Phase D — environment-aware preflight (GENERALIZED to the §3 self-describe).**
+  A hardware-gated client reports its OWN readiness via the top-level
+  `hardware_present` boolean of `inventory --json` (CONTRACT §3 amendment, v0.8;
+  reference impl: `mag-recorder` device-path/simulator check). Sigmond consults
+  it through `sigmond.hardware.hardware_ready(client)` — a tri-state that
+  prefers the client self-describe and falls back to a per-client lsusb probe
+  only while a client hasn't yet emitted the field (and for upstream
+  `ka9q-radio`, which has no inventory CLI, so sigmond detects the RX888
+  itself). `smd bringup` preflight **skips** an absent-hardware client
+  (`_detect_magnetometer`/`_detect_local_sdr` now delegate to the shared probe)
+  and `smd validate`'s `rule_hardware_gated_core` marks an enabled-but-absent
+  core client **core-but-dormant** instead of letting it vanish. `None`
+  (not gated / unknown) is never treated as absent.
+  *Still to do:* extend `hardware_present` to gpsdo-monitor→GPSDO; surface the
+  gated state in the TUI; let profiles declare which components are
+  hardware-gated rather than the registry being keyed in code.
 
 ## 10. Validation status
 

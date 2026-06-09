@@ -37,6 +37,21 @@ v0.8 adds:
   the reporter ID via the per-instance config's `[instance]`
   block when present; legacy radiod-keyed instances continue
   to inventory with no `[instance]` block until migrated.
+- **§3 amendment — top-level `hardware_present` (optional).**
+  A hardware-gated client (one that needs a specific device to
+  produce data — e.g. `mag-recorder` → RM3100) MAY report a
+  top-level boolean `hardware_present` in `inventory --json`:
+  `true` when its required hardware is detected (or it is in a
+  no-hardware mode such as a simulator and can still produce),
+  `false` when the hardware is required but absent.  Clients that
+  are not hardware-gated omit the field.  This lets a client
+  detect its OWN hardware; sigmond consults it (install-orchestration
+  Phase D) to skip an absent-hardware client during `smd bringup`
+  and to mark it core-but-dormant in `smd validate`, instead of
+  hard-coding USB IDs.  Absent field = "not gated / unknown":
+  sigmond must not treat a missing field as hardware-absent.  The
+  reference implementation is `mag-recorder` (device-path / simulator
+  check).
 
 v0.7 adds:
 

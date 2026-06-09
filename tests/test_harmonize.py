@@ -368,40 +368,48 @@ class TestRuleHardwareGatedCore(unittest.TestCase):
         return SystemView(coordination=Coordination(), topology=topo,
                           client_views={})
 
-    def _patch(self, *, present: bool, running: bool) -> None:
-        """Swap the gated registry + unit probe for hermetic ones."""
-        orig_reg = harmonize._HARDWARE_GATED
+    def _patch(self, *, ready, running: bool) -> None:
+        """Swap the readiness self-probe + unit probe for hermetic ones.
+        ``ready`` is the tri-state returned by _hardware_ready (True/False/None)."""
+        orig_ready = harmonize._hardware_ready
         orig_active = harmonize._unit_active
-        harmonize._HARDWARE_GATED = {
-            "mag-recorder": ("magnetometer (test)", lambda: present),
-        }
+        harmonize._hardware_ready = lambda comp: ready
         harmonize._unit_active = lambda pattern: running
-        self.addCleanup(lambda: setattr(harmonize, "_HARDWARE_GATED", orig_reg))
+        self.addCleanup(lambda: setattr(harmonize, "_hardware_ready", orig_ready))
         self.addCleanup(lambda: setattr(harmonize, "_unit_active", orig_active))
 
     def test_not_enabled_is_skipped(self):
-        self._patch(present=False, running=False)
+        self._patch(ready=False, running=False)
         r = harmonize.rule_hardware_gated_core(self._view(enabled=False))
         self.assertEqual(r.severity, "pass")
         self.assertIn("skipped", r.message)
 
     def test_enabled_hardware_absent_is_dormant_pass(self):
-        self._patch(present=False, running=False)
+        self._patch(ready=False, running=False)
         r = harmonize.rule_hardware_gated_core(self._view(enabled=True))
         self.assertEqual(r.severity, "pass")
         self.assertIn("core-but-gated", r.message)
         self.assertIn("mag-recorder", r.message)
 
     def test_enabled_hardware_present_not_running_warns(self):
-        self._patch(present=True, running=False)
+        self._patch(ready=True, running=False)
         r = harmonize.rule_hardware_gated_core(self._view(enabled=True))
         self.assertEqual(r.severity, "warn")
         self.assertIn("mag-recorder", r.affected)
 
     def test_enabled_hardware_present_running_passes(self):
-        self._patch(present=True, running=True)
+        self._patch(ready=True, running=True)
         r = harmonize.rule_hardware_gated_core(self._view(enabled=True))
         self.assertEqual(r.severity, "pass")
+        self.assertNotIn("core-but-gated", r.message)
+
+    def test_enabled_readiness_unknown_is_not_guessed(self):
+        # _hardware_ready None (client doesn't report, no fallback) -> the
+        # component is neither claimed dormant nor warned about.
+        self._patch(ready=None, running=False)
+        r = harmonize.rule_hardware_gated_core(self._view(enabled=True))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("skipped", r.message)
         self.assertNotIn("core-but-gated", r.message)
 
 
