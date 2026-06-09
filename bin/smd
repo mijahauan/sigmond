@@ -6320,7 +6320,7 @@ _smd_complete() {
                                     COMPREPLY=($(compgen -W "--db" -- "$cur"))
                                     ;;
                                 *)
-                                    COMPREPLY=($(compgen -W "report rehabilitate" -- "$cur"))
+                                    COMPREPLY=($(compgen -W "report rehabilitate help" -- "$cur"))
                                     ;;
                             esac
                             ;;
@@ -6331,7 +6331,7 @@ _smd_complete() {
                             COMPREPLY=($(compgen -W "--no-v6 -q --quiet" -- "$cur"))
                             ;;
                         rac)
-                            COMPREPLY=($(compgen -W "status start stop restart install configure reconfigure" -- "$cur"))
+                            COMPREPLY=($(compgen -W "status start stop restart install configure reconfigure help" -- "$cur"))
                             ;;
                         timing)
                             COMPREPLY=($(compgen -W "status reconcile --dry-run" -- "$cur"))
@@ -13155,6 +13155,8 @@ def main() -> int:
         help='sink.db path (default /var/lib/sigmond/sink.db)',
     )
 
+    verifier_sub.add_parser('help', help='show this help')
+
     p_rac = admin_sub.add_parser(
         'rac',
         help='wd-rac (frpc) remote-access tunnel — bare `smd admin rac` is '
@@ -13177,6 +13179,7 @@ def main() -> int:
     rac_sub.add_parser(
         'restart', help='restart wd-rac.service (elevates automatically)',
     )
+    rac_sub.add_parser('help', help='show this help')
     def _add_rac_provision_args(p):
         p.add_argument(
             'rac_number', nargs='?', type=int, default=None, metavar='NUMBER',
@@ -13637,10 +13640,22 @@ def main() -> int:
         return 0
 
     if args.command == 'rac':
+        if getattr(args, 'rac_command', None) == 'help':
+            p_rac.print_help()
+            return 0
         return cmd_rac(args)
 
     if args.command == 'verifier':
         verifier_cmd = getattr(args, 'verifier_command', None)
+        if verifier_cmd == 'help':
+            p_verifier.print_help()
+            return 0
+        if verifier_cmd is None:
+            # Bare `smd admin verifier` defaults to `report`; pull in the report
+            # subparser's own defaults (--target wspr, --window 1h, flags off)
+            # so cmd_verifier_report has every attribute it expects.
+            p_v_report.parse_args([], namespace=args)
+            verifier_cmd = 'report'
         if verifier_cmd == 'report' and getattr(args, 'target', 'wspr') == 'psk':
             try:
                 from sigmond.commands.verifier_report_psk import (
