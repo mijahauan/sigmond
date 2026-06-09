@@ -81,8 +81,17 @@ def build_plan(profile, *, local_radiod: bool,
     def configure(stage: str, client: str) -> None:
         argv = [smd, 'config', 'init', client]
         label = f'configure {client}'
-        if non_interactive:
+        # Client config interviews default to --non-interactive: each client's
+        # own wizard (e.g. psk-recorder's whiptail) can't render/read input
+        # inside bring-up's nested terminal, and sigmond already supplies the
+        # essentials (callsign / grid / radiod) via the env — the operator
+        # fine-tunes later with `smd config edit <client>`.  radiod is the
+        # exception: it's sigmond's own inline text wizard (works here, and the
+        # operator sets the antenna), so it stays interactive unless the whole
+        # bring-up was invoked with --non-interactive.
+        if non_interactive or client != 'radiod':
             argv.append('--non-interactive')
+        if non_interactive:
             label += ' (non-interactive)'
         steps.append(Step(stage, label, 'config', argv=argv))
 

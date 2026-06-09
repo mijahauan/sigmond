@@ -67,13 +67,22 @@ def test_start_is_last_action_and_final_checkpoint_is_validate():
     assert any(s.kind == 'start' for s in p.steps)
 
 
-def test_non_interactive_appends_flag_to_config_steps():
+def test_non_interactive_flag_makes_every_config_step_non_interactive():
     p = build_plan(_dasi2(), local_radiod=True, non_interactive=True)
     cfg = [s for s in p.steps if s.kind == 'config']
     assert cfg and all('--non-interactive' in s.argv for s in cfg)
-    p2 = build_plan(_dasi2(), local_radiod=True, non_interactive=False)
-    assert all('--non-interactive' not in s.argv
-               for s in p2.steps if s.kind == 'config')
+
+
+def test_client_config_is_non_interactive_by_default_but_radiod_is_not():
+    # Default bring-up: client config interviews run --non-interactive (their
+    # own wizards can't run inside bring-up's nested terminal), but radiod —
+    # sigmond's own inline text wizard — stays interactive.
+    p = build_plan(_dasi2(), local_radiod=True, non_interactive=False)
+    cfg = {s.label: s for s in p.steps if s.kind == 'config'}
+    assert '--non-interactive' not in cfg['configure radiod'].argv
+    for client in ('configure hf-timestd', 'configure wspr-recorder',
+                   'configure psk-recorder', 'configure mag-recorder'):
+        assert '--non-interactive' in cfg[client].argv, client
 
 
 def test_skip_excludes_hardware_gated_client():

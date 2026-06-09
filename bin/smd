@@ -12639,7 +12639,11 @@ def main() -> int:
     p_bringup.add_argument('--with-optional', action='store_true', dest='with_optional',
                            help='also install the profile optional add-ons (e.g. ka9q-web)')
     p_bringup.add_argument('--non-interactive', action='store_true', dest='non_interactive',
-                           help='drive each client config interview non-interactively, applying the §14 commons defaults (unattended bring-up)')
+                           help='also run the radiod config non-interactively (fully unattended). '
+                                'Client config interviews are already non-interactive by default — '
+                                'their wizards can\'t run inside bring-up\'s nested terminal; sigmond '
+                                'supplies callsign/grid/radiod via the env and you fine-tune later '
+                                'with `smd config edit <client>`')
     p_bringup.add_argument('--reconfigure', action='store_true',
                            help='re-run config init even for already-configured clients (default: skip them — bringup is idempotent and preserves existing config)')
     p_bringup.add_argument('--dry-run', action='store_true',
