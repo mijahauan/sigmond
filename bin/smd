@@ -592,6 +592,35 @@ def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
     return True
 
 
+# ka9q-web and its onion dependency are native C builds (cmake/make).  A fresh
+# host may lack the toolchain, so ensure it up front rather than dying with a
+# cryptic FileNotFoundError on `cmake` mid-build.
+_NATIVE_BUILD_DEPS = ['cmake', 'build-essential', 'libssl-dev', 'pkg-config']
+
+
+def _ensure_native_build_deps(label: str = 'build') -> bool:
+    """Ensure the apt toolchain for native C builds (cmake, a C compiler,
+    pkg-config, SSL headers) is present; install it via apt-get if not.
+    Returns False only when it's missing AND can't be installed."""
+    if (shutil.which('cmake') and shutil.which('pkg-config')
+            and (shutil.which('cc') or shutil.which('gcc'))):
+        return True
+    apt = shutil.which('apt-get')
+    if not apt:
+        _err(f'{label}: missing build tools and no apt-get to install them — '
+             f'install manually: {" ".join(_NATIVE_BUILD_DEPS)}')
+        return False
+    _info(f'{label}: installing native build deps '
+          f'({", ".join(_NATIVE_BUILD_DEPS)}) ...')
+    _run([apt, 'update', '-qq'], sudo=True)
+    r = _run([apt, 'install', '-y', '-q', *_NATIVE_BUILD_DEPS], sudo=True)
+    if r.returncode != 0:
+        _err(f'{label}: build-dep install failed: {(r.stderr or "")[-300:]}')
+        return False
+    _ok(f'{label}: native build deps installed')
+    return True
+
+
 def _build_onion(src_dir: Path) -> bool:
     if Path('/usr/local/lib/libonion.so').exists():
         _ok('onion: already installed')
@@ -848,6 +877,8 @@ def _diag_build_manifests() -> int:
 
 
 def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
+    if not _ensure_native_build_deps(label='ka9q-web'):
+        return False
     onion_url    = _ONION_REPO
     onion_commit = _ONION_COMMIT
     onion_src    = _ONION_SRC
