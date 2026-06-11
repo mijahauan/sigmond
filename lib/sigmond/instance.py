@@ -411,7 +411,7 @@ def _config_from_shared(client: str, reporter_id: str, shared_body: str) -> str:
     )
     return (
         _stub_header(client, reporter_id, "Per-instance config")
-        + f"# Seeded from /etc/{client}/config.toml (the shared config).\n\n"
+        + "# Seeded from the client's shared config.\n\n"
         + instance_block
         + shared_body
     )
@@ -527,9 +527,11 @@ def create_instance(
     if not paths.config.exists():
         # Prefer seeding from the client's shared config so the per-instance
         # file is complete (bands, radiod binding, …) — a bare stub fails the
-        # client's "no frequencies configured" check.  Falls back to the stub
+        # client's checks (e.g. psk-recorder: "No usable [[radiod]] blocks").
+        # Resolve the shared path per client: it is NOT always config.toml
+        # (psk/hfdl/codar use <client>-config.toml).  Falls back to the stub
         # when no shared config exists yet.
-        shared = Path("/etc") / client / "config.toml"
+        shared = _LEGACY_SHARED_CONFIG.get(client, Path("/etc") / client / "config.toml")
         if shared.exists():
             paths.config.write_text(
                 _config_from_shared(client, reporter_id, shared.read_text()))

@@ -39,10 +39,12 @@ _INDEPENDENT = frozenset({'mag-recorder'})
 
 # Clients that take a per-reporter instance (`<client>@<reporter-id>`).  When a
 # reporter id is supplied, bring-up creates + enables the instance instead of
-# starting a base-config unit.  psk-recorder is NOT here yet: its per-instance
-# path isn't multi-source-aware (renders no [[radiod]] block → crash-loop, see
-# sigmond#16), so it stays on its legacy radiod-keyed start until that lands.
-_REPORTER_KEYED = frozenset({'wspr-recorder'})
+# starting a base-config unit.  Both wspr- and psk-recorder seed a complete
+# per-instance config from their shared config (the [[radiod]] block + bands),
+# so `<client>@<reporter>` runs directly (sigmond#16).  (Multi-radiod *source
+# selection* for psk via `sources apply` is still deferred, but irrelevant to
+# the single-radiod reporter-keyed path bring-up uses.)
+_REPORTER_KEYED = frozenset({'wspr-recorder', 'psk-recorder'})
 
 
 @dataclass

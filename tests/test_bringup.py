@@ -143,21 +143,18 @@ def test_every_install_is_preceded_by_a_topology_enable():
     assert {'ka9q-radio', 'wspr-recorder', 'psk-recorder', 'hf-timestd'} <= enabled
 
 
-def test_reporter_creates_wspr_instance_and_starts_it_by_reporter():
+def test_reporter_creates_recorder_instances_and_starts_them_by_reporter():
     p = build_plan(_dasi2(), local_radiod=True, reporter='AC0G/S')
     labels = _labels(p)
-    # Stage 3a scaffolds the per-reporter instance...
-    assert any(s.argv[:4] == ['smd', 'admin', 'instance', 'add']
-               and s.argv[-2:] == ['wspr-recorder', 'AC0G/S'] for s in p.steps)
-    # ...and Stage 4 starts it via `instance enable` (not a base-config start).
-    assert any(s.kind == 'start'
-               and s.argv[:4] == ['smd', 'admin', 'instance', 'enable']
-               and s.argv[-2:] == ['wspr-recorder', 'AC0G/S'] for s in p.steps)
-    assert 'start wspr-recorder (staggered)' not in labels
-    # psk-recorder is NOT reporter-keyed yet (sigmond#16) — stays legacy start.
-    assert any(s.kind == 'start' and s.argv == ['smd', 'start', '--components',
-               'psk-recorder'] for s in p.steps)
-    assert not any('instance' in s.argv and 'psk-recorder' in s.argv for s in p.steps)
+    for client in ('wspr-recorder', 'psk-recorder'):
+        # Stage 3a scaffolds the per-reporter instance...
+        assert any(s.argv[:4] == ['smd', 'admin', 'instance', 'add']
+                   and s.argv[-2:] == [client, 'AC0G/S'] for s in p.steps), client
+        # ...and Stage 4 starts it via `instance enable` (not a base-config start).
+        assert any(s.kind == 'start'
+                   and s.argv[:4] == ['smd', 'admin', 'instance', 'enable']
+                   and s.argv[-2:] == [client, 'AC0G/S'] for s in p.steps), client
+        assert f'start {client} (staggered)' not in labels, client
 
 
 def test_no_reporter_keeps_base_config_start():
