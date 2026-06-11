@@ -74,10 +74,21 @@ def test_plan_runs_radiod_migrate_after_configs_before_start():
     assert p.steps[mig].argv[-4:] == ['admin', 'radiod', 'migrate', '--yes']
 
 
-def test_single_hard_checkpoint_is_radiod_configured():
+def test_config_checkpoints_are_hard_but_final_validate_is_not():
+    # A failed client config must ABORT (not warn-and-continue, which left a
+    # silently-broken station — sigmond#14/#6).  radiod + every configured:<c>
+    # checkpoint is hard; only the final validate stays advisory (warmup warns
+    # are normal there).
     p = build_plan(_dasi2(), local_radiod=True)
-    hard = [s for s in p.steps if s.hard]
-    assert len(hard) == 1 and hard[0].check == 'radiod-configured'
+    hard = {s.check for s in p.steps if s.hard}
+    assert 'radiod-configured' in hard
+    assert 'configured:hf-timestd' in hard
+    assert 'configured:wspr-recorder' in hard
+    assert 'configured:psk-recorder' in hard
+    assert 'configured:mag-recorder' in hard
+    # the final validate checkpoint is not hard
+    final = [s for s in p.steps if s.kind == 'checkpoint' and s.check == 'validate']
+    assert final and not final[0].hard
 
 
 def test_with_optional_toggles_ka9q_web():

@@ -142,7 +142,8 @@ def build_plan(profile, *, local_radiod: bool,
     if _TIMING_AUTHORITY in profile.clients and _TIMING_AUTHORITY not in skip:
         install(STAGE2, _TIMING_AUTHORITY)
         configure(STAGE2, _TIMING_AUTHORITY)
-        checkpoint(STAGE2, 'hf-timestd configured', check=f'configured:{_TIMING_AUTHORITY}')
+        checkpoint(STAGE2, 'hf-timestd configured',
+                   check=f'configured:{_TIMING_AUTHORITY}', hard=True)
 
     # --- Stage 3a: radiod-bound spot clients ---
     for client in profile.clients:
@@ -151,7 +152,8 @@ def build_plan(profile, *, local_radiod: bool,
             continue
         install(STAGE3A, client)
         configure(STAGE3A, client)
-        checkpoint(STAGE3A, f'{client} configured', check=f'configured:{client}')
+        checkpoint(STAGE3A, f'{client} configured',
+                   check=f'configured:{client}', hard=True)
         # Create the per-reporter instance from the base config (status + bands
         # the config step just wrote).  `instance add` only scaffolds the files;
         # Stage 4 enables/starts it (staggered).  Without a reporter id the
@@ -171,7 +173,8 @@ def build_plan(profile, *, local_radiod: bool,
         if client in _INDEPENDENT and client not in skip:
             install(STAGE3B, client)
             configure(STAGE3B, client)
-            checkpoint(STAGE3B, f'{client} configured', check=f'configured:{client}')
+            checkpoint(STAGE3B, f'{client} configured',
+                       check=f'configured:{client}', hard=True)
 
     # Provision the shared hs-uploader watermark dir.  Recorder units list
     # /var/lib/hs-uploader in ReadWritePaths under ProtectSystem=strict, so it
