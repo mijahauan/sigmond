@@ -3,12 +3,16 @@
 Covers the pure logic — the `make install` argv parser and the
 plan-render keep/remove classification — without touching the real host."""
 
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
+import sigmond.uninstall as uninstall
 from sigmond.uninstall import (
     _split_install_args, render_plan, UninstallPlan,
+    _revert_grub, _strip_grub_tokens,
 )
-from pathlib import Path
 
 
 class TestSplitInstallArgs(unittest.TestCase):
@@ -77,10 +81,6 @@ class TestRenderClassification(unittest.TestCase):
         self.assertTrue(any("data" in l and "rm" in l for l in lines))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestProtectedDirs(unittest.TestCase):
     """The catastrophic bug: a deploy.toml dst=/etc/systemd/system caused
     rmtree to wipe every host service's enable-symlinks.  Lock the guard."""
@@ -100,3 +100,80 @@ class TestProtectedDirs(unittest.TestCase):
         self.assertTrue(Path("/usr/local/bin").is_dir()
                         or not Path("/usr/local/bin").exists())
 
+
+
+class TestRevertGrub(unittest.TestCase):
+    """Regression coverage for sigmond#12 — `_revert_grub` must drop the
+    isolcpus/rcu_nocbs tokens WITHOUT eating the closing quote of the
+    GRUB_CMDLINE_LINUX_DEFAULT assignment.  A corrupt /etc/default/grub fails
+    grub-mkconfig, which fails the kernel postrm hook, which bricks every apt
+    transaction."""
+
+    def _revert(self, contents: str) -> str:
+        """Run _revert_grub against a temp grub file with update-grub stubbed;
+        return the rewritten file contents."""
+        tf = Path(tempfile.mktemp())
+        tf.write_text(contents)
+        real_run = subprocess.run
+
+        def fake_run(cmd, *a, **k):
+            if cmd and cmd[0] in ("update-grub", "grub-mkconfig"):
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return real_run(cmd, *a, **k)   # let the `sh -n` safety check run
+
+        orig_file, orig_run = uninstall.GRUB_FILE, uninstall.subprocess.run
+        try:
+            uninstall.GRUB_FILE = tf
+            uninstall.subprocess.run = fake_run
+            _revert_grub()
+            return tf.read_text()
+        finally:
+            uninstall.GRUB_FILE, uninstall.subprocess.run = orig_file, orig_run
+            tf.unlink(missing_ok=True)
+
+    def _parses(self, text: str) -> bool:
+        return subprocess.run(["sh", "-n"], input=text, text=True,
+                              capture_output=True).returncode == 0
+
+    def test_strip_tokens_preserves_remaining_words(self):
+        self.assertEqual(_strip_grub_tokens("quiet isolcpus=0,1 rcu_nocbs=0,1"),
+                         "quiet")
+        self.assertEqual(_strip_grub_tokens("isolcpus=2-15 quiet splash"),
+                         "quiet splash")
+        self.assertEqual(_strip_grub_tokens("quiet splash"), "quiet splash")
+
+    def test_revert_does_not_strip_closing_quote(self):
+        # The exact sigma format that triggered #12.
+        src = ('GRUB_DEFAULT=0\n'
+               'GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=0,1 rcu_nocbs=0,1"\n'
+               'GRUB_CMDLINE_LINUX=""\n')
+        out = self._revert(src)
+        self.assertIn('GRUB_CMDLINE_LINUX_DEFAULT="quiet"', out)
+        self.assertNotIn("isolcpus", out)
+        self.assertNotIn("rcu_nocbs", out)
+        self.assertIn("GRUB_DEFAULT=0", out)            # unrelated line preserved
+        self.assertTrue(self._parses(out), "rewritten grub must pass `sh -n`")
+
+    def test_revert_token_at_end_and_single_quotes_and_comment(self):
+        out = self._revert(
+            "GRUB_CMDLINE_LINUX_DEFAULT='quiet splash isolcpus=2-15'   # tuned\n")
+        self.assertIn("GRUB_CMDLINE_LINUX_DEFAULT='quiet splash'", out)
+        self.assertIn("# tuned", out)
+        self.assertTrue(self._parses(out))
+
+    def test_revert_only_tokens_yields_empty_quoted_value(self):
+        out = self._revert('GRUB_CMDLINE_LINUX_DEFAULT="isolcpus=0,1 rcu_nocbs=0,1"\n')
+        self.assertIn('GRUB_CMDLINE_LINUX_DEFAULT=""', out)
+        self.assertTrue(self._parses(out))
+
+    def test_revert_leaves_untouched_when_no_tokens(self):
+        src = 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"\n'
+        self.assertEqual(self._revert(src), src)        # no rewrite, byte-identical
+
+    def test_revert_ignores_token_word_in_comment(self):
+        src = '# isolcpus=0,1 set manually\nGRUB_TIMEOUT=5\n'
+        self.assertEqual(self._revert(src), src)
+
+
+if __name__ == "__main__":
+    unittest.main()

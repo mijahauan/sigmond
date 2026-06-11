@@ -44,6 +44,7 @@ from __future__ import annotations
 import glob as globmod
 import os
 import pwd
+import re
 import shlex
 import shutil
 import subprocess
@@ -623,6 +624,27 @@ def execute_uninstall(plan: UninstallPlan, *, dry_run: bool = False) -> int:
     return 0
 
 
+# GRUB cmdline assignments where sigmond's CPU-isolation tokens live, e.g.
+#   GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=0,1 rcu_nocbs=0,1"
+# Groups: (leading ws)(KEY)(quote char)(inner value)(trailing ws + optional #comment)
+_GRUB_CMDLINE_RE = re.compile(
+    r'^(\s*)(GRUB_CMDLINE_LINUX(?:_DEFAULT)?)\s*=\s*'
+    r'(["\'])(.*)\3(\s*(?:#.*)?)$'
+)
+
+
+def _strip_grub_tokens(inner: str) -> str:
+    """Drop sigmond's CPU-isolation tokens from a kernel cmdline VALUE (the text
+    already stripped of its surrounding quotes), keeping the remaining words in
+    order.  Operates on the unquoted inner content so the closing quote is never
+    captured into a token word — the bug behind sigmond#12, where splitting the
+    whole assignment let ``rcu_nocbs=0,1"`` (closing quote attached) be removed,
+    leaving an unterminated string that breaks ``sh -n`` / grub-mkconfig / apt."""
+    kept = [w for w in inner.split()
+            if not any(w == tok or w.startswith(tok + "=") for tok in GRUB_TOKENS)]
+    return " ".join(kept)
+
+
 def _revert_grub() -> None:
     try:
         lines = GRUB_FILE.read_text().splitlines()
@@ -632,20 +654,35 @@ def _revert_grub() -> None:
     changed = False
     out = []
     for line in lines:
-        new = line
-        for tok in GRUB_TOKENS:
-            words = [w for w in new.split()
-                     if not w.startswith(tok + "=") and not w.startswith('"' + tok + "=")]
-            rebuilt = " ".join(words)
-            if rebuilt != new:
-                new = rebuilt
+        m = _GRUB_CMDLINE_RE.match(line)
+        if m:
+            ws, key, quote, inner, tail = m.groups()
+            new_inner = _strip_grub_tokens(inner)
+            if new_inner != inner:
+                line = f"{ws}{key}={quote}{new_inner}{quote}{tail}"
                 changed = True
-        out.append(new)
-    if changed:
-        GRUB_FILE.write_text("\n".join(out) + "\n")
-        print(f"  reverted grub tokens in {GRUB_FILE}")
-        r = subprocess.run(["update-grub"], capture_output=True, text=True, check=False)
-        if r.returncode != 0:
-            subprocess.run(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"],
-                           capture_output=True, check=False)
-        print("  update-grub done (reboot to fully clear isolcpus)")
+        out.append(line)
+    if not changed:
+        return
+    new_text = "\n".join(out) + "\n"
+
+    # Safety net: never write a grub file that wouldn't parse.  A corrupt
+    # /etc/default/grub makes grub-mkconfig fail, which fails the kernel postrm
+    # hook, which fails EVERY subsequent apt transaction (sigmond#12).  Validate
+    # the rewrite with the same `sh -n` check bringup's preflight uses; if it
+    # somehow doesn't parse, leave the working file untouched and warn.
+    chk = subprocess.run(["sh", "-n"], input=new_text, text=True,
+                         capture_output=True, check=False)
+    if chk.returncode != 0:
+        detail = (chk.stderr.strip().splitlines() or ["parse failed"])[-1]
+        print(f"  warning: skipped grub revert — rewrite would not parse "
+              f"({detail}); left {GRUB_FILE} unchanged", file=sys.stderr)
+        return
+
+    GRUB_FILE.write_text(new_text)
+    print(f"  reverted grub tokens in {GRUB_FILE}")
+    r = subprocess.run(["update-grub"], capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        subprocess.run(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"],
+                       capture_output=True, check=False)
+    print("  update-grub done (reboot to fully clear isolcpus)")
