@@ -2569,6 +2569,68 @@ def _bringup_probe(check: str, smd_bin: str):
     return (True, 'no probe')
 
 
+def _bringup_env_blockers(local_radiod: bool) -> list:
+    """Detect known environment blockers that would otherwise surface mid-run as
+    an opaque apt or git error, and return ``[(what, fix), ...]`` so cmd_bringup
+    can explain them up front instead of letting the raw error escape.
+
+    Covers the two that bit the first greenfield run (sigmond#12, #13):
+      • a broken /etc/default/grub (shell-syntax error → grub-mkconfig fails →
+        EVERY apt transaction fails on the kernel postrm hook);
+      • dpkg left half-configured (apt installs fail until repaired);
+      • a shallow ka9q-radio clone that can't reach the pinned build commit
+        (`git checkout <pin>` → "unable to read tree" during install).
+    The apt/grub checks only matter for local-radiod profiles (the ones that
+    apt-install + build natively).  All checks are read-only and run as the
+    operator (pre-elevation)."""
+    blockers: list = []
+
+    if local_radiod:
+        grub = Path('/etc/default/grub')
+        if grub.exists():
+            r = subprocess.run(['sh', '-n', str(grub)],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                detail = (r.stderr.strip().splitlines() or ['parse failed'])[-1]
+                blockers.append((
+                    f'/etc/default/grub has a shell-syntax error ({detail}) — '
+                    'grub-mkconfig fails, so the kernel postrm hook fails and '
+                    'EVERY apt transaction errors out (often an unterminated '
+                    'quote in GRUB_CMDLINE_LINUX_DEFAULT)',
+                    'fix the offending line in /etc/default/grub, then: '
+                    'sudo update-grub'))
+
+        audit = subprocess.run(['dpkg', '--audit'], capture_output=True, text=True)
+        if audit.returncode != 0 or audit.stdout.strip():
+            blockers.append((
+                'dpkg is half-configured (packages partially installed/removed) '
+                '— apt installs will fail until repaired',
+                'sudo apt-get -f install   (or: sudo dpkg --configure -a)'))
+
+    # Shallow ka9q-radio clone vs. the build pin — precise: only a blocker when
+    # the pinned commit is genuinely unreachable (no false positive when a
+    # shallow clone happens to contain the pin).
+    ka9q = Path('/opt/git/sigmond/ka9q-radio')
+    if (ka9q / '.git').exists():
+        pin = _ka9q_radio_pin()
+        if pin:
+            seen = subprocess.run(['git', '-C', str(ka9q), 'cat-file', '-t', pin],
+                                  capture_output=True, text=True)
+            if seen.returncode != 0:
+                shallow = subprocess.run(
+                    ['git', '-C', str(ka9q), 'rev-parse',
+                     '--is-shallow-repository'], capture_output=True, text=True)
+                why = ('shallow clone' if shallow.stdout.strip() == 'true'
+                       else 'commit not fetched')
+                blockers.append((
+                    f'ka9q-radio cannot reach its build pin {pin[:12]} ({why}) — '
+                    'install would fail with "unable to read tree"',
+                    f'sg sigmond -c "git -C {ka9q} fetch --unshallow"  '
+                    f'(or: git -C {ka9q} fetch origin {pin})'))
+
+    return blockers
+
+
 def cmd_bringup(args) -> int:
     """Guided, contract-ordered station bring-up (install-orchestration Phase B).
 
@@ -2698,9 +2760,25 @@ def cmd_bringup(args) -> int:
         print(f"{mark} {st.label}{extra}")
     print()
 
+    # Environment preflight — surface known blockers (broken grub/apt, shallow
+    # pinned clone) with a plain-language fix rather than an opaque apt/git error
+    # mid-run.  Reported here so --dry-run shows them too; the real run aborts.
+    env_blockers = _bringup_env_blockers(local)
+    if env_blockers:
+        _warn('environment blocker(s) detected — these would break the run:')
+        for what, fix in env_blockers:
+            _warn(f'  • {what}')
+            _info(f'      fix: {fix}')
+        print()
+
     if getattr(args, 'dry_run', False):
         _info('(dry-run — no changes made)')
         return 0
+
+    if env_blockers:
+        _err('bringup: aborting — resolve the environment blocker(s) above, '
+             'then re-run.')
+        return 1
 
     # Enforce required identity on the real run (dry-run previews freely above).
     missing = []
