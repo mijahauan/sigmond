@@ -157,10 +157,14 @@ def build_plan(profile, *, local_radiod: bool,
         # Stage 4 enables/starts it (staggered).  Without a reporter id the
         # client falls back to its base-config start.
         if reporter and client in _REPORTER_KEYED:
+            # --force makes re-add idempotent (create only missing files, leave
+            # existing ones) so re-running bring-up doesn't error on an instance
+            # that's already scaffolded.
             steps.append(Step(STAGE3A,
                               f'create reporter instance {client}@{reporter}',
                               'enable',
-                              argv=[smd, 'admin', 'instance', 'add', client, reporter]))
+                              argv=[smd, 'admin', 'instance', 'add', '--force',
+                                    client, reporter]))
 
     # --- Stage 3b: independent clients (no radiod, no wisdom wait) ---
     for client in profile.clients:

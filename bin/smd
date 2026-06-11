@@ -2728,11 +2728,18 @@ def cmd_bringup(args) -> int:
     # [radiod.*] block without disturbing [host].  Also export to the process env
     # for configurators that read it directly (hf-timestd's setup-station.sh).
     if callsign or grid:
-        from sigmond.coordination import write_host_identity
+        from sigmond.coordination import (write_host_identity, load_coordination,
+                                          render_env)
+        from sigmond.paths import COORDINATION_ENV
         try:
             if write_host_identity(call=callsign, grid=grid):
                 _ok(f'seeded station identity into coordination.toml '
                     f'(call={callsign or "—"}, grid={grid or "—"})')
+                # Refresh the rendered env so runtime units (EnvironmentFile)
+                # see STATION_CALL/STATION_GRID too — radiod config would do this
+                # on a fresh host, but it's skipped when already configured.
+                COORDINATION_ENV.parent.mkdir(parents=True, exist_ok=True)
+                COORDINATION_ENV.write_text(render_env(load_coordination()))
         except OSError as exc:
             _warn(f'could not seed coordination [host]: {exc}')
     if callsign:
