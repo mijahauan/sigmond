@@ -37,6 +37,13 @@ STAGE4 = 'Stage 4 — start + verify'
 _TIMING_AUTHORITY = 'hf-timestd'
 _INDEPENDENT = frozenset({'mag-recorder'})
 
+# Clients that take a per-reporter instance (`<client>@<reporter-id>`).  When a
+# reporter id is supplied, bring-up creates + enables the instance instead of
+# starting a base-config unit.  psk-recorder is NOT here yet: its per-instance
+# path isn't multi-source-aware (renders no [[radiod]] block → crash-loop, see
+# sigmond#16), so it stays on its legacy radiod-keyed start until that lands.
+_REPORTER_KEYED = frozenset({'wspr-recorder'})
+
 
 @dataclass
 class Step:
@@ -64,7 +71,8 @@ class Plan:
 def build_plan(profile, *, local_radiod: bool,
                remote_status_dns: Optional[str] = None,
                smd: str = 'smd', with_optional: bool = False,
-               non_interactive: bool = False, skip=frozenset()) -> Plan:
+               non_interactive: bool = False, skip=frozenset(),
+               reporter: Optional[str] = None) -> Plan:
     """Pure: a profile + radiod locality -> the ordered Step list.
 
     ``local_radiod`` gates the entire radiod stack (infra, ka9q-radio, tuning,
@@ -75,6 +83,15 @@ def build_plan(profile, *, local_radiod: bool,
     steps: list = []
 
     def install(stage: str, comp: str) -> None:
+        # Enable in topology BEFORE installing.  `smd install --components` builds
+        # the component but does NOT flip topology `enabled=true` (only
+        # `smd install --profile` does, via set_component_enabled).  Without this
+        # the whole station stays `enabled=false`: `smd status`/`validate` see
+        # nothing "declared" and the Stage-4 `smd start` steps have nothing to
+        # start (radiod is left disabled/inactive).  `smd enable` is idempotent,
+        # so re-running bring-up is a no-op here.
+        steps.append(Step(stage, f'enable {comp}', 'enable',
+                          argv=[smd, 'enable', comp]))
         steps.append(Step(stage, f'install {comp}', 'install',
                           argv=[smd, 'install', '--components', comp, '--yes']))
 
@@ -135,6 +152,15 @@ def build_plan(profile, *, local_radiod: bool,
         install(STAGE3A, client)
         configure(STAGE3A, client)
         checkpoint(STAGE3A, f'{client} configured', check=f'configured:{client}')
+        # Create the per-reporter instance from the base config (status + bands
+        # the config step just wrote).  `instance add` only scaffolds the files;
+        # Stage 4 enables/starts it (staggered).  Without a reporter id the
+        # client falls back to its base-config start.
+        if reporter and client in _REPORTER_KEYED:
+            steps.append(Step(STAGE3A,
+                              f'create reporter instance {client}@{reporter}',
+                              'enable',
+                              argv=[smd, 'admin', 'instance', 'add', client, reporter]))
 
     # --- Stage 3b: independent clients (no radiod, no wisdom wait) ---
     for client in profile.clients:
@@ -190,9 +216,16 @@ def build_plan(profile, *, local_radiod: bool,
                           'wait-streaming'))
 
     for client in radiod_bound:
-        steps.append(Step(STAGE4, f'start {client} (staggered)', 'start',
-                          argv=[smd, 'start', '--components', client],
-                          settle_s=CLIENT_STAGGER_S))
+        if reporter and client in _REPORTER_KEYED:
+            # `instance enable` does systemctl enable --now on the per-reporter
+            # unit (wspr-recorder@<reporter>), so it both declares and starts it.
+            steps.append(Step(STAGE4, f'start {client}@{reporter} (staggered)', 'start',
+                              argv=[smd, 'admin', 'instance', 'enable', client, reporter],
+                              settle_s=CLIENT_STAGGER_S))
+        else:
+            steps.append(Step(STAGE4, f'start {client} (staggered)', 'start',
+                              argv=[smd, 'start', '--components', client],
+                              settle_s=CLIENT_STAGGER_S))
     for client in independent:
         steps.append(Step(STAGE4, f'start {client} (independent)', 'start',
                           argv=[smd, 'start', '--components', client]))

@@ -2642,10 +2642,43 @@ def cmd_bringup(args) -> int:
 
     smd_bin = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else 'smd'
 
+    # --- Station identity (source it ONCE; route it to every client) ---------
+    # The operant id is the REPORTER id (common to WSPR + PSK), not the callsign
+    # (an optional ham-operator id).  grid is the station location hf-timestd and
+    # the reporting clients need.  Collected from flags; prompted when on a TTY;
+    # required (reporter+grid) under --non-interactive.  Seeded into coordination
+    # [host] after elevation (below) so STATION_CALL/STATION_GRID propagate to
+    # all client configurators, and handed to build_plan so the reporter id names
+    # the wspr/psk instances.
+    reporter = (getattr(args, 'reporter', None) or '').strip()
+    grid = (getattr(args, 'grid', None) or '').strip()
+    callsign = (getattr(args, 'callsign', None) or '').strip()
+    psws_id = (getattr(args, 'psws_station_id', None) or '').strip()
+
+    needs_reporter = any(c in prof.clients and c not in skip
+                         for c in ('wspr-recorder', 'psk-recorder'))
+    needs_grid = ('hf-timestd' in prof.clients and 'hf-timestd' not in skip) or needs_reporter
+    interactive = sys.stdin.isatty() and not getattr(args, 'non_interactive', False)
+
+    def _ask_identity(label, cur, *, optional=False):
+        if cur or not interactive:
+            return cur
+        suffix = ' (optional — Enter to skip)' if optional else ''
+        try:
+            return input(f'  {label}{suffix}: ').strip()
+        except EOFError:
+            return ''
+
+    if needs_reporter:
+        reporter = _ask_identity('Reporter id for WSPR/PSK (e.g. AC0G/S)', reporter)
+    if needs_grid:
+        grid = _ask_identity('Maidenhead grid square (e.g. EM38ww)', grid)
+    callsign = _ask_identity('Callsign', callsign, optional=True)
+
     plan = build_plan(prof, local_radiod=local, remote_status_dns=remote_dns,
                       smd=smd_bin, with_optional=getattr(args, 'with_optional', False),
                       non_interactive=getattr(args, 'non_interactive', False),
-                      skip=frozenset(skip))
+                      skip=frozenset(skip), reporter=reporter or None)
 
     _heading(f'bringup: {prof.name}  ({"LOCAL" if local else "REMOTE"} radiod)')
     if prof.description:
@@ -2657,7 +2690,8 @@ def cmd_bringup(args) -> int:
             _info(st.stage)
             cur = st.stage
         mark = {'checkpoint': '  ✓', 'wisdom': '  ⟳', 'wait-wisdom': '  ⏳',
-                'wait-streaming': '  ⏳', 'note': '  …', 'start': '  ▶'}.get(st.kind, '  •')
+                'wait-streaming': '  ⏳', 'note': '  …', 'start': '  ▶',
+                'enable': '  ⊕'}.get(st.kind, '  •')
         extra = ' [HARD]' if st.hard else (' (background)' if st.background else '')
         if st.settle_s:
             extra += f' (+{st.settle_s}s settle)'
@@ -2668,12 +2702,45 @@ def cmd_bringup(args) -> int:
         _info('(dry-run — no changes made)')
         return 0
 
+    # Enforce required identity on the real run (dry-run previews freely above).
+    missing = []
+    if needs_reporter and not reporter:
+        missing.append('--reporter')
+    if needs_grid and not grid:
+        missing.append('--grid')
+    if missing:
+        _err(f"bringup: missing required station identity: {', '.join(missing)}. "
+             f"Pass the flag(s), or run interactively (without --non-interactive) "
+             f"to be prompted.")
+        return 1
+
     # Elevate once, like every other mutating verb: _need_root re-execs the
     # whole bringup under sudo (carrying SIGMOND_ALLOW_SUDO so the guard lets it
     # and its sub-smd steps through).  The operator never types `sudo` — smd
     # does it.  Sub-steps then run already-as-root (sudo=False below).
     if _need_root('bringup'):
         return 1
+
+    # Seed station identity into coordination [host] BEFORE any config step, so
+    # client config (which builds STATION_CALL/STATION_GRID from coord.host) hands
+    # the real identity to every configurator — radiod, hf-timestd, wspr, psk —
+    # instead of each falling back to its placeholder.  radiod config appends its
+    # [radiod.*] block without disturbing [host].  Also export to the process env
+    # for configurators that read it directly (hf-timestd's setup-station.sh).
+    if callsign or grid:
+        from sigmond.coordination import write_host_identity
+        try:
+            if write_host_identity(call=callsign, grid=grid):
+                _ok(f'seeded station identity into coordination.toml '
+                    f'(call={callsign or "—"}, grid={grid or "—"})')
+        except OSError as exc:
+            _warn(f'could not seed coordination [host]: {exc}')
+    if callsign:
+        os.environ['STATION_CALL'] = callsign
+    if grid:
+        os.environ['STATION_GRID'] = grid
+    if psws_id:
+        os.environ['STATION_ID'] = psws_id
 
     for st in plan.steps:
         if st.kind == 'note':
@@ -12686,6 +12753,23 @@ def main() -> int:
                                 'with `smd config edit <client>`')
     p_bringup.add_argument('--reconfigure', action='store_true',
                            help='re-run config init even for already-configured clients (default: skip them — bringup is idempotent and preserves existing config)')
+    # Station identity — the operant id is the REPORTER id (common to WSPR +
+    # PSK), NOT the callsign (which is an optional ham-operator id).  GRAPE
+    # (hf-timestd) and the magnetometer upload under their own PSWS station ids.
+    # Seeded into coordination.toml [host] so STATION_CALL/STATION_GRID reach
+    # every client (radiod / hf-timestd / wspr / psk); reporter id names the
+    # per-reporter recorder instances.
+    p_bringup.add_argument('--reporter', metavar='ID', dest='reporter',
+                           help='reporter id for WSPR/PSK (e.g. AC0G/S) — the operant '
+                                'station identifier; names the wspr/psk instances')
+    p_bringup.add_argument('--grid', metavar='LOCATOR', dest='grid',
+                           help='Maidenhead grid square (e.g. EM38ww) — station location')
+    p_bringup.add_argument('--callsign', metavar='CALL', dest='callsign',
+                           help='amateur radio callsign (optional; hams only) — recorded '
+                                'as the host identity in coordination.toml')
+    p_bringup.add_argument('--psws-station-id', metavar='ID', dest='psws_station_id',
+                           help='PSWS station id for GRAPE/hf-timestd uploads (e.g. S000171; '
+                                'optional — leave unset to configure PSWS upload later)')
     p_bringup.add_argument('--dry-run', action='store_true',
                            help='print the staged plan without running it')
 

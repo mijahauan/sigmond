@@ -285,6 +285,60 @@ def _passthrough_extras_for(client_type: str) -> list:
     return [str(k) for k in keys if isinstance(k, str)]
 
 
+def write_host_identity(call: str = '', grid: str = '', *,
+                        lat: float = 0.0, lon: float = 0.0,
+                        path: Path = COORDINATION_PATH) -> bool:
+    """Merge a ``[host]`` identity section into coordination.toml.
+
+    This is the source of station identity for the whole suite: client config
+    builds STATION_CALL / STATION_GRID (and LAT/LON) from ``coord.host`` (see
+    client_config._build_env_bag), so seeding ``[host]`` here propagates the
+    callsign/grid to every client configurator — radiod, hf-timestd, wspr, psk.
+    Without it, a greenfield host has no ``[host]`` section and every client
+    falls back to its placeholder identity.
+
+    Merges field-by-field (only non-empty arguments override existing values,
+    so a later richer config isn't clobbered with blanks) and text-merges the
+    section so existing ``[radiod.*]`` / ``[cpu]`` / ``[[clients]]`` blocks are
+    preserved verbatim.  Idempotent: returns True only when the file changed.
+    """
+    cur = load_coordination(path).host
+    call = call or cur.call
+    grid = grid or cur.grid
+    lat = lat or cur.lat
+    lon = lon or cur.lon
+
+    fields = []
+    if call:
+        fields.append(f'call = "{call}"')
+    if grid:
+        fields.append(f'grid = "{grid}"')
+    if lat:
+        fields.append(f'lat = {lat}')
+    if lon:
+        fields.append(f'lon = {lon}')
+    if not fields:
+        return False
+    block = '[host]\n' + '\n'.join(fields) + '\n'
+
+    existing = path.read_text() if path.exists() else ''
+    lines = existing.splitlines(keepends=True)
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == '[host]'), None)
+    if start is None:
+        # Host identity belongs at the top; keep a blank line before the rest.
+        new_text = block + ('\n' + existing if existing.strip() else '')
+    else:
+        end = next((j for j in range(start + 1, len(lines))
+                    if lines[j].lstrip().startswith('[')), len(lines))
+        new_text = ''.join(lines[:start]) + block + ''.join(lines[end:])
+
+    if new_text == existing:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_text)
+    return True
+
+
 def render_env(coord: Coordination,
                passthrough_lookup: Optional[Callable[[str], list]] = None) -> str:
     """Render the coordination as KEY=VALUE lines suitable for systemd

@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'lib'))
 
 from sigmond.coordination import (
     Coordination, TimingAuthority, load_coordination, parse_coordination,
-    render_env, _env_key,
+    render_env, write_host_identity, _env_key,
 )
 
 
@@ -374,6 +374,63 @@ endpoint = "unix:///run/phantom.sock"
         env = render_env(coord)
         self.assertNotIn("NONEXISTENT_RADIOD", env)
         self.assertNotIn("phantom", env)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class WriteHostIdentityTests(unittest.TestCase):
+    """write_host_identity seeds [host] so STATION_CALL/GRID propagate."""
+
+    def _tmp(self, text=""):
+        d = tempfile.mkdtemp()
+        p = Path(d) / "coordination.toml"
+        if text:
+            p.write_text(text)
+        return p
+
+    def test_seeds_host_on_empty_file(self):
+        p = self._tmp()
+        changed = write_host_identity("AC0G", "EM38ww", path=p)
+        self.assertTrue(changed)
+        host = load_coordination(p).host
+        self.assertEqual(host.call, "AC0G")
+        self.assertEqual(host.grid, "EM38ww")
+
+    def test_preserves_existing_radiod_block(self):
+        p = self._tmp(
+            '[radiod."sigma-rx888mk2-status.local"]\n'
+            'host        = "localhost"\n'
+            'radio_conf  = "/etc/radio/radiod@sigma-rx888mk2.conf"\n'
+        )
+        write_host_identity("AC0G", "EM38ww", path=p)
+        coord = load_coordination(p)
+        self.assertEqual(coord.host.call, "AC0G")
+        # radiod block survived the [host] merge
+        self.assertIn("sigma-rx888mk2-status.local", coord.radiods)
+        self.assertEqual(
+            coord.radiods["sigma-rx888mk2-status.local"].radio_conf,
+            "/etc/radio/radiod@sigma-rx888mk2.conf")
+
+    def test_merges_without_clobbering_existing_field(self):
+        p = self._tmp()
+        write_host_identity("AC0G", "EM38ww", path=p)
+        # update only grid; call must be preserved (no blank clobber)
+        write_host_identity(grid="EN10aa", path=p)
+        host = load_coordination(p).host
+        self.assertEqual(host.call, "AC0G")
+        self.assertEqual(host.grid, "EN10aa")
+
+    def test_idempotent_returns_false_on_no_change(self):
+        p = self._tmp()
+        self.assertTrue(write_host_identity("AC0G", "EM38ww", path=p))
+        self.assertFalse(write_host_identity("AC0G", "EM38ww", path=p))
+
+    def test_noop_when_nothing_to_write(self):
+        p = self._tmp()
+        self.assertFalse(write_host_identity(path=p))
+        self.assertFalse(p.exists())
 
 
 if __name__ == "__main__":

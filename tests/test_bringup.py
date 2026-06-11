@@ -111,6 +111,50 @@ def test_client_config_is_non_interactive_by_default_but_radiod_is_not():
         assert '--non-interactive' in cfg[client].argv, client
 
 
+def test_every_install_is_preceded_by_a_topology_enable():
+    # Regression for the inert-station bug: bring-up must flip topology
+    # enabled=true for each component, else `smd status`/validate see nothing
+    # declared and Stage-4 start has nothing to start.
+    p = build_plan(_dasi2(), local_radiod=True)
+    enabled = {s.argv[-1] for s in p.steps if s.kind == 'enable'}
+    for s in p.steps:
+        if s.kind == 'install':
+            comp = s.argv[s.argv.index('--components') + 1]
+            assert comp in enabled, f'{comp} installed but never enabled'
+            # enable must come before its install
+            ei = next(i for i, st in enumerate(p.steps)
+                      if st.kind == 'enable' and st.argv[-1] == comp)
+            ii = next(i for i, st in enumerate(p.steps)
+                      if st.kind == 'install'
+                      and st.argv[st.argv.index('--components') + 1] == comp)
+            assert ei < ii, f'enable {comp} must precede its install'
+    # ka9q-radio + the data clients are all enabled
+    assert {'ka9q-radio', 'wspr-recorder', 'psk-recorder', 'hf-timestd'} <= enabled
+
+
+def test_reporter_creates_wspr_instance_and_starts_it_by_reporter():
+    p = build_plan(_dasi2(), local_radiod=True, reporter='AC0G/S')
+    labels = _labels(p)
+    # Stage 3a scaffolds the per-reporter instance...
+    assert any(s.argv[:4] == ['smd', 'admin', 'instance', 'add']
+               and s.argv[-2:] == ['wspr-recorder', 'AC0G/S'] for s in p.steps)
+    # ...and Stage 4 starts it via `instance enable` (not a base-config start).
+    assert any(s.kind == 'start'
+               and s.argv[:4] == ['smd', 'admin', 'instance', 'enable']
+               and s.argv[-2:] == ['wspr-recorder', 'AC0G/S'] for s in p.steps)
+    assert 'start wspr-recorder (staggered)' not in labels
+    # psk-recorder is NOT reporter-keyed yet (sigmond#16) — stays legacy start.
+    assert any(s.kind == 'start' and s.argv == ['smd', 'start', '--components',
+               'psk-recorder'] for s in p.steps)
+    assert not any('instance' in s.argv and 'psk-recorder' in s.argv for s in p.steps)
+
+
+def test_no_reporter_keeps_base_config_start():
+    p = build_plan(_dasi2(), local_radiod=True)   # reporter=None
+    assert 'start wspr-recorder (staggered)' in _labels(p)
+    assert not any('instance' in s.argv for s in p.steps)
+
+
 def test_skip_excludes_hardware_gated_client():
     # Environment-aware: a client whose hardware is absent (e.g. mag-recorder
     # with no magnetometer) is skipped, not scaffolded.
