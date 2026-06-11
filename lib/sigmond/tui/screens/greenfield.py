@@ -285,7 +285,11 @@ class GreenfieldScreen(Vertical):
         g = self._gather()
         # --dry-run makes no changes and needs no sudo; it prints the staged
         # plan + any environment blockers.  Stream it in the same modal.
-        argv = self._build_argv(g, dry_run=True)
+        # PYTHONUNBUFFERED=1: smd's progress (_heading/_info/_ok via print) is
+        # the PARENT process's stdout, which Python block-buffers on a non-TTY
+        # pipe — so without this the stage scaffolding would dump all at once
+        # at the end instead of streaming live.
+        argv = ["env", "PYTHONUNBUFFERED=1", *self._build_argv(g, dry_run=True)]
         self.app.push_screen(_BringupModal(argv))
 
     def _begin(self) -> None:
@@ -351,8 +355,12 @@ class GreenfieldScreen(Vertical):
             return
         # Pre-elevate: when euid==0 smd's _need_root returns without prompting,
         # and the SIGMOND_ALLOW_SUDO marker satisfies its top-of-main guard.
+        # PYTHONUNBUFFERED=1 forces smd's own progress lines (the parent
+        # process's stdout) to flush per-line; without it Python block-buffers
+        # them on the captured pipe and the stage/checkpoint scaffolding only
+        # appears in one delayed dump at the end (confirmed on a live run).
         argv = ["sudo", "-n", "--", "env", "SIGMOND_ALLOW_SUDO=1",
-                *self._build_argv(g, dry_run=False)]
+                "PYTHONUNBUFFERED=1", *self._build_argv(g, dry_run=False)]
 
         def _after_run(rc) -> None:
             self._render_verdict(rc, g)
