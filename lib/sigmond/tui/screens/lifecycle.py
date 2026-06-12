@@ -72,7 +72,7 @@ def _smd_binary() -> str:
     if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
         return argv0
     found = shutil.which('smd')
-    return found or '/usr/local/sbin/smd'
+    return found or '/usr/local/bin/smd'
 
 
 @dataclass
@@ -395,7 +395,7 @@ class LifecycleScreen(Vertical):
 
         self._rows = data.rows
         # Drop stale check entries (rows that disappeared since last
-        # refresh — e.g. after a manual `smd remove` elsewhere).
+        # refresh — e.g. after a manual `smd component remove` elsewhere).
         present = {r.key for r in data.rows}
         self._checked &= present
 

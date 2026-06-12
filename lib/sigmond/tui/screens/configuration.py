@@ -63,7 +63,7 @@ def _smd_binary() -> str:
     if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
         return argv0
     found = shutil.which('smd')
-    return found or '/usr/local/sbin/smd'
+    return found or '/usr/local/bin/smd'
 
 
 # Clients that accept per-instance config files (matches

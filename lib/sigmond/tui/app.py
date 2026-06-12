@@ -281,7 +281,7 @@ class SigmondApp(App):
             from ..topology import Topology
             self.topology = Topology(
                 client_dir=__import__('pathlib').Path('/opt/git/sigmond'),
-                smd_bin=__import__('pathlib').Path('/usr/local/sbin/smd'),
+                smd_bin=__import__('pathlib').Path('/usr/local/bin/smd'),
             )
 
         try:

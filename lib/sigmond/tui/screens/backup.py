@@ -16,7 +16,7 @@ def _smd_binary() -> str:
     argv0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
     if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
         return argv0
-    return shutil.which('smd') or '/usr/local/sbin/smd'
+    return shutil.which('smd') or '/usr/local/bin/smd'
 
 
 _WHAT = """\

@@ -37,7 +37,7 @@ def _smd_binary() -> str:
     argv0 = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
     if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
         return argv0
-    return shutil.which('smd') or '/usr/local/sbin/smd'
+    return shutil.which('smd') or '/usr/local/bin/smd'
 
 
 # Sigmond clients live under /opt/git/sigmond/ (the sigmond namespace).
@@ -401,7 +401,7 @@ def _gather(topology_components: dict, do_fetch: bool = False) -> _ComponentsVie
 
         # Hardware-gated overlay: an enabled core component whose hardware is
         # absent reads as "dormant", not stopped/running — same source of truth
-        # as `smd validate`'s rule_hardware_gated_core (harmonize.dormant_reason).
+        # as `smd admin validate`'s rule_hardware_gated_core (harmonize.dormant_reason).
         gated_reason = ""
         try:
             from ...harmonize import dormant_reason as _dormant_reason

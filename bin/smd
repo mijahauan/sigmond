@@ -95,7 +95,7 @@ import time
 from typing import Optional
 
 # Bootstrap step 2 — add sibling lib/ to sys.path so `import sigmond`
-# works when running from the repo, from /usr/local/sbin/smd, or from a
+# works when running from the repo, from /usr/local/bin/smd, or from a
 # symlink.
 _SCRIPT = Path(__file__).resolve()
 for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
