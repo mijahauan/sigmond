@@ -114,6 +114,22 @@ grape/wspr/psk depend on a gpsdo-disciplined rx888.
 **detection-gated**: absent hardware → don't install that component. _This host
 has no magnetometer, so it's a live test of the dasi2 mag-dormant path._
 
+**IMPLEMENTED (Stage 1):**
+- `smd start` is now **dormancy-aware** — it skips an enabled hardware-gated
+  component (only mag-recorder / gpsdo-monitor exist) whose device is
+  *confidently* absent (`dormant_reason`, fires on `False` only; unknown still
+  starts). Same source of truth as `smd validate` / status surfaces, now
+  extended to the start path. radiod is NOT gated, so never affected.
+- bringup no longer **skips** mag/gpsdo when absent — it keeps them in the plan
+  (install + configure + enable) so they install dormant, and emits the
+  dependency-aware warnings. Their "configured" checkpoint is **soft**
+  (`build_plan(dormant=…)`) so a config step that can't finish without the
+  device doesn't abort the bring-up.
+- **rx888 during bringup:** kept as a hard **abort** (a turnkey bringup
+  install+starts a station; with no SDR radiod can't run and the start phase
+  would hang). The "install software now, attach SDR later" semantics belong to
+  the **base** install-only assistant (Stage 2), not the dasi2 bringup.
+
 ## 4. radiod auto-naming
 
 **Rule:** `radiod status DNS = "<short-hostname>-status.local"`, where
@@ -179,9 +195,12 @@ FFT wisdom. SDR inventory is Advanced, NOT folded into Configure.
 - Update `RADIOD-IDENTIFICATION.md` (auto-derivation) + catalog comment.
 - Tests: profile default, status-name derivation, no-daisy guard.
 
-**Stage 1 — hardware-aware install + dependency warnings**
-- One kit-check via `hardware_detect.py`; dependency-aware messages (§3).
-- Resolve the dasi2 skip-vs-dormant open question.
+**Stage 1 — hardware-aware install + dependency warnings — DONE (uncommitted)**
+- Dependency-aware messages (§3); dormancy-aware `smd start`; bringup
+  install-dormant with soft checkpoints. Tests: `test_bringup` +dormant,
+  `test_radiod_config` unchanged. Verified live via `smd bringup dasi2
+  --dry-run` on this host (mag + GPSDO both absent → both warnings, both
+  install dormant; rx888 present → proceeds).
 
 **Stage 2 — base & client guided assistants (the real build)**
 - base: detect → install matching foundation → client picker → configure/

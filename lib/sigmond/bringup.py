@@ -74,6 +74,7 @@ def build_plan(profile, *, local_radiod: bool,
                remote_status_dns: Optional[str] = None,
                smd: str = 'smd', with_optional: bool = False,
                non_interactive: bool = False, skip=frozenset(),
+               dormant=frozenset(),
                reporter: Optional[str] = None) -> Plan:
     """Pure: a profile + radiod locality -> the ordered Step list.
 
@@ -81,6 +82,13 @@ def build_plan(profile, *, local_radiod: bool,
     radiod config, FFT wisdom).  When False the host binds a remote radiod and
     none of that — nor the wisdom wait — applies.  ``mag-recorder`` is emitted
     on the independent 3b track regardless of locality.
+
+    ``dormant`` names hardware-gated components whose device is absent: they
+    still install + configure + enable (so they light up when the hardware is
+    later attached and `smd start` — which skips dormant components — runs
+    again), but their "configured" checkpoint is SOFT, so a config step that
+    can't fully complete without the device doesn't abort the whole bring-up
+    (docs/install-redesign.md §3).  Distinct from ``skip`` (excluded entirely).
     """
     steps: list = []
 
@@ -175,8 +183,12 @@ def build_plan(profile, *, local_radiod: bool,
         if client in _INDEPENDENT and client not in skip:
             install(STAGE3B, client)
             configure(STAGE3B, client)
+            # Soft checkpoint for a dormant (hardware-absent) client: its config
+            # step may not fully complete without the device, and that must not
+            # abort the bring-up — it lights up when the hardware is attached.
             checkpoint(STAGE3B, f'{client} configured',
-                       check=f'configured:{client}', hard=True)
+                       check=f'configured:{client}',
+                       hard=client not in dormant)
 
     # Provision the shared hs-uploader watermark dir.  Recorder units list
     # /var/lib/hs-uploader in ReadWritePaths under ProtectSystem=strict, so it

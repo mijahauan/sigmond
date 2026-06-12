@@ -2722,9 +2722,10 @@ def cmd_bringup(args) -> int:
         # Local-radiod profile: the upfront check is the SDR HARDWARE on the USB
         # bus, NOT whether ka9q-radio is built yet (bringup builds it).
         if not _detect_local_sdr():
-            _err('bringup: this is a local-radiod profile but no RX888/SDR was '
-                 'found on the USB bus.  Attach the SDR, or use the "client" '
-                 'profile / --remote-radiod to bind a remote radiod.')
+            _err('bringup: no RX888/SDR on the USB bus — without it radiod '
+                 'cannot run and NOTHING decodes (WSPR / PSK / GRAPE all dark). '
+                 'Attach the RX888 and re-run, or use --remote-radiod / the '
+                 '"client" profile to bind a remote radiod.')
             return 1
         local = True
     else:
@@ -2739,18 +2740,25 @@ def cmd_bringup(args) -> int:
                 return 1
             remote_dns = entered
 
-    # Environment-aware preflight: hardware-gated components that can't run on
-    # this host are skipped (not scaffolded into a broken state) with a clear
-    # note.  Even the `dasi2` profile, which "expects" the magnetometer + GPSDO,
-    # warns-and-continues rather than aborting (operator's choice).
-    skip = set()
+    # Hardware-aware kit check (docs/install-redesign.md §3).  Hardware-gated
+    # components stay in the plan and install DORMANT (enabled, but `smd start`
+    # skips them while their device is absent — they light up when it is later
+    # attached).  The warnings here are about LOST FUNCTIONALITY and are
+    # dependency-aware: a missing GPSDO degrades the whole recorder chain, not
+    # just gpsdo-monitor.  Nothing is removed from the plan (`skip` stays empty);
+    # dormancy is enforced at start.
+    skip: set = set()
+    dormant: set = set()
     if 'mag-recorder' in prof.clients and not _detect_magnetometer():
-        _warn('no magnetometer found (RM3100 / Pololu USB-I2C adapter not on the '
-              'bus) — skipping mag-recorder')
-        skip.add('mag-recorder')
+        _warn('no magnetometer (RM3100 / Pololu USB-I2C) on the bus — '
+              'mag-recorder installs DORMANT; magnetometer uploads stay dark '
+              'until one is attached.')
+        dormant.add('mag-recorder')
     if 'gpsdo-monitor' in prof.local_radiod_infra and not _detect_gpsdo():
-        _warn('no Leo Bodnar GPSDO found on the USB bus — skipping gpsdo-monitor')
-        skip.add('gpsdo-monitor')
+        _warn('no Leo Bodnar GPSDO on the bus — gpsdo-monitor installs DORMANT, '
+              'and the RX888 runs UNDISCIPLINED: WSPR / PSK / GRAPE (hf-timestd) '
+              'frequency accuracy is degraded until a GPSDO is attached.')
+        dormant.add('gpsdo-monitor')
 
     smd_bin = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else 'smd'
 
@@ -2790,7 +2798,8 @@ def cmd_bringup(args) -> int:
     plan = build_plan(prof, local_radiod=local, remote_status_dns=remote_dns,
                       smd=smd_bin, with_optional=getattr(args, 'with_optional', False),
                       non_interactive=getattr(args, 'non_interactive', False),
-                      skip=frozenset(skip), reporter=reporter or None)
+                      skip=frozenset(skip), dormant=frozenset(dormant),
+                      reporter=reporter or None)
 
     _heading(f'bringup: {prof.name}  ({"LOCAL" if local else "REMOTE"} radiod)')
     if prof.description:
@@ -4203,6 +4212,7 @@ def cmd_start(args) -> int:
     try:
         from sigmond.component_state import compute_state
         from sigmond.catalog import load_catalog
+        from sigmond.harmonize import dormant_reason as _dormant_reason
         topo_for_state = _load_topology(TOPOLOGY_PATH)
         catalog = load_catalog()
         startable: list[str] = []
@@ -4210,6 +4220,16 @@ def cmd_start(args) -> int:
             entry = catalog.get(name)
             if entry is not None and getattr(entry, 'kind', None) == 'library':
                 continue  # library entries have no services
+            # Dormant: an enabled, hardware-gated component (mag-recorder,
+            # gpsdo-monitor) whose device is CONFIDENTLY absent.  Don't start
+            # it — it would crash-loop; it lights up when the hardware is
+            # attached and `smd start` runs again.  Same source of truth as
+            # `smd validate` / the status surfaces (harmonize.dormant_reason),
+            # which only fires on a confident `False` (unknown → still started).
+            hw = _dormant_reason(name, enabled=True)
+            if hw:
+                _info(f'{name}: dormant — {hw} not present; starts when attached')
+                continue
             alias = getattr(entry, 'topology_alias', None) if entry else None
             s = compute_state(name, topo_for_state, alias=alias)
             if s.can_start:

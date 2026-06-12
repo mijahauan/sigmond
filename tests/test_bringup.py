@@ -164,13 +164,29 @@ def test_no_reporter_keeps_base_config_start():
 
 
 def test_skip_excludes_hardware_gated_client():
-    # Environment-aware: a client whose hardware is absent (e.g. mag-recorder
-    # with no magnetometer) is skipped, not scaffolded.
+    # `skip` still excludes a component from the plan entirely (used e.g. by
+    # base's detection-gating): mag-recorder is not scaffolded at all.
     p = build_plan(_dasi2(), local_radiod=True, skip=frozenset({'mag-recorder'}))
     assert 'install mag-recorder' not in _labels(p, 'install')
     assert 'configure mag-recorder' not in _labels(p, 'config')
     # the other clients are unaffected
     assert 'install wspr-recorder' in _labels(p, 'install')
+
+
+def test_dormant_keeps_component_but_softens_checkpoint():
+    # Dormant (hardware-absent) gated client stays in the plan — install +
+    # configure + enable — so it lights up when the hardware is later attached
+    # and `smd start` (which skips dormant components) runs again.  But its
+    # "configured" checkpoint is SOFT so a config step that can't complete
+    # without the device doesn't abort the bring-up (docs/install-redesign.md §3).
+    p = build_plan(_dasi2(), local_radiod=True,
+                   dormant=frozenset({'mag-recorder'}))
+    assert 'install mag-recorder' in _labels(p, 'install')
+    assert 'configure mag-recorder' in _labels(p, 'config')
+    ckpts = {s.label: s.hard for s in p.steps if s.kind == 'checkpoint'}
+    assert ckpts['checkpoint: mag-recorder configured'] is False
+    # a non-dormant client keeps its HARD configured checkpoint
+    assert ckpts['checkpoint: wspr-recorder configured'] is True
 
 
 def _stage4(plan):
