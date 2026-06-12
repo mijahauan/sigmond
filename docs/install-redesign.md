@@ -1,10 +1,19 @@
 # Install redesign — station patterns, hardware-aware install, 3-step IA
 
-_Status: decisions locked (2026-06-12); **Stage 0 in progress**. Captures the
-design agreed in the greenfield-install thread. Supersedes the "daisy/dasi2"
-profile split and extends `install-orchestration-design.md`,
-`RADIOD-IDENTIFICATION.md`, and the nav proposal in `TUI-FUNCTION-INVENTORY.md`
-§4._
+_Status (2026-06-12, session 4 wrap): **Stage 0 + Stage 1 shipped** (`3406557`,
+`9c4fc26` on `origin/main`). **Stages 2 + 3 are PROVISIONAL / on hold** — see the
+banner below. Captures the design agreed in the greenfield-install thread.
+Supersedes the "daisy/dasi2" profile split and extends
+`install-orchestration-design.md`, `RADIOD-IDENTIFICATION.md`, and the nav
+proposal in `TUI-FUNCTION-INVENTORY.md` §4._
+
+> ⚠️ **Stages 2–3 are NOT settled work.** Install development may take a
+> different direction altogether. Stages 0–1 (canonical dasi2, hostname-derived
+> radiod name, hardware-aware install) stand on their own and are shipped. The
+> base/client guided assistants (Stage 2) and the Installation nav reorg
+> (Stage 3) below are the *current* design intent, **not a committed plan** —
+> re-confirm the direction before implementing either. Decisions §1 and the
+> three-pattern model (§2) may themselves be revisited.
 
 ## 0. Why
 
@@ -185,7 +194,7 @@ FFT wisdom. SDR inventory is Advanced, NOT folded into Configure.
 
 ## 6. Phased roadmap
 
-**Stage 0 — vocabulary + radiod auto-naming (safe, mechanical, shippable alone)**
+**Stage 0 — vocabulary + radiod auto-naming — DONE, shipped `3406557`**
 - Remove `[profile.daisy]`; default bare `smd bringup` → `dasi2`.
 - Purge "daisy" from `bin/smd` (default resolution ~2672, help 12852/12856,
   bash completion 6408, the dasi2-nudge 2723-2725), `greenfield.py`
@@ -195,23 +204,34 @@ FFT wisdom. SDR inventory is Advanced, NOT folded into Configure.
 - Update `RADIOD-IDENTIFICATION.md` (auto-derivation) + catalog comment.
 - Tests: profile default, status-name derivation, no-daisy guard.
 
-**Stage 1 — hardware-aware install + dependency warnings — DONE (uncommitted)**
+**Stage 1 — hardware-aware install + dependency warnings — DONE, shipped `9c4fc26`**
 - Dependency-aware messages (§3); dormancy-aware `smd start`; bringup
   install-dormant with soft checkpoints. Tests: `test_bringup` +dormant,
   `test_radiod_config` unchanged. Verified live via `smd bringup dasi2
   --dry-run` on this host (mag + GPSDO both absent → both warnings, both
   install dormant; rx888 present → proceeds).
 
-**Stage 2 — base & client guided assistants (the real build)**
-- base: detect → install matching foundation → client picker → configure/
-  enable/start.
-- client: remote DNS → client picker → configure/enable/start.
-- Replace the static `[profile.base]` / `[profile.client]` client-lists with
-  the assistant flows; keep dasi2 as the one static bundle.
+**Stage 2 — base & client guided assistants (the real build) — PENDING / PROVISIONAL**
+_(Not started. Re-confirm the direction before building — see the ⚠️ banner.)_
+- base: detect → install matching foundation (rx888→ka9q-radio+ka9q-web+
+  igmp-querier; gpsdo→gpsdo-monitor; mag→mag-recorder) → client picker
+  (wspr/psk/grape/hfdl/codar/hf-gps-tec) → configure/enable/start.
+- client: remote radiod status DNS → client picker → configure/enable/start.
+- TUI-only guided assistants that COMPOSE existing screens (Topology-enable,
+  Install, Configuration, Lifecycle); replace the static `[profile.base]` /
+  `[profile.client]` client-lists with the assistant flows; keep dasi2 as the
+  one static bundle.
+- OPEN: client-picker UI = new widget vs reuse Topology-enable + Install chrome.
 
-**Stage 3 — Installation IA reorg (nav)**
-- Collapse to ①②③; remove Topology leaf; relocate the under-the-hood four;
-  fold SDR inventory into Configure; move Lifecycle up into step ③.
+**Stage 3 — Installation IA reorg (nav) — PENDING / PROVISIONAL**
+_(Not started. Re-confirm the direction before building — see the ⚠️ banner.)_
+- Collapse Installation to ①②③ (① Download&install absorbs Guided bring-up +
+  Install + the 3 patterns; ② Configure; ③ Enable/disable&start/stop = the
+  Lifecycle screen moved up from Maintenance).
+- Remove the Topology leaf (topology = derived state surfaced by ③).
+- Relocate the under-the-hood five — Software versions, **SDR inventory**, CPU
+  affinity, CPU frequency, FFT wisdom — into one **Advanced** group. (SDR
+  inventory is Advanced, NOT folded into Configure — see §5.)
 - Reconcile with `TUI-FUNCTION-INVENTORY.md` §4.
 
 ## 7. Decisions resolved + remaining
