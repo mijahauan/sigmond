@@ -462,13 +462,16 @@ def cmd_radiod_init(args) -> int:
     coord_blocks: list[str] = []
     iface = _suggest_iface()
     hostname_short = socket.gethostname().split(".")[0]
+    # Sole SDR on the bus → the radiod id is the bare hostname (status name
+    # `<hostname>-status.local`); >1 SDR keeps the type-suffixed disambiguator.
+    sole = len(sdrs) == 1
 
     for i, sdr in enumerate(new_sdrs):
         print()
         info(f"--- SDR {i + 1}/{len(new_sdrs)} "
              f"({sdr.fields.get('sdr_type')}) ---")
         plan = _collect_per_sdr_values(sdr, args, hostname_short, iface,
-                                       known_ids=known_ids)
+                                       known_ids=known_ids, sole=sole)
         if plan is None:
             return 2  # operator aborted
         # Each newly-named id joins known_ids so subsequent SDRs in the same
@@ -618,12 +621,14 @@ def _suggest_iface() -> str:
 
 def _collect_per_sdr_values(sdr, args, hostname_short: str,
                             iface: str,
-                            known_ids: Optional[set] = None) -> Optional[dict]:
+                            known_ids: Optional[set] = None,
+                            sole: bool = True) -> Optional[dict]:
     sdr_type = sdr.fields.get("sdr_type", "")
     profile = _profile_for(sdr_type)
     serial = sdr.fields.get("serial", "")
 
-    suggested_id = _default_instance_id(hostname_short, sdr_type, sdr.fields)
+    suggested_id = _default_instance_id(hostname_short, sdr_type, sdr.fields,
+                                        sole=sole)
     # Bump the suggestion until it doesn't collide with an already-named
     # instance — usb_sdr's `index` distinguishes same-type SDRs on the bus,
     # but it doesn't know about earlier `smd config init radiod` runs.  An
@@ -685,7 +690,20 @@ def _collect_per_sdr_values(sdr, args, hostname_short: str,
     }
 
 
-def _default_instance_id(host: str, sdr_type: str, fields: dict) -> str:
+def _default_instance_id(host: str, sdr_type: str, fields: dict,
+                         sole: bool = True) -> str:
+    """Default radiod instance id — and therefore the mDNS status name
+    `<id>-status.local`.
+
+    In the sigmond context radiod is always RX888-driven and there is exactly
+    one radiod per host (docs/install-redesign.md §4), so the id is simply the
+    short hostname: host `dasi2-13` → instance `dasi2-13` → status
+    `dasi2-13-status.local`.  Only when MORE THAN ONE SDR is on the bus
+    (advanced / manual) do we append the SDR family (+ index) to disambiguate
+    them.
+    """
+    if sole:
+        return host
     short = (sdr_type or "sdr").lower()
     short = short.replace(" ", "").replace("+", "p").replace("-", "")
     n = int(fields.get("index", 0) or 0)

@@ -2700,10 +2700,9 @@ def cmd_bringup(args) -> int:
     from sigmond.bringup import build_plan, WISDOM_FILE
 
     # Profile resolution: positional arg wins, then the back-compat --profile
-    # alias, else the basic `daisy` station.  So `smd bringup` == daisy and
-    # `smd bringup dasi2` selects DASI2.
+    # alias, else the canonical `dasi2` station.  So `smd bringup` == dasi2.
     args.profile = (getattr(args, 'profile', None)
-                    or getattr(args, 'profile_flag', None) or 'daisy')
+                    or getattr(args, 'profile_flag', None) or 'dasi2')
 
     try:
         profiles = load_profiles()
@@ -2752,12 +2751,6 @@ def cmd_bringup(args) -> int:
     if 'gpsdo-monitor' in prof.local_radiod_infra and not _detect_gpsdo():
         _warn('no Leo Bodnar GPSDO found on the USB bus — skipping gpsdo-monitor')
         skip.add('gpsdo-monitor')
-
-    # Suggest the fuller profile when basic `daisy` is chosen but a magnetometer
-    # is actually attached (autodetect-driven nudge, not an auto-add).
-    if prof.name == 'daisy' and _detect_magnetometer():
-        _info('magnetometer detected — for the full station including it, '
-              'run `smd bringup dasi2`')
 
     smd_bin = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else 'smd'
 
@@ -6438,7 +6431,7 @@ _smd_complete() {
     local admin_cmds="diag validate verifier wisdom storage environment sources public-ip log rac timing radiod instance uninstall completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web wd-rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
-    local profiles="daisy dasi2 base client"
+    local profiles="dasi2 base client"
 
     if [[ "$prev" == "--components" ]]; then
         COMPREPLY=($(compgen -W "$components" -- "$cur"))
@@ -12882,12 +12875,11 @@ def main() -> int:
         p.add_argument('--dry-run', action='store_true')
 
     p_bringup = sub.add_parser(
-        'bringup', help='guided station bring-up (default: the basic `daisy` station; '
-                        '`smd bringup dasi2` adds the magnetometer)')
+        'bringup', help='guided station bring-up (default: the canonical `dasi2` station)')
     p_bringup.add_argument('profile', nargs='?', default=None, metavar='PROFILE',
                            help='catalog [profile.<name>] to bring up '
-                                '(default: daisy — local radiod + WSPR + FT8 + timing + web; '
-                                'e.g. dasi2 to also bring up the magnetometer)')
+                                '(default: dasi2 — local radiod + GRAPE + WSPR + PSK + '
+                                'magnetometer; e.g. base or client)')
     p_bringup.add_argument('--profile', dest='profile_flag', metavar='NAME',
                            help=argparse.SUPPRESS)   # back-compat alias for the positional
     p_bringup.add_argument('--remote-radiod', metavar='STATUS_DNS', dest='remote_radiod',

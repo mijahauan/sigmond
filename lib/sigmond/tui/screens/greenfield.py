@@ -58,12 +58,11 @@ def _load_profiles() -> dict:
 # Profile presentation order + one-line "what you get" blurbs.  The catalog
 # carries the authoritative client/infra lists; these are just operator-facing
 # summaries for the radio buttons.
-_PROFILE_ORDER = ["daisy", "dasi2", "client", "base"]
+_PROFILE_ORDER = ["dasi2", "base", "client"]
 _PROFILE_BLURB = {
-    "daisy": "Full local station — RX888 radiod + WSPR + PSK + timing + GPSDO",
-    "dasi2": "Full station + magnetometer (DASI2 — needs an RM3100 on the bus)",
-    "client": "Decode-only — bind a REMOTE radiod, no local SDR (WSPR + PSK + timing)",
+    "dasi2": "Canonical DASI2 station — RX888 radiod + WSPR + PSK + timing + GPSDO + magnetometer",
     "base":   "Minimal — local radiod + timing only, no spot reporters",
+    "client": "Decode-only — bind a REMOTE radiod, no local SDR (WSPR + PSK + timing)",
 }
 
 
@@ -147,7 +146,7 @@ class GreenfieldScreen(Vertical):
             for name in self._profile_names:
                 blurb = _PROFILE_BLURB.get(name, "")
                 label = f"{name}  —  {blurb}" if blurb else name
-                yield RadioButton(label, value=(name == "daisy"),
+                yield RadioButton(label, value=(name == self._profile_names[0]),
                                   id=f"gf-prof-{name}")
 
         yield Static("2 · Station identity", classes="gf-section")
@@ -187,7 +186,7 @@ class GreenfieldScreen(Vertical):
         btn = rs.pressed_button
         if btn is not None and btn.id and btn.id.startswith("gf-prof-"):
             return btn.id[len("gf-prof-"):]
-        return self._profile_names[0] if self._profile_names else "daisy"
+        return self._profile_names[0] if self._profile_names else "dasi2"
 
     def _profile_clients(self, name: str) -> list:
         prof = self._profiles.get(name)
