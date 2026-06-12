@@ -1366,6 +1366,10 @@ def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> b
     ssh_port = _rac_service_port(rac_id, 'ssh')
     web_port = _rac_service_port(rac_id, 'web')
     user_field = _frpc_user_field()
+    # SSH login user advertised to the gw2 dashboard via proxy metadata. Default
+    # to the human who ran (sudo) install; override with WD_RAC_SSH_USER.
+    ssh_user = (os.environ.get('WD_RAC_SSH_USER', '').strip()
+                or os.environ.get('SUDO_USER', '').strip() or 'root')
 
     local_ssh_port = 22
     try:
@@ -1401,6 +1405,7 @@ def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> b
         'localIP = "127.0.0.1"',
         f'localPort = {local_ssh_port}',
         f'remotePort = {ssh_port}',
+        f'metadatas.user = "{ssh_user}"',
         '',
         '[[proxies]]',
         f'name = "{rac_id}-web"',
