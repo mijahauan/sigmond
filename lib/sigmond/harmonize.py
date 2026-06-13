@@ -20,6 +20,8 @@ for the multi-radiod architecture in coordination.toml:
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -950,6 +952,81 @@ def dormant_reason(component: str, *, enabled: bool):
     return label if _hardware_ready(component) is False else None
 
 
+# ---------------------------------------------------------------------------
+# Delivered per-site secrets (read-only presence/validity check).
+#
+# Cross-ref: bin/smd `smd admin secrets` owns the authoritative installer and
+# validators for these same files; this rule is the validate-side check. Keep
+# the two format checks in sync. SSH-key secrets self-generate on-host and are
+# intentionally out of scope. See PROVISIONING-INPUTS.md §10.
+# ---------------------------------------------------------------------------
+_SECRET_EARTHDATA = Path('/etc/hf-timestd/earthdata-netrc')
+_SECRET_FRPC = Path('/etc/sigmond/frpc.toml')
+
+
+def _secret_earthdata_problem(path: Path) -> Optional[str]:
+    # Unreadable (0600, run as non-root) → can't validate; don't flag.
+    if not os.access(path, os.R_OK):
+        return None
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    if 'urs.earthdata.nasa.gov' not in text:
+        return "missing 'machine urs.earthdata.nasa.gov'"
+    if 'YOUR_' in text:
+        return 'contains placeholder values'
+    return None
+
+
+def _secret_frpc_problem(path: Path) -> Optional[str]:
+    if not os.access(path, os.R_OK):
+        return None
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    m = re.search(r'token\s*=\s*"([^"]*)"', text)
+    if not m or not m.group(1) or 'FROM_WD_ADMIN' in m.group(1) \
+            or m.group(1).startswith('<'):
+        return 'token is a placeholder/empty'
+    return None
+
+
+def rule_secrets(view: SystemView) -> RuleResult:
+    """Delivered per-site secrets present/valid where needed.
+
+    Earthdata is optional enrichment — its absence is a valid choice, so only a
+    present-but-broken file is flagged. RAC's frpc.toml is required when the rac
+    component is enabled; a placeholder token is flagged whenever the file
+    exists. Run as root for full content validation (0600 files).
+    """
+    problems = []
+    affected = []
+
+    if _SECRET_EARTHDATA.exists():
+        p = _secret_earthdata_problem(_SECRET_EARTHDATA)
+        if p:
+            problems.append(f'earthdata-netrc: {p}')
+            affected.append(str(_SECRET_EARTHDATA))
+
+    rac_on = view.is_enabled('rac')
+    if rac_on and not _SECRET_FRPC.exists():
+        problems.append('rac enabled but /etc/sigmond/frpc.toml is missing')
+        affected.append(str(_SECRET_FRPC))
+    elif _SECRET_FRPC.exists():
+        p = _secret_frpc_problem(_SECRET_FRPC)
+        if p:
+            problems.append(f'frpc.toml: {p}')
+            affected.append(str(_SECRET_FRPC))
+
+    if problems:
+        return RuleResult('secrets', 'warn', '; '.join(problems), affected)
+    return RuleResult('secrets', 'pass',
+                      'delivered secrets present/valid (SSH keys self-generate; '
+                      'optional secrets may be absent)', [])
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_radiod_status_configured,
@@ -971,6 +1048,7 @@ ALL_RUNTIME_RULES = [
     rule_timing_reference,
     rule_wspr_decode_enabled,
     rule_hardware_gated_core,
+    rule_secrets,
 ]
 
 

@@ -262,8 +262,11 @@ pipelines) is warranted — a thin installer plus a simple encrypted bundle.
   operator-side helper: tar the known secret files found in `<dir>` and
   age-encrypt them into the per-site bundle.
 - `smd admin secrets status` — presence / perms / validity, **never contents**.
-  (Intended to also be surfaced by `smd admin validate` via the site-profile
-  `[secrets].require` list once §8 lands.)
+  Also surfaced by **`smd admin validate`** (a `secrets` harmonization rule):
+  Earthdata is flagged only when present-but-broken (absence is a valid choice,
+  it's optional enrichment); RAC's `frpc.toml` is required when the `rac`
+  component is enabled, and a placeholder token is flagged whenever the file
+  exists. Run validate as root for full content validation (the files are 0600).
 
 ### Default channel: `age`-encrypted per-site bundle
 
@@ -299,9 +302,9 @@ complexity; defer until the basic installer is in use.
 1. Whether to build `site-profile.toml` + `smd config render` (§8), or keep
    per-client wizards as the only path.
 2. ✅ DONE — `smd admin secrets` (status/template/install/bundle) + age-bundle
-   flow implemented and verified (§10). Remaining sub-item: wire
-   `smd admin secrets status` into `smd admin validate` once site-profile
-   `[secrets].require` (§8) lands.
+   flow implemented and verified (§10), and surfaced in `smd admin validate`
+   via a `secrets` harmonization rule (gated on enabled components; no
+   site-profile dependency).
 3. A `smd personalize` first-boot oneshot vs. a manual runbook (§9).
 4. Whether PHaRLAP rides in the DASI2 image (single-licensee, controlled) or is
    staged per host even for image clones — see EXTERNAL_PREREQUISITES.md §3.
