@@ -350,6 +350,7 @@ class TestRuleCpuIsolationRuntime(unittest.TestCase):
                 "rule_timing_reference",
                 "rule_wspr_decode_enabled",
                 "rule_hardware_gated_core",
+                "rule_secrets",
             ],
         )
 

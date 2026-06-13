@@ -29,6 +29,17 @@ class Host:
 
 
 @dataclass
+class Station:
+    """Non-secret per-site identity beyond call/grid — published from
+    site-profile.toml by `smd config render`. Additive to [host]; the existing
+    identity path (config identity/refresh) never touches this block."""
+    psws_id: str = ""
+    instrument_id: str = ""
+    wsprnet_call: str = ""
+    pskreporter_call: str = ""
+
+
+@dataclass
 class Radiod:
     id: str
     host: str = "localhost"
@@ -128,6 +139,7 @@ class TimingAuthority:
 @dataclass
 class Coordination:
     host:    Host                  = field(default_factory=Host)
+    station: Station               = field(default_factory=Station)
     radiods: dict                  = field(default_factory=dict)   # id -> Radiod
     cpu:     Cpu                   = field(default_factory=Cpu)
     clients: list                  = field(default_factory=list)   # list[ClientInstance]
@@ -172,6 +184,14 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
         grid=host_raw.get('grid', ''),
         lat=float(host_raw.get('lat', 0.0) or 0.0),
         lon=float(host_raw.get('lon', 0.0) or 0.0),
+    )
+
+    station_raw = raw.get('station', {}) or {}
+    station = Station(
+        psws_id=str(station_raw.get('psws_id', '') or ''),
+        instrument_id=str(station_raw.get('instrument_id', '') or ''),
+        wsprnet_call=str(station_raw.get('wsprnet_call', '') or ''),
+        pskreporter_call=str(station_raw.get('pskreporter_call', '') or ''),
     )
 
     radiods: dict = {}
@@ -241,6 +261,7 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
 
     return Coordination(
         host=host,
+        station=station,
         radiods=radiods,
         cpu=cpu,
         clients=clients,
@@ -381,6 +402,23 @@ def render_env(coord: Coordination,
     if coord.host.lon:
         lines.append(f'STATION_LON={coord.host.lon}')
     if any((coord.host.call, coord.host.grid, coord.host.lat, coord.host.lon)):
+        lines.append('')
+
+    # Station identity beyond call/grid, published from site-profile.toml by
+    # `smd config render` (CLIENT-CONTRACT §14.2 extension). Clients adopt these
+    # as wizard defaults the same way they already read STATION_CALL/STATION_GRID.
+    st = coord.station
+    st_lines = []
+    if st.psws_id:
+        st_lines.append(f'STATION_PSWS_ID={st.psws_id}')
+    if st.instrument_id:
+        st_lines.append(f'STATION_INSTRUMENT_ID={st.instrument_id}')
+    if st.wsprnet_call:
+        st_lines.append(f'STATION_WSPRNET_CALL={st.wsprnet_call}')
+    if st.pskreporter_call:
+        st_lines.append(f'STATION_PSKREPORTER_CALL={st.pskreporter_call}')
+    if st_lines:
+        lines.extend(st_lines)
         lines.append('')
 
     for rid, r in sorted(coord.radiods.items()):

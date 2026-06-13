@@ -6,10 +6,10 @@ deployment models (golden image and sigmond clone + install). Use this to plan
 how each input is collected, applied, and (for images) reset per clone.
 
 **Status (2026-06-13):** the *inventory* (§1–§6) reflects what the code/templates
-require today. The *site-profile schema* (§8) and *first-boot checklist* (§9) are
-**proposals** for discussion — they are not yet implemented. What exists today is
-`/etc/sigmond/coordination.env` (callsign/grid + per-radiod facts) and the
-per-client `setup-station.sh` / `smd config` wizards.
+require today. The **site profile (§8) is IMPLEMENTED** (`smd config render`);
+the *first-boot checklist* (§9) is still a proposal. Today's distribution channel
+is `/etc/sigmond/coordination.toml` → `coordination.env` (consumed by every
+client), now also fed from `site-profile.toml`.
 
 ---
 
@@ -122,15 +122,36 @@ can also surface its grid.
 
 ---
 
-## 8. PROPOSED: a single per-site profile
+## 8. Single per-site profile (IMPLEMENTED)
 
-Today, callsign/grid flow through `coordination.env`, but PSWS ids, reporter
-ids, hardware selections, and secrets are entered per client. A single
-non-secret **site profile** that every client reads (with sigmond rendering each
-client's config from it) would collapse both models to one fill-in step.
+One operator-edited, non-secret file is the source of truth for per-site
+identity; `smd config render` translates it into `coordination.toml` /
+`coordination.env`, which every client already consumes.
 
-Proposed location: `/etc/sigmond/site-profile.toml` (sigmond-owned, world-
-readable — **non-secret only**; secrets stay in their §4 paths).
+```
+sudo smd config render --init      # scaffold /etc/sigmond/site-profile.toml
+sudo $EDITOR /etc/sigmond/site-profile.toml
+smd config render --dry-run        # preview what would be published
+sudo smd config render             # write coordination.toml [host]+[station] + .env
+```
+
+**What render does:** `[station]` → coordination `[host]` (call/grid/lat/lon,
+via the canonical identity writer) and an additive `[station]` block (PSWS ids,
+reporter calls); then re-renders `coordination.env`, which now also emits
+`STATION_PSWS_ID`, `STATION_INSTRUMENT_ID`, `STATION_WSPRNET_CALL`,
+`STATION_PSKREPORTER_CALL` alongside the existing `STATION_CALL`/`GRID`/`LAT`/`LON`.
+It never touches secrets (§10) and leaves `smd config identity`/`refresh`
+backward-compatible (they only patch `[host]`). Hardware hints in the profile are
+captured for reference; radiod config remains authoritative for the live status
+address.
+
+> **Client adoption (incremental):** clients already read `STATION_CALL`/`GRID`
+> from `coordination.env`. Adopting the new `STATION_PSWS_ID` /
+> `STATION_*_CALL` keys as wizard defaults is a small per-client follow-up
+> (same pattern), so a profile edit fully drives those fields too.
+
+Location: `/etc/sigmond/site-profile.toml` (sigmond-owned, world-readable —
+**non-secret only**; secrets stay in their §4 paths). Schema:
 
 ```toml
 # /etc/sigmond/site-profile.toml — non-secret per-site identity.
@@ -299,8 +320,9 @@ complexity; defer until the basic installer is in use.
 
 ## 11. Open items to decide
 
-1. Whether to build `site-profile.toml` + `smd config render` (§8), or keep
-   per-client wizards as the only path.
+1. ✅ DONE — `site-profile.toml` + `smd config render` implemented (§8).
+   Remaining sub-item: have each client wizard read the new `STATION_PSWS_ID` /
+   `STATION_*_CALL` env keys as defaults (small per-client change).
 2. ✅ DONE — `smd admin secrets` (status/template/install/bundle) + age-bundle
    flow implemented and verified (§10), and surfaced in `smd admin validate`
    via a `secrets` harmonization rule (gated on enabled components; no

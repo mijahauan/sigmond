@@ -109,7 +109,7 @@ try:
     from sigmond.commands.validate    import cmd_validate
     from sigmond.commands.timing      import cmd_timing
     from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
-    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh
+    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render
     from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
     from sigmond.commands.environment import (
         cmd_environment_list,
@@ -14023,6 +14023,14 @@ def main() -> int:
     p.add_argument('--dry-run', action='store_true',
                    help='print the rendered env file to stdout, do not write')
 
+    p = config_sub.add_parser('render',
+                              help='render coordination.toml/.env from the single '
+                                   'per-site /etc/sigmond/site-profile.toml')
+    p.add_argument('--init', action='store_true',
+                   help='scaffold a placeholder site-profile.toml (does not overwrite)')
+    p.add_argument('--dry-run', action='store_true',
+                   help='print what would be published, do not write')
+
     p = config_sub.add_parser(
         'catalog-prune',
         help='trim /etc/sigmond/catalog.toml down to only the entries '
@@ -14405,6 +14413,12 @@ def main() -> int:
             if not getattr(args, 'dry_run', False) and _need_root('config refresh'):
                 return 1
             return cmd_config_refresh(args)
+        if sub_cmd == 'render':
+            # --dry-run / --init(scaffold) read-only-ish; writing path needs root.
+            writing = not getattr(args, 'dry_run', False)
+            if writing and _need_root('config render'):
+                return 1
+            return cmd_config_render(args)
         if sub_cmd == 'catalog-prune':
             return cmd_config_catalog_prune(args)
         if sub_cmd == 'migrate':
