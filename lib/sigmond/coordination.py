@@ -409,10 +409,13 @@ def render_env(coord: Coordination,
     # as wizard defaults the same way they already read STATION_CALL/STATION_GRID.
     st = coord.station
     st_lines = []
+    # Names match what clients already read (mag-recorder reads
+    # STATION_PSWS_STATION_ID); reporter-call keys are an override hook for
+    # clients whose reporter call differs from STATION_CALL.
     if st.psws_id:
-        st_lines.append(f'STATION_PSWS_ID={st.psws_id}')
+        st_lines.append(f'STATION_PSWS_STATION_ID={st.psws_id}')
     if st.instrument_id:
-        st_lines.append(f'STATION_INSTRUMENT_ID={st.instrument_id}')
+        st_lines.append(f'STATION_PSWS_INSTRUMENT_ID={st.instrument_id}')
     if st.wsprnet_call:
         st_lines.append(f'STATION_WSPRNET_CALL={st.wsprnet_call}')
     if st.pskreporter_call:

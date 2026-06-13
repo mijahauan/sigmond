@@ -138,17 +138,23 @@ sudo smd config render             # write coordination.toml [host]+[station] + 
 **What render does:** `[station]` → coordination `[host]` (call/grid/lat/lon,
 via the canonical identity writer) and an additive `[station]` block (PSWS ids,
 reporter calls); then re-renders `coordination.env`, which now also emits
-`STATION_PSWS_ID`, `STATION_INSTRUMENT_ID`, `STATION_WSPRNET_CALL`,
+`STATION_PSWS_STATION_ID`, `STATION_PSWS_INSTRUMENT_ID`, `STATION_WSPRNET_CALL`,
 `STATION_PSKREPORTER_CALL` alongside the existing `STATION_CALL`/`GRID`/`LAT`/`LON`.
 It never touches secrets (§10) and leaves `smd config identity`/`refresh`
 backward-compatible (they only patch `[host]`). Hardware hints in the profile are
 captured for reference; radiod config remains authoritative for the live status
 address.
 
-> **Client adoption (incremental):** clients already read `STATION_CALL`/`GRID`
-> from `coordination.env`. Adopting the new `STATION_PSWS_ID` /
-> `STATION_*_CALL` keys as wizard defaults is a small per-client follow-up
-> (same pattern), so a profile edit fully drives those fields too.
+> **Client adoption:** clients consume these from `coordination.env` as wizard
+> defaults the same way they already read `STATION_CALL`/`GRID`:
+> - **hf-timestd** `setup-station.sh` auto-fills the PSWS Station/Instrument ID
+>   prompts from `STATION_PSWS_STATION_ID` / `STATION_PSWS_INSTRUMENT_ID` (and
+>   defaults the PSWS toggle on when an id is published).
+> - **mag-recorder** already reads `STATION_PSWS_STATION_ID` — the key-name
+>   alignment makes it adopt automatically.
+> - `STATION_WSPRNET_CALL` / `STATION_PSKREPORTER_CALL` are an override hook for
+>   a reporter call that differs from `STATION_CALL`; wspr/psk report under the
+>   station callsign today, so nothing consumes them yet.
 
 Location: `/etc/sigmond/site-profile.toml` (sigmond-owned, world-readable —
 **non-secret only**; secrets stay in their §4 paths). Schema:
@@ -320,9 +326,9 @@ complexity; defer until the basic installer is in use.
 
 ## 11. Open items to decide
 
-1. ✅ DONE — `site-profile.toml` + `smd config render` implemented (§8).
-   Remaining sub-item: have each client wizard read the new `STATION_PSWS_ID` /
-   `STATION_*_CALL` env keys as defaults (small per-client change).
+1. ✅ DONE — `site-profile.toml` + `smd config render` (§8); clients adopt the
+   published keys (hf-timestd PSWS prompts; mag-recorder auto via name
+   alignment). Reporter-call override keys remain available for future use.
 2. ✅ DONE — `smd admin secrets` (status/template/install/bundle) + age-bundle
    flow implemented and verified (§10), and surfaced in `smd admin validate`
    via a `secrets` harmonization rule (gated on enabled components; no
