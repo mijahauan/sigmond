@@ -395,6 +395,10 @@ def render_env(coord: Coordination,
     ]
     if coord.host.call:
         lines.append(f'STATION_CALL={coord.host.call}')
+        # Compat alias: mag-recorder (wizard + config mapping) reads
+        # STATION_CALLSIGN; emit both so every client auto-seeds the callsign
+        # regardless of which name it expects. STATION_CALL is canonical.
+        lines.append(f'STATION_CALLSIGN={coord.host.call}')
     if coord.host.grid:
         lines.append(f'STATION_GRID={coord.host.grid}')
     if coord.host.lat:
