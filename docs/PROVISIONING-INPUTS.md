@@ -237,7 +237,9 @@ without `--yes` to preview the plan.
       remove `/etc/sigmond/.personalized`.
 - [ ] Reset `site-profile.toml` to placeholders (or remove it).
 - [ ] Clear logs / data roots / FFT wisdom that are host-specific.
-- [ ] Leave PHaRLAP + built pyLAP in place (shareable, controlled image).
+- [ ] **Keep PHaRLAP baked in** — `/opt/pharlap_4.7.4` (with its DST licence
+      files + `.provenance`) and the built pyLAP in the venv stay in the image
+      (decided 2026-06-14). Verify: `hf-timestd data sources` → `Raytrace: available`.
 
 **On first boot of each clone** — `smd admin personalize --reset-identity --yes`
 does the automatable steps; the operator still:
@@ -344,8 +346,12 @@ complexity; defer until the basic installer is in use.
    via a `secrets` harmonization rule (gated on enabled components; no
    site-profile dependency).
 3. ✅ DONE — `smd admin personalize` first-boot oneshot implemented (§9).
-4. Whether PHaRLAP rides in the DASI2 image (single-licensee, controlled) or is
-   staged per host even for image clones — see EXTERNAL_PREREQUISITES.md §3.
+4. ✅ DECIDED 2026-06-14 — **PHaRLAP is baked into the controlled DASI2 image**
+   (single-licensee internal deployment). The image carries `/opt/pharlap_4.7.4`
+   (with its DST licence files + `.provenance`) and the built pyLAP in the venv;
+   the pre-capture wipe (§9) keeps them. The image is licence-controlled — never
+   published or shared outside the grant. Model B (clone + install) operators
+   still stage PHaRLAP themselves. See EXTERNAL_PREREQUISITES.md §3.
 
 See also: `hf-timestd/docs/EXTERNAL_PREREQUISITES.md` (the per-component detail
 for PHaRLAP, Earthdata, PSWS), and `greenfield-runbook.md` (the clone-model
