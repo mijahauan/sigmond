@@ -5740,6 +5740,62 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
             'policy': policy,
             'verdict': verdict,
         })
+
+    # --- sigmond itself (the smd host tool) ----------------------------------
+    # sigmond is the repo this script lives in, NOT a catalog entry, so it would
+    # otherwise be invisible in this table even though it is the single most
+    # important repo to keep current (the `update` path already self-updates it
+    # as a special case).  Surface it as a self-row computed exactly like the
+    # catalog rows so the operator sees its git divergence/dirty state at a
+    # glance.  Prepended so the host tool leads the table.
+    if not components_filter or 'sigmond' in components_filter:
+        sigmond_dir = Path(__file__).resolve().parent.parent
+        if (sigmond_dir / '.git').exists():
+            if fetch:
+                subprocess.run(
+                    ['git', '-c', f'safe.directory={sigmond_dir}', '-C',
+                     str(sigmond_dir), 'fetch', '--quiet'],
+                    capture_output=True, text=True,
+                )
+            s_local, s_upstream, s_behind, s_ahead = _git_divergence(sigmond_dir)
+            s_up_date = ''
+            if s_upstream:
+                s_up_ref = subprocess.run(
+                    ['git', '-c', f'safe.directory={sigmond_dir}', '-C',
+                     str(sigmond_dir), 'rev-parse', '--abbrev-ref', '@{u}'],
+                    capture_output=True, text=True,
+                ).stdout.strip()
+                if s_up_ref:
+                    s_up_date = _git_commit_date(sigmond_dir, s_up_ref)
+            s_dirty, s_reason = _repo_is_dirty(sigmond_dir)
+            if s_dirty:
+                s_verdict = f'dirty: {s_reason}'
+            elif s_behind > 0:
+                s_verdict = (f'{s_behind} commit'
+                             f'{"s" if s_behind != 1 else ""} behind upstream')
+            elif s_ahead > 0:
+                s_verdict = (f'{s_ahead} unpushed commit'
+                             f'{"s" if s_ahead != 1 else ""}')
+            else:
+                s_verdict = 'up to date'
+            rows.insert(0, {
+                'name': 'sigmond',
+                'kind': 'self',
+                'lifecycle': 'self (smd)',
+                'lifecycle_color': '\033[36m',
+                'repo_dir': str(sigmond_dir),
+                'local': s_local,
+                'local_date': _git_commit_date(sigmond_dir, 'HEAD'),
+                'upstream': s_upstream,
+                'upstream_date': s_up_date,
+                'behind': s_behind,
+                'ahead': s_ahead,
+                'commit_index': _git_commit_index(sigmond_dir, 'HEAD'),
+                'dirty': s_dirty,
+                'dirty_reason': s_reason or '',
+                'policy': 'latest',
+                'verdict': s_verdict,
+            })
     return rows
 
 
