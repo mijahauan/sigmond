@@ -5705,8 +5705,14 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                 upstream_date = _git_commit_date(repo_dir, up_ref)
         dirty, reason = _repo_is_dirty(repo_dir)
 
-        # Verdict ladder — first match wins.
-        if dirty:
+        # Verdict ladder — first match wins.  Distinguish a working-tree-dirty
+        # repo (uncommitted edits) from one merely ahead of upstream (unpushed
+        # local commits): _repo_is_dirty flags BOTH as dirty (both are unsafe
+        # to ff-pull), but they are materially different to an operator — only
+        # uncommitted edits show as "dirty" here; unpushed-ahead falls through
+        # to the ahead branch below and shows as "unpushed".
+        wt_dirty = dirty and (reason or '').startswith('uncommitted')
+        if wt_dirty:
             verdict = f'dirty: {reason}'
         elif policy == 'ignore':
             verdict = 'ignored (developer mode)'
@@ -5768,7 +5774,7 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                 if s_up_ref:
                     s_up_date = _git_commit_date(sigmond_dir, s_up_ref)
             s_dirty, s_reason = _repo_is_dirty(sigmond_dir)
-            if s_dirty:
+            if s_dirty and (s_reason or '').startswith('uncommitted'):
                 s_verdict = f'dirty: {s_reason}'
             elif s_behind > 0:
                 s_verdict = (f'{s_behind} commit'
@@ -5828,7 +5834,7 @@ def _print_status_table(rows: list[dict]) -> None:
         if 'behind upstream' in v:
             return 'behind'
         if 'unpushed commit' in v:
-            return 'ahead'
+            return 'unpushed'
         if v == 'ignored (developer mode)':
             return 'ignored'
         return v
@@ -5884,6 +5890,22 @@ def _print_status_table(rows: list[dict]) -> None:
             f'{up_cell}'
             f'{policy:<{W_POLICY}.{W_POLICY}}'
         )
+
+    # Colour legend.  The two coloured columns encode DIFFERENT dimensions,
+    # which is easy to misread (e.g. ka9q-web and hf-timestd are both yellow in
+    # NAME but one is up-to-date and the other dirty): NAME colour = run-state,
+    # VERDICT colour = git-state.  They are independent.
+    _G, _Y, _C, _R, _K, _B, _X = ('\033[32m', '\033[33m', '\033[36m',
+                                   '\033[31m', '\033[90m', '\033[1m', '\033[0m')
+    print()
+    print(f'  {_B}colours are per-column{_X} — NAME = run-state, '
+          f'VERDICT = git-state (independent):')
+    print(f'    {_B}NAME{_X}     {_G}running / present{_X}   '
+          f'{_Y}configured, not running{_X}   {_C}sigmond (this tool){_X}   '
+          f'not installed')
+    print(f'    {_B}VERDICT{_X}  {_G}up to date{_X}   '
+          f'{_Y}behind / unpushed{_X}   '
+          f'{_R}dirty (uncommitted) / drift{_X}   {_K}ignored{_X}')
 
 
 def _print_action_hint(rows: list[dict]) -> None:
