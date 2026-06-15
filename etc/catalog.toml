@@ -135,7 +135,7 @@ install_script  = "/opt/git/sigmond/hf-gps-tec/scripts/install.sh"
 [client.ka9q-web]
 kind            = "server"
 description     = "Web interface for ka9q-radio (radiod status UI)"
-repo            = "https://github.com/ka9q/ka9q-web"
+repo            = "https://github.com/wa2n-code/ka9q-web"
 uses            = []
 requires        = ["ka9q-radio"]
 contract        = ""                                  # C project — not contract-conformant
