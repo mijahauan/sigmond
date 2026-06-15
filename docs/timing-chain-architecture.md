@@ -75,13 +75,13 @@ hf-timestd fusion ──► SHM[2]=FUSE, SHM[3]=HPPS ───────┘   
   lifecycle. Remove the chrony stop/restart + `ipcrm` from `timestd-fusion`;
   remove the `restart chrony` from `check-chrony-reach.sh`; watchdogs may restart
   fusion but may not touch chrony or gpsd's SHM.
-- **Reconciler (`smd timing`):** a timer + on-demand verb (the natural home given
+- **Reconciler (`smd admin timing`):** a timer + on-demand verb (the natural home given
   `smd apply` is already sigmond's idempotent reconciler) that walks the chain
   top-down and fixes exactly one link — GPSDO unlocked → alert; gpsd not writing
   SHM → restart gpsd; chrony missing a refclock / not selecting GPS → rewrite
   config + `chronyc reload`, chrony dead → restart chrony once; FUSE/HPPS absent
   → restart fusion only.
-- **`smd validate`:** reports the whole chain's health (observability), separate
+- **`smd admin validate`:** reports the whole chain's health (observability), separate
   from remediation.
 
 Result: any single failure → the reconciler restores the desired state of the
@@ -119,7 +119,7 @@ cascades into its neighbours.
     and no longer installs the backwards `chronyd-timestd-shm.conf` ordering
     drop-in. A fresh hf-timestd install no longer reintroduces the cascade.
 - **Step 3 — the reconciler (DONE 2026-06-06, sigmond `2ae05d2`):**
-  `smd timing [status|reconcile] [--dry-run]` — `lib/sigmond/commands/timing.py`
+  `smd admin timing [status|reconcile] [--dry-run]` — `lib/sigmond/commands/timing.py`
   probes the chain (shm/gpsd/gps-feed/chrony/fuse/metrology) and `reconcile()`
   applies OWN-ONLY remediation (gps-feed broken→restart gpsd; chrony dead→restart
   chrony, the ONLY allowed chrony-restarter; FUSE down via metrology→start the
@@ -128,13 +128,13 @@ cascades into its neighbours.
   hf-timestd watchdogs (which stay disabled). Verified on sigma: status 6/6
   healthy, reconcile a clean no-op.
 - **Step 4 — observability (DONE 2026-06-06, sigmond `HEAD`):** `rule_timing_reference`
-  in `harmonize.py` (ALL_RUNTIME_RULES) folds the chain into `smd validate` —
-  read-only, pointing failures at `smd timing reconcile`; skips without a local
-  gpsd. `smd validate` now shows `timing_reference: selected PPS (stratum 1)`.
+  in `harmonize.py` (ALL_RUNTIME_RULES) folds the chain into `smd admin validate` —
+  read-only, pointing failures at `smd admin timing reconcile`; skips without a local
+  gpsd. `smd admin validate` now shows `timing_reference: selected PPS (stratum 1)`.
 
 **Roadmap COMPLETE.** The anti-pattern is designed out: stable SHM contract +
 own-only recovery + a single reconciler + deterministic ordering, observable via
-`smd validate` and remediated via `smd timing reconcile`.
+`smd admin validate` and remediated via `smd admin timing reconcile`.
 
 This spans sigmond + hf-timestd but uses the same reconcile philosophy sigmond
 already applies (`apply` / `validate`), extended to own the timing chain.

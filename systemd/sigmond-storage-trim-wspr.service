@@ -17,7 +17,7 @@ Group=root
 # retention is plenty for diagnostics + replay; the upcoming
 # hs-uploader-driven WsprdaemonTar / WsprNet path will drain
 # these rows on ack and trim becomes a no-op in steady state.
-ExecStart=/usr/local/bin/smd storage trim --target-db wspr --max-age 24h --yes
+ExecStart=/usr/local/bin/smd admin storage trim --target-db wspr --max-age 24h --yes
 
 StandardOutput=journal
 StandardError=journal

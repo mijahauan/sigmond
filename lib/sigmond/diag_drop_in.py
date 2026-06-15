@@ -1,4 +1,4 @@
-"""`smd diag drop-in <client>` — walk a single client's drop-in surface
+"""`smd admin diag drop-in <client>` — walk a single client's drop-in surface
 and report green/red.
 
 The point of "drop-in" is that a contract-conformant client repo, placed

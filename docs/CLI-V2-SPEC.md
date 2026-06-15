@@ -387,7 +387,7 @@ Decisions the migration commit can make without re-opening §3:
   target selector), the `verifier` screen (report + rehabilitate
   combined because they share an operator workflow), and Apply
   buttons on the `cpu_affinity` and `cpu_freq` screens (each runs
-  the matching `sudo smd diag cpu-* --apply` via confirm modal,
+  the matching `smd admin diag cpu-* --apply` via confirm modal,
   auto-refreshes on success). v2 cleans up the CLI; the remaining
   TUI gap-fill is a separate track.
 - A `pkg` synonym for `component`. Considered, rejected — `component`
@@ -397,3 +397,67 @@ Decisions the migration commit can make without re-opening §3:
 - Any change to client repos' own CLIs (psk-recorder,
   wspr-recorder, hfdl-recorder, etc.). This spec covers `bin/smd`
   only.
+
+---
+
+## 9. Amendment — `admin` umbrella (supersedes the top-level placement in §3)
+
+The v2 surface above kept diagnostic / maintenance / occasional verbs
+at the top level (grouped by persona but flat). Operator feedback was
+that the top level was still too crowded: the daily surface is a
+handful of verbs, and everything else is reached rarely. This
+amendment introduces a single **`smd admin`** umbrella and relocates
+the occasional verbs underneath it, shrinking the top level to the
+small daily set. It **supersedes** the top-level placement of the
+moved verbs in §3 (Diagnostics, Wiring, Installation-time tuning,
+Data quality, and the `log`/`public-ip` Observation members); their
+*shapes* are unchanged — only the `admin ` prefix is added.
+
+### Core (stays top-level)
+
+```
+status  watch  tui
+start  stop  restart  reload   apply   enable  disable
+install   list   component   config   bringup
+```
+
+### Moved under `admin` (so `smd diag` → `smd admin diag`, etc.)
+
+```
+diag  validate  verifier  wisdom  storage  environment  sources
+public-ip  log  rac  timing  radiod  instance  uninstall  completion
+```
+
+Each keeps its own sub-subparsers (`admin diag cpu-affinity`,
+`admin storage trim`, `admin log set-level`, `admin completion bash`,
+…). Bare `smd admin` prints the umbrella's help.
+
+### Removed (hard, no shim) — the §5 removals, now executed
+
+```
+cpu  add  remove  software  timestd-tune-storage
+```
+
+### Migration stance — hard remove, no deprecation shims
+
+Unlike §5's one-release-warning plan, the moved verbs were removed
+from the top level **outright** (no deprecation alias). Consequences,
+all handled in the migration commit:
+
+- **Internal callers updated.** Every `[_smd_binary(), '<verb>', …]`
+  call in the TUI screens now passes `'admin'` first; `tui_walk.py`
+  assertions updated to match.
+- **Full reference sweep.** ~210 textual references to the old
+  top-level forms — handler help strings, runtime error/remediation
+  messages, generated-config guidance comments
+  (`instance.py`/`sources.py`/`storage_migrate.py`), docstrings, this
+  `docs/` set, `CLAUDE.md`, and tests — were rewritten to the
+  `smd admin …` path.
+- **Completion + auto-load.** `completion` itself moved, so the bash
+  completion script and the operator alias auto-load
+  (`etc/aliases.sh`) now use `smd admin completion bash`; the shipped
+  `smdrefresh` helper too.
+
+The trade the operator accepted: any *external* script or muscle
+memory using a bare moved verb breaks with an argparse "invalid
+choice" error rather than a one-release warning.

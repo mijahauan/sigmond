@@ -23,7 +23,7 @@ Same shape as ``sigmond.storage_migrate``:
 * Pluggable ``opener`` callable so tests can substitute a fake
   connection without touching the filesystem.
 
-The CLI verb (``smd storage trim``) is in ``bin/smd``; this module
+The CLI verb (``smd admin storage trim``) is in ``bin/smd``; this module
 stays library-only so the same logic is unit-testable + reusable.
 """
 
@@ -79,7 +79,7 @@ class RetentionTooShort(ValueError):
 #   psk.spots   — FT8/FT4 spots from psk-recorder.  60 min keeps a full
 #                 cycle of decoders' worth of data around for the wsprdaemon
 #                 tar transport's next pickup + a buffer for the
-#                 forthcoming smd verifier report to inspect lost spots.
+#                 forthcoming smd admin verifier report to inspect lost spots.
 #   wspr.spots  — WSPR spots from wspr-recorder.  Longer (24h) because
 #                 the verifier's cross-server diff currently needs that
 #                 window to catch wd20-style backlog catch-ups.
@@ -123,7 +123,7 @@ def policy_from_env(env: Optional[dict] = None,
     Values below the floor are clamped UP to the floor; the
     ``source`` field on the returned policy records both the env var
     and the clamp ("env:PSK_RETENTION_MIN (clamped to floor)") so
-    `smd storage trim --all` can surface the clamp to the operator.
+    `smd admin storage trim --all` can surface the clamp to the operator.
     """
     e = env if env is not None else os.environ
     floor = floor_seconds if floor_seconds is not None else min_retention_seconds(e)

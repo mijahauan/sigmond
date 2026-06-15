@@ -107,7 +107,7 @@ If working on completely different hardware (Intel, older AMD, server-class), re
 1. First check whether the basic setup in `wsprdaemon-proxmox-vm-setup.md` is intact: `lspci -nnk -s 05:00.3` should show `vfio-pci` as kernel driver in use
 2. Then check CPU isolation per `wsprdaemon-proxmox-cpu-clock-tuning.md` Part 8 (validation tests for each layer)
 3. Verify per-vCPU pinning fired on the host: `journalctl -t cpu-pin-101 --since '1 hour ago'` should show 10 `cpu-pin: VM 101 vCPU N -> host pCPU N` entries plus 10 `cpu-cap: pCPU N max=... MHz` entries on every VM start
-4. Inside the VM, run `sudo smd diag cpu-affinity` and `sudo smd validate` — `cpu_isolation_runtime` should report `radiod cores [...] uncontested`
+4. Inside the VM, run `smd admin diag cpu-affinity` and `smd admin validate` — `cpu_isolation_runtime` should report `radiod cores [...] uncontested`
 5. After any guest reboot, also check Part 11: chrony may need a manual `systemctl start chrony.service` until the hf-timestd ordering bug is fixed
 6. Don't suggest USB device passthrough as an alternative — it cannot meet the bandwidth requirement
 

@@ -208,7 +208,7 @@ class ClientSources:
         body_lines = [
             f"# /etc/sigmond/clients/{self.client}.sources.toml",
             f"# Source selection for {self.client}.  Managed by",
-            "# `smd sources add|remove|apply`.  Manual edits are",
+            "# `smd admin sources add|remove|apply`.  Manual edits are",
             "# preserved but must remain valid TOML.",
             "",
             "selected = [",

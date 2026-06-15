@@ -13,53 +13,61 @@ Source state: commit `01d6bb7` (2026-05-24).
 
 ## 1. CLI verb surface (`bin/smd`)
 
-Top-level subparsers — 33 in total, alphabetical. Sub-groups indented.
+Top-level surface after the `admin`-umbrella rework (CLI-V2-SPEC §9):
+a small daily core plus one `admin` umbrella holding the occasional /
+diagnostic / maintenance verbs. Sub-groups indented.
+
+### Core (top-level)
 
 | Verb | Subverbs | Handler | Mutating? |
 |---|---|---|---|
-| `add` | | `cmd_add` | yes |
 | `apply` | | `cmd_apply` | yes |
-| `codar-watch` | | `cmd_codar_watch` | no |
-| `completion` | `bash` | `cmd_completion` | no |
+| `bringup` | `--profile <name>` | `cmd_bringup` | yes |
+| `component` | `list / install / update / add / remove / enable / disable` | `cmd_component_*` | mixed |
 | `config` | `show / identity / refresh / migrate / backup / restore / init / edit` | `cmd_config_*` | mixed (identity/refresh/init/edit/restore mutate) |
-| `cpu` | (shortcut to `diag cpu-freq`) | `cmd_diag_cpu_freq` | no (read-only without `--apply`) |
-| `diag` | `cpu-affinity / cpu-freq / net` | `cmd_diag*` | no (`--apply` opt-in) |
 | `disable` | | `cmd_disable` | yes |
 | `enable` | | `cmd_enable` | yes |
-| `environment` | `list / probe / describe` | `cmd_environment_*` | no |
-| `hfdl-watch` | | `cmd_hfdl_watch` | no |
-| `install` | | `cmd_install` | yes |
-| `ka9q-watch` | | `cmd_ka9q_watch` | no |
-| `list` | (`--update` / `--apply` opt) | `cmd_list` | optional |
-| `log` | | `cmd_log` | optional (`--level` writes) |
-| `psk-watch` | | `cmd_psk_watch` | no |
-| `public-ip` | | `cmd_public_ip` | no |
+| `install` | (alias for `component install`) | `cmd_install` | yes |
+| `list` | (alias for `component list`) | `cmd_list` | optional |
 | `reload` | (`--via=auto\|systemd\|socket`) | `cmd_reload` | yes |
-| `remove` | | `cmd_remove` | yes |
 | `restart` | | `cmd_restart` | yes |
-| `software` | `install / apply` (aliases) | rewrites to top-level | yes |
-| `sources` | `list / add / remove / apply` | `cmd_sources_*` | apt mutating |
 | `start` | | `cmd_start` | yes |
 | `status` | | `cmd_status` | no |
 | `stop` | | `cmd_stop` | yes |
-| `storage` | `migrate-to-sqlite / trim` | `cmd_storage_*` | yes |
-| `timestd-tune-storage` | | `cmd_timestd_tune_storage` | yes |
 | `tui` | | `cmd_tui` | n/a |
+| `watch` | `wspr / psk / hfdl / codar / hf-gps-tec / mag / ka9q / radiod / uploads / verifier` | dispatches into the matching `cmd_*_watch` | no |
+
+### `admin` umbrella (`smd admin <subverb>`)
+
+| Subverb | Sub-subverbs | Handler | Mutating? |
+|---|---|---|---|
+| `diag` | `cpu-affinity / cpu-freq / net` | `cmd_diag*` | no (`--apply` opt-in) |
 | `validate` | | `cmd_validate` | no |
 | `verifier` | `report [--target wspr\|psk] / rehabilitate` | `cmd_verifier_*` | rehabilitate mutates |
-| `watch` | `wspr / psk / hfdl / codar / ka9q / uploads / verifier` | dispatches into the matching `cmd_*_watch` | no |
 | `wisdom` | `plan / status` | `cmd_wisdom_*` | plan mutates |
-| `wspr-watch` | | `cmd_wspr_watch` | no |
+| `storage` | `migrate-to-sqlite / trim / tune-timestd` | `cmd_storage_*` | yes |
+| `environment` | `list / probe / describe` | `cmd_environment_*` | no |
+| `sources` | `list / add / remove / apply` | `cmd_sources_*` | yes |
+| `public-ip` | | `cmd_public_ip` | no |
+| `log` | `set-level` | `cmd_log` | optional (`set-level` writes) |
+| `rac` | `status / start / stop / restart / install` | (rac dispatch) | yes |
+| `timing` | `status / reconcile` | `cmd_timing` | reconcile mutates |
+| `radiod` | `migrate` | (radiod dispatch) | yes |
+| `instance` | `list / show / add / remove / edit / enable / disable / migrate` | (instance dispatch) | mixed |
+| `uninstall` | | `cmd_uninstall` | yes |
+| `completion` | `bash` | `cmd_completion` | no |
 
 Notes / leftovers:
 
 - The `_MUTATING` set in `main()` includes `'update'` but there is
   no `update` subparser. Dead entry — safe to remove.
-- `software install` / `software apply` rewrite into the top-level
-  `install` / `apply` so the lock + root-check path stays single-keyed.
+- **Removed in the `admin` rework (hard, no shim):** `cpu`
+  (→ `admin diag cpu-freq`), `add`/`remove` (→ `component add/remove`),
+  `software` (→ `install`/`apply`), `timestd-tune-storage`
+  (→ `admin storage tune-timestd`). See CLI-V2-SPEC §9.
 - The legacy single-target watch verbs (`psk-watch`, `wspr-watch`,
-  `hfdl-watch`, `codar-watch`, `ka9q-watch`) coexist with the unified
-  `watch <target>` family. Both call the same `cmd_*_watch` handlers.
+  `hfdl-watch`, `codar-watch`, `mag-watch`, `ka9q-watch`) were removed
+  earlier; all watchers are reached via `watch <target>`.
 
 ---
 
@@ -74,7 +82,7 @@ warrant a separate row.
 |---|---|---|
 | `activity` | `action_show_activity` | Live tail of `smd watch <target>` for wspr / psk / hfdl / codar / ka9q / uploads / verifier; one subprocess per screen, Stop/Clear, Start re-targets |
 | `annotation_quality` | `action_show_annotation_quality` | Per-consumer science verdict: each running recorder + the global σ/tier attached + green/yellow/red threshold + substrate explanation |
-| `apply` | `action_show_apply` | Reconcile services with topology/coordination (`sudo smd apply`) |
+| `apply` | `action_show_apply` | Reconcile services with topology/coordination (`smd apply`) |
 | `authority` | `action_show_authority` | Substrate view: live `authority.json` (active tier, σ, witnesses) (also composed into `timing_authority`) |
 | `backup` | `action_show_backup` | Snapshot all config to `sigmond-config-*.tar.gz` |
 | `client_config` | `action_show_client_config` | Run a client's first-run wizard / edit its config |
@@ -87,7 +95,7 @@ warrant a separate row.
 | `fft_wisdom` | `action_show_fft_wisdom` | FFTW wisdom planning (one-time per host, hours on first run) |
 | `gpsdo` | `action_show_gpsdo` | Live GPSDO status from `/run/gpsdo/` |
 | `install` | `action_show_install` | Catalog install picker (single / all-missing) |
-| `instance` | `action_show_instance` | Per-reporter client instance lifecycle — list / add / remove + dry-run scan of legacy radiod-keyed deployments (full migration is CLI-only via `sudo smd instance migrate --yes`) |
+| `instance` | `action_show_instance` | Per-reporter client instance lifecycle — list / add / remove + dry-run scan of legacy radiod-keyed deployments (full migration is CLI-only via `smd admin instance migrate --yes`) |
 | `ka9q_watch` | `action_show_ka9q_watch` | Compare pinned ka9q-radio commit vs `origin/main` |
 | `kiwisdr` | `action_show_kiwisdr` | Live KiwiSDR status + GPS |
 | `lifecycle` | `action_show_lifecycle` | Start / stop / restart / reload managed units |
@@ -130,7 +138,7 @@ warrant a separate row.
 | FFTW wisdom (plan / status) | `wisdom plan / status` | `fft_wisdom` | one screen serves both verbs |
 | Per-client SDR source selection (radiod / KiwiSDR feeds) | `sources list/add/remove/apply` | `sources` | list + apply paths surfaced; add/remove still CLI-only |
 | ka9q-radio pin / compat watch | `ka9q-watch`, `watch ka9q` | `ka9q_watch` | — |
-| Activity watch (wspr/psk/hfdl/codar) | `wspr-watch`, `psk-watch`, `hfdl-watch`, `codar-watch`, `watch <t>` | `activity` | live-tail screen with target selector covers all four |
+| Activity watch (wspr/psk/hfdl/codar) | `watch <target>` | `activity` | live-tail screen with target selector covers all four |
 | Uploads activity watch | `watch uploads` | `activity` | reachable via the same screen's target selector |
 | Verifier watch | `watch verifier` | `activity` | reachable via the same screen's target selector |
 | Verifier report / rehabilitate | `verifier report / rehabilitate` | `verifier` | both surfaced on one screen (report top, rehabilitate bottom) |

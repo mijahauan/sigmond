@@ -363,8 +363,13 @@ class FallbackTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0], '/bin/true')
-        self.assertEqual(calls[0][1], str(cfg))
+        # The editor is invoked on the config path.  When the file is
+        # service-user-owned and we're not root, _fallback elevates via
+        # `sudo … -- <editor> <path>` (_maybe_elevate), so assert the editor
+        # and path appear in the argv rather than at fixed positions.
+        self.assertIn('/bin/true', calls[0])
+        self.assertIn(str(cfg), calls[0])
+        self.assertLess(calls[0].index('/bin/true'), calls[0].index(str(cfg)))
 
     def test_edit_fallback_errors_when_no_config_path(self):
         with tempfile.TemporaryDirectory() as d:

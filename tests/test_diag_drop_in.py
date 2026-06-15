@@ -1,4 +1,4 @@
-"""Tests for sigmond.diag_drop_in — `smd diag drop-in <client>` checks.
+"""Tests for sigmond.diag_drop_in — `smd admin diag drop-in <client>` checks.
 
 The check functions are pure (no global state), so each can be
 exercised independently with controlled inputs.  Integration tests

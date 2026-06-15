@@ -19,7 +19,7 @@ A client now declares its UI hooks in its own ``deploy.toml``:
     per_instance = true           # CLI accepts `--instance REPORTER_ID`
 
     [client_features.verifier]
-    verb         = "wspr"         # `smd verifier report --target <verb>`
+    verb         = "wspr"         # `smd admin verifier report --target <verb>`
     description  = "WSPRnet upload audit (lost / in-flight / delivered)"
     kind         = "spot_queue"   # "spot_queue" (--rx-call / --lost / --in-flight
                                   # / --delivered / --cadence flags apply) or
@@ -86,11 +86,11 @@ VERIFIER_KINDS = frozenset({"spot_queue", "local_db"})
 
 @dataclass(frozen=True)
 class VerifierFeature:
-    """One client's `smd verifier report` surface, as declared in its
+    """One client's `smd admin verifier report` surface, as declared in its
     deploy.toml."""
 
     client: str          # catalog name (e.g. "wspr-recorder")
-    verb: str            # `smd verifier report --target <verb>`
+    verb: str            # `smd admin verifier report --target <verb>`
     description: str
     kind: str            # one of VERIFIER_KINDS
     per_instance: bool   # CLI accepts --instance REPORTER_ID
@@ -150,7 +150,7 @@ def _parse_receiver_channels_feature(
     Required keys: description, per_instance, parser_file, parser_attr.
     Singleton clients additionally need config_path.  parser_file is
     validated for existence here so a typo surfaces in
-    `smd diag drop-in` instead of as a TUI-time KeyError.
+    `smd admin diag drop-in` instead of as a TUI-time KeyError.
     """
     block = deploy.get("client_features", {}).get("receiver_channels")
     if not isinstance(block, dict):

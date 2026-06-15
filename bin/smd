@@ -14,23 +14,18 @@ Configure (what should exist):
     smd disable     <name>...                                    set enabled=false + stop units
     smd remove      <name>...                                    remove from topology
     smd config      show | migrate | init <c> | edit <c>         per-client config
-    smd validate                                                 cross-client harmonization
+    smd admin validate                                                 cross-client harmonization
     (smd install / smd apply are kept as aliases for the software subverbs.)
 
 Observe (what is, read-only):
     smd list        [--update | --catalog] [--components C1,C2]  per-component status table
                     [--ref R] [--fetch] [--dry-run] [--json]
     smd status      [<component>]                                service health
-    smd log         [--files | --level LEVEL] [<client>]         tail journal or file logs
-    smd diag        [net | cpu-affinity | cpu-freq]              diagnostics
-    smd environment list | probe | describe                      discover network peers
-    smd watch       <wspr|psk|radiod|hfdl|codar|ka9q|uploads|verifier> [args...] unified service watcher
-    smd ka9q-watch                                               upstream-drift watcher (alias)
-    smd psk-watch   [N | -v]                                     PSK Reporter upload events (alias)
-    smd wspr-watch  [N | -v]                                     WSPRnet upload events (alias)
-    smd hfdl-watch  [N | -v]                                     HFDL decoded-frame activity (alias)
-    smd codar-watch [N | -v]                                     CODAR ionospheric soundings (alias)
-    smd sources     list | add | remove | apply                  per-client SDR source selection
+    smd admin log         [--files | --level LEVEL] [<client>]         tail journal or file logs
+    smd admin diag        [net | cpu-affinity | cpu-freq]              diagnostics
+    smd admin environment list | probe | describe                      discover network peers
+    smd watch       <wspr|psk|hfdl|codar|hf-gps-tec|mag|ka9q|radiod|uploads|verifier> [args...] unified service watcher
+    smd admin sources     list | add | remove | apply                  per-client SDR source selection
 
 Operate (run things now, may need sudo):
     smd start       [<component> [<instance>]]
@@ -100,7 +95,7 @@ import time
 from typing import Optional
 
 # Bootstrap step 2 — add sibling lib/ to sys.path so `import sigmond`
-# works when running from the repo, from /usr/local/sbin/smd, or from a
+# works when running from the repo, from /usr/local/bin/smd, or from a
 # symlink.
 _SCRIPT = Path(__file__).resolve()
 for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
@@ -114,7 +109,7 @@ try:
     from sigmond.commands.validate    import cmd_validate
     from sigmond.commands.timing      import cmd_timing
     from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
-    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh
+    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render
     from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
     from sigmond.commands.environment import (
         cmd_environment_list,
@@ -187,12 +182,18 @@ BANNER = r"""
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _run(cmd: list, *, cwd=None, capture=True, sudo=False, env=None) -> subprocess.CompletedProcess:
+def _run(cmd: list, *, cwd=None, capture=True, sudo=False, env=None,
+         interactive=False) -> subprocess.CompletedProcess:
     if sudo and os.geteuid() != 0:
         cmd = ['sudo'] + cmd
-    # When not capturing output, redirect stdin from /dev/null so interactive
-    # prompts (read -p) in sub-scripts return immediately rather than hanging.
-    stdin_arg = subprocess.DEVNULL if not capture else None
+    # When not capturing output we normally redirect stdin from /dev/null so a
+    # non-interactive sub-script's `read -p` returns immediately rather than
+    # hanging.  But a step that legitimately prompts the operator (e.g. a
+    # `config init` wizard) must inherit the real terminal — interactive=True.
+    if capture or interactive:
+        stdin_arg = None
+    else:
+        stdin_arg = subprocess.DEVNULL
     return subprocess.run(cmd, cwd=cwd,
                           capture_output=capture, text=True,
                           stdin=stdin_arg, env=env)
@@ -414,7 +415,14 @@ def _need_root(cmd_name: str) -> bool:
     if sudo:
         # Replace the current process — sudo prompts for password if
         # needed, then runs the same script with the same args as root.
-        os.execvp(sudo, [sudo, '--', sys.argv[0], *sys.argv[1:]])
+        # Route through `env` so the re-exec carries SIGMOND_ALLOW_SUDO=1
+        # (sudo's env_reset would otherwise strip it): this is smd's OWN
+        # self-elevation, so the top-of-main guard must let it through —
+        # the marker is what distinguishes it from a human typing `sudo smd`.
+        # The flag inherits to every child process, so a root smd's sub-smd
+        # calls (e.g. bringup's install steps) are covered too.
+        os.execvp(sudo, [sudo, '--', 'env', 'SIGMOND_ALLOW_SUDO=1',
+                         sys.argv[0], *sys.argv[1:]])
         # execvp doesn't return on success; if it does, fall through.
     print(f'smd {cmd_name}: must run as root (sudo not found on PATH)',
           file=sys.stderr)
@@ -508,6 +516,35 @@ def _ensure_venv(venv_dir: Path) -> bool:
     return True
 
 
+def _ka9q_radio_pin() -> Optional[str]:
+    """The ka9q-radio commit ka9q-python was validated against — the same pin
+    ``rule_ka9q_python_compat`` checks (``ka9q.compat.KA9Q_RADIO_COMMIT``, with
+    the ``ka9q-python/ka9q_radio_compat`` file as fallback).
+
+    Installs check out THIS commit rather than bare ``main`` so radiod is built
+    against the wire-protocol headers the Python clients decode against;
+    advancing ka9q-radio is a deliberate step (bump the pin via
+    ``scripts/sync_types.py --apply``, then rebuild).  Returns None when no pin
+    is discoverable (caller falls back to current HEAD)."""
+    try:
+        from ka9q.compat import KA9Q_RADIO_COMMIT
+        if KA9Q_RADIO_COMMIT and KA9Q_RADIO_COMMIT != 'unknown':
+            return KA9Q_RADIO_COMMIT
+    except Exception:                                  # noqa: BLE001
+        pass
+    for base in (Path('/opt/git/sigmond/ka9q-python'),
+                 Path('/opt/git/ka9q-python'), Path.home() / 'ka9q-python'):
+        f = base / 'ka9q_radio_compat'
+        try:
+            if f.is_file():
+                v = f.read_text().strip()
+                if v:
+                    return v
+        except Exception:                              # noqa: BLE001
+            pass
+    return None
+
+
 def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
     binary = Path('/usr/local/sbin/radiod')
     built = src_dir / 'src' / 'radiod'
@@ -545,11 +582,42 @@ def _build_ka9q_radio(src_dir: Path, force: bool = False) -> bool:
     _ok('ka9q-radio: built and installed')
     # Record the source commit so the freshness check above can tell when a
     # later clone_repo pull has advanced the tree past this build.
+    _pin = _ka9q_radio_pin() or ''
     _write_build_manifest('ka9q-radio', [
-        {'name': 'ka9q-radio', 'ref': 'main', 'pin': '',
+        {'name': 'ka9q-radio', 'ref': 'ka9q-python-pin' if _pin else 'main',
+         'pin': _pin,
          'url': _git_remote_url(src_dir) or 'https://github.com/ka9q/ka9q-radio',
          'sha': _git_head(src_dir)},
     ], builder='_build_ka9q_radio')
+    return True
+
+
+# ka9q-web and its onion dependency are native C builds (cmake/make).  A fresh
+# host may lack the toolchain, so ensure it up front rather than dying with a
+# cryptic FileNotFoundError on `cmake` mid-build.
+_NATIVE_BUILD_DEPS = ['cmake', 'build-essential', 'libssl-dev', 'pkg-config']
+
+
+def _ensure_native_build_deps(label: str = 'build') -> bool:
+    """Ensure the apt toolchain for native C builds (cmake, a C compiler,
+    pkg-config, SSL headers) is present; install it via apt-get if not.
+    Returns False only when it's missing AND can't be installed."""
+    if (shutil.which('cmake') and shutil.which('pkg-config')
+            and (shutil.which('cc') or shutil.which('gcc'))):
+        return True
+    apt = shutil.which('apt-get')
+    if not apt:
+        _err(f'{label}: missing build tools and no apt-get to install them — '
+             f'install manually: {" ".join(_NATIVE_BUILD_DEPS)}')
+        return False
+    _info(f'{label}: installing native build deps '
+          f'({", ".join(_NATIVE_BUILD_DEPS)}) ...')
+    _run([apt, 'update', '-qq'], sudo=True)
+    r = _run([apt, 'install', '-y', '-q', *_NATIVE_BUILD_DEPS], sudo=True)
+    if r.returncode != 0:
+        _err(f'{label}: build-dep install failed: {(r.stderr or "")[-300:]}')
+        return False
+    _ok(f'{label}: native build deps installed')
     return True
 
 
@@ -809,6 +877,8 @@ def _diag_build_manifests() -> int:
 
 
 def _build_ka9q_web_with_onion(src_dir: Path) -> bool:
+    if not _ensure_native_build_deps(label='ka9q-web'):
+        return False
     onion_url    = _ONION_REPO
     onion_commit = _ONION_COMMIT
     onion_src    = _ONION_SRC
@@ -955,6 +1025,37 @@ def _read_rac_topology(topology: dict) -> tuple[str, int]:
     except (TypeError, ValueError):
         rac_number = -1
     return rac_id, rac_number
+
+
+def _read_rac_frpc() -> tuple[str, int]:
+    """(rac_id, rac_number) already committed in the live frpc.toml, or ('', -1).
+
+    frpc.toml is the runtime source of truth for what the tunnel is actually
+    configured with (the non-WEB proxy's name is the rac_id; its remotePort
+    minus the port base is the rac_number).  Used so a re-run of
+    ``smd admin rac install`` treats existing values as already entered and does
+    not re-prompt for them.
+    """
+    if not _FRPC_CONFIG.exists():
+        return '', -1
+    try:
+        import tomllib
+        with open(_FRPC_CONFIG, 'rb') as f:
+            cfg = tomllib.load(f)
+    except Exception:
+        return '', -1
+    proxies = cfg.get('proxies', [])
+    for proxy in proxies:                       # new scheme: <rac_id>-ssh
+        name = proxy.get('name', '')
+        if name.endswith('-ssh'):
+            return name[:-4], -1
+    for proxy in proxies:                       # legacy: <rac_id> (+ <rac_id>-WEB)
+        name = proxy.get('name', '')
+        if name and not name.endswith('-WEB'):
+            rp = proxy.get('remotePort', -1)
+            num = rp - _RAC_PORT_BASE if isinstance(rp, int) and rp > 0 else -1
+            return name, num
+    return '', -1
 
 
 def _detect_rac_defaults() -> tuple[str, int]:
@@ -1236,19 +1337,39 @@ def _fetch_frps_ca_cert(dry_run: bool = False) -> bool:
     return True
 
 
+# Banded, name-derived RAC ports (mirrors rrobinett/smd-rac). A receiver
+# advertises two services; each lands in a port BAND that encodes its access
+# tier — 'ssh' in a mesh-only band (outside the wd-rac 35800-59999 window) and
+# 'web' (ka9q-web) in the shareable band inside it. The remote port is derived
+# deterministically from the rac name: band_base + sha256(rac_id)%width.
+_RAC_PORT_BANDS = {
+    'ssh': (10000, 10000),   # mesh-only (10000-19999, < 35800)
+    'web': (50000,  9999),   # shareable (50000-59998, inside 35800-59999)
+}
+
+
+def _rac_service_port(rac_id: str, service: str) -> int:
+    import hashlib
+    base, width = _RAC_PORT_BANDS[service]
+    return base + int(hashlib.sha256(rac_id.encode()).hexdigest()[:8], 16) % width
+
+
 def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> bool:
     """Write /etc/sigmond/frpc.toml with TLS + token auth for the secure frps port."""
     if not rac_id:
         _err('wd-rac: rac_id is empty')
         return False
-    if rac_number < 0:
-        _err('wd-rac: rac_number not set')
-        return False
 
+    # rac_number is retired for port assignment (ports derive from the name);
+    # it is honored only to route channels 200-299 via the HamSCI frps.
     frps_host = _FRPS_URL_HAMSCI if 200 <= rac_number <= 299 else _FRPS_URL
-    ssh_port  = _RAC_PORT_BASE + rac_number
-    web_port  = ssh_port + _RAC_WEB_OFFSET
+    ssh_port = _rac_service_port(rac_id, 'ssh')
+    web_port = _rac_service_port(rac_id, 'web')
     user_field = _frpc_user_field()
+    # SSH login user advertised to the gw2 dashboard via proxy metadata. Default
+    # to the human who ran (sudo) install; override with WD_RAC_SSH_USER.
+    ssh_user = (os.environ.get('WD_RAC_SSH_USER', '').strip()
+                or os.environ.get('SUDO_USER', '').strip() or 'root')
 
     local_ssh_port = 22
     try:
@@ -1279,14 +1400,15 @@ def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> b
         'port = 7500',
         '',
         '[[proxies]]',
-        f'name = "{rac_id}"',
+        f'name = "{rac_id}-ssh"',
         'type = "tcp"',
         'localIP = "127.0.0.1"',
         f'localPort = {local_ssh_port}',
         f'remotePort = {ssh_port}',
+        f'metadatas.user = "{ssh_user}"',
         '',
         '[[proxies]]',
-        f'name = "{rac_id}-WEB"',
+        f'name = "{rac_id}-web"',
         'type = "tcp"',
         'localIP = "127.0.0.1"',
         'localPort = 8081',
@@ -1304,7 +1426,7 @@ def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> b
         tf.write(content)
         tf_path = tf.name
     # Group-own to `sigmond` (mode 0640) so operators can read it for
-    # `smd rac status` without sudo — frpc reads it as root (owner), and
+    # `smd admin rac status` without sudo — frpc reads it as root (owner), and
     # the only "secret" inside is the fleet-shared token that's already
     # hardcoded in this script.  Fall back to root:root if the sigmond
     # group is absent.
@@ -1320,7 +1442,7 @@ def _write_frpc_config(rac_id: str, rac_number: int, dry_run: bool = False) -> b
     if r.returncode != 0:
         _err(f'frpc.toml write failed: {r.stderr.strip()}')
         return False
-    _ok(f'frpc.toml: written ({rac_id}, channel {rac_number}, port {ssh_port})')
+    _ok(f'frpc.toml: written ({rac_id}: ssh gw2:{ssh_port}, web gw2:{web_port})')
     return True
 
 
@@ -1426,12 +1548,104 @@ WantedBy=multi-user.target
     return True
 
 
-def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False) -> bool:
-    """Full wd-rac install: frpc binary + frpc.ini + systemd service."""
-    rac_id, rac_number = _read_rac_topology(topology)
+def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False,
+                    cli_rac_id=None, cli_rac_number=None,
+                    reconfigure=False) -> bool:
+    """Full wd-rac install: frpc binary + frpc.toml + systemd service.
 
-    # Fall back to auto-detection (wsprdaemon.conf, else the WSPR
-    # uploader's WD_RECEIVER_CALL) when not explicitly configured.
+    Resolves (rac_id, rac_number) by precedence:
+      1. CLI args  (``smd admin rac install <number> --id <id>``)
+      2. values already entered — topology.toml, then the live frpc.toml
+      3. interactive prompt: RAC number FIRST (always assigned by the RAC
+         administrator and supplied by the operator on this machine), then
+         RAC ID, prompted only when not already entered and defaulting to a
+         detected receiver id, else this host's name.
+      4. non-interactive (--yes / no tty) fallback: auto-detection, with the
+         host name as the last-resort rac_id.
+
+    Runs standalone — no dependency on radiod, recorders, or any other
+    component — so it is the first thing an operator can bring up on a fresh
+    host to let a remote admin connect and finish the install.
+    """
+    # 1. CLI args win.  2. otherwise whatever is already committed on disk
+    #    (topology.toml, then the running frpc.toml).
+    stored_id, stored_number = _read_rac_topology(topology)
+    if not stored_id or stored_number < 0:
+        frpc_id, frpc_number = _read_rac_frpc()
+        stored_id = stored_id or frpc_id
+        if stored_number < 0:
+            stored_number = frpc_number
+
+    rac_id = (cli_rac_id or '').strip() or stored_id
+    rac_number = (cli_rac_number if (cli_rac_number is not None
+                                     and cli_rac_number >= 0)
+                  else stored_number)
+
+    id_committed     = bool(rac_id)        # came from CLI or already on disk
+    number_committed = rac_number >= 0
+
+    # 3. Interactive prompts — RAC number first, then RAC ID.  Normally we
+    #    prompt only for a value that is not already set; ``reconfigure``
+    #    forces both prompts, showing the current values as editable defaults
+    #    so the operator can change them.
+    if (not yes and sys.stdin.isatty()
+            and (reconfigure or not number_committed or not id_committed)):
+        import socket
+        import readline  # noqa: F401 — enables line editing on input()
+        print()
+        print('  wd-rac (Remote Access Channel) — reverse tunnel for '
+              'remote SSH/web access.')
+
+        # RAC number — always operator-supplied; ask first.  When a value
+        # already exists (reconfigure) show it as a default that Enter keeps;
+        # otherwise it is required and we loop until a valid integer.
+        if reconfigure or not number_committed:
+            cur = rac_number if rac_number >= 0 else None
+            while True:
+                prompt = (f'  RAC number [{cur}]: ' if cur is not None
+                          else '  RAC number (integer, assigned by the RAC '
+                               'administrator — Ctrl-C to abort): ')
+                try:
+                    val = input(prompt).strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    if cur is not None:
+                        break                         # keep current value
+                    _err('wd-rac: aborted — RAC number is required')
+                    return False
+                if not val:
+                    if cur is not None:
+                        rac_number = cur
+                        break
+                    _warn('  RAC number is required (it sets your ssh tunnel '
+                          'port); enter the integer from the admin email.')
+                    continue
+                try:
+                    n = int(val)
+                except ValueError:
+                    _warn(f'  "{val}" is not an integer — try again.')
+                    continue
+                if n < 0:
+                    _warn('  RAC number must be non-negative.')
+                    continue
+                rac_number = n
+                break
+            number_committed = rac_number >= 0
+
+        # RAC ID — default to the current value, else a detected receiver
+        # id, else this host's name.  Enter accepts the default.
+        if reconfigure or not id_committed:
+            default_id = (rac_id or _detect_rac_defaults()[0]
+                          or socket.gethostname().split('.')[0])
+            try:
+                val = input(f'  RAC ID [{default_id}]: ').strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                val = ''
+            rac_id = val or default_id
+            id_committed = bool(rac_id)
+
+    # 4. Non-interactive / --yes fallback when values are still unresolved.
     if not rac_id or rac_number < 0:
         detected_id, detected_num = _detect_rac_defaults()
         if not rac_id and detected_id:
@@ -1440,43 +1654,15 @@ def _install_wd_rac(topology: dict, dry_run: bool = False, yes: bool = False) ->
         if rac_number < 0 and detected_num >= 0:
             rac_number = detected_num
             _info(f'wd-rac: rac_number detected: {rac_number}')
-
-    # Interactive prompt when still missing and running in a real terminal.
-    if (not rac_id or rac_number < 0) and not yes and sys.stdin.isatty():
-        import readline  # noqa: F401 — enables line editing on input()
-        print()
-        print('  wd-rac needs a RAC ID and a RAC number '
-              '(the number is assigned by the RAC administrator).')
-        # RAC ID — always show the detected default; Enter accepts it.
-        default_id = rac_id
-        try:
-            prompt = (f'  RAC ID [{default_id}]: ' if default_id
-                      else '  RAC ID (e.g. AI6VN-0): ')
-            val = input(prompt).strip()
-            rac_id = val or default_id
-        except (EOFError, KeyboardInterrupt):
-            print()
-        # RAC number — required; loop until a valid integer or abort.
-        while rac_number < 0:
-            try:
-                val = input('  RAC number (integer, required — '
-                            'Ctrl-C to abort): ').strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                _err('wd-rac: aborted — RAC number is required')
-                return False
-            if not val:
-                _warn('  RAC number is required (it sets your ssh tunnel '
-                      'port); enter the integer from the admin email.')
-                continue
-            try:
-                rac_number = int(val)
-            except ValueError:
-                _warn(f'  "{val}" is not an integer — try again.')
+        if not rac_id:
+            import socket
+            rac_id = socket.gethostname().split('.')[0]
+            _info(f'wd-rac: rac_id defaulted to host name: {rac_id}')
 
     if not rac_id or rac_number < 0:
         _warn('wd-rac: rac_id or rac_number not set — tunnel will not be started')
-        _warn('  To configure: run  smd rac install  (prompts interactively)')
+        _warn('  To configure: run  smd admin rac install <number>  '
+              '(prompts when omitted)')
         _warn('  Or:           smd tui  and press  a  (RAC screen)')
 
     ok = True
@@ -1514,13 +1700,20 @@ def rac_status() -> dict:
             import tomllib
             with open(_FRPC_CONFIG, 'rb') as f:
                 cfg = tomllib.load(f)
-            for proxy in cfg.get('proxies', []):
-                if not proxy.get('name', '').endswith('-WEB'):
-                    result['rac_id']    = proxy.get('name', '')
-                    rp = proxy.get('remotePort', -1)
-                    result['ssh_port']   = rp
-                    result['rac_number'] = rp - _RAC_PORT_BASE if rp > 0 else -1
-                    break
+            proxies = cfg.get('proxies', [])
+            ssh_proxy = next((p for p in proxies
+                              if p.get('name', '').endswith('-ssh')), None)
+            if ssh_proxy is not None:            # new name-based scheme
+                result['rac_id']   = ssh_proxy.get('name', '')[:-4]
+                result['ssh_port'] = ssh_proxy.get('remotePort', -1)
+            else:                                 # legacy <rac_id> / -WEB
+                for proxy in proxies:
+                    if not proxy.get('name', '').endswith('-WEB'):
+                        result['rac_id']    = proxy.get('name', '')
+                        rp = proxy.get('remotePort', -1)
+                        result['ssh_port']   = rp
+                        result['rac_number'] = rp - _RAC_PORT_BASE if rp > 0 else -1
+                        break
         except PermissionError:
             # Config exists but this (non-root) user can't read it —
             # don't masquerade as "not configured".
@@ -1542,80 +1735,134 @@ def rac_status() -> dict:
     return result
 
 
-def cmd_rac(args) -> int:
-    """Day-to-day lifecycle for the wd-rac (frpc) remote-access tunnel.
+def _rac_show_status() -> int:
+    """Print the wd-rac tunnel config + service + gateway status."""
+    unit = f'{_RAC_SERVICE}.service'
+    unit_path = Path(f'/etc/systemd/system/{unit}')
+    st = rac_status()
+    _heading('wd-rac (frpc) remote-access tunnel')
+    if not st['frpc_installed']:
+        _warn('frpc binary not installed')
+        _info('provision with:  smd admin rac install')
+        return 0
+    _ok(f"frpc binary : {_FRPC_BIN} "
+        f"({st['frpc_version'] or 'unknown version'})")
+    if not st['config_exists'] or not unit_path.exists():
+        _warn(f'not configured on this host ({_FRPC_CONFIG} / {unit} missing)')
+        _info('provision with:  smd admin rac install'
+              '   (or  smd tui  → RAC screen)')
+        return 0
+    rnum = st['rac_number']
+    frps_host = (_FRPS_URL_HAMSCI if isinstance(rnum, int)
+                 and 200 <= rnum <= 299 else _FRPS_URL)
+    _ok(f"config      : {_FRPC_CONFIG}")
+    if st.get('config_unreadable'):
+        _warn(f"            : not readable as {os.getenv('USER', 'this user')} "
+              f"— re-run as root, or  smd admin rac install  to fix group perms")
+    else:
+        _info(f"rac_id      : {st['rac_id'] or '(unset)'}")
+        _info(f"rac_number  : {rnum if rnum >= 0 else '(unset)'}")
+        _info(f"ssh tunnel  : {frps_host}:"
+              f"{st['ssh_port'] if st['ssh_port'] > 0 else '?'}")
+    if st['service_active']:
+        _ok(f"service     : {unit} active")
+        if st['tunnel_ok']:
+            _ok(f"gateway     : {_FRPS_URL}:{_FRPS_PORT} reachable")
+        else:
+            _warn(f"gateway     : {_FRPS_URL}:{_FRPS_PORT} UNREACHABLE "
+                  f"— service up but tunnel not established")
+    else:
+        _warn(f"service     : {unit} inactive  "
+              f"(bring up with  smd admin rac start)")
+    r = _run(['systemctl', 'is-enabled', unit])
+    _info(f"boot        : {r.stdout.strip() or 'unknown'}")
+    return 0
 
-    Subverbs: ``status`` (default), ``start``, ``stop``, ``restart`` —
-    thin wrappers over ``wd-rac.service``; and ``install``, which aliases
-    ``smd install --components wd-rac`` (download frpc, write frpc.toml,
-    keypair, register with the gateway, install the unit — same as the
-    TUI RAC screen).  The lifecycle verbs just bring an already-installed
-    tunnel up/down and report it.
+
+def _rac_configure(reconfigure: bool, args) -> int:
+    """Provision / (re)configure the wd-rac tunnel, then show its status.
+
+    ``reconfigure=True`` re-prompts for the RAC number and ID even when they
+    are already set (current values shown as editable defaults); otherwise
+    only missing values are prompted.  Elevates to root first (the frpc
+    install steps need it); the prompts then run in the elevated process.
     """
-    action = getattr(args, 'rac_command', None) or 'status'
+    if _need_root('rac reconfigure' if reconfigure else 'rac install'):
+        return 1
+    _netdiag_auto_refresh('install')
+    _heading('wd-rac (Remote Access Channel)')
+    topology = _load_topology(TOPOLOGY_PATH)
+    ok = _install_wd_rac(
+        topology,
+        getattr(args, 'dry_run', False),
+        yes=getattr(args, 'yes', False),
+        cli_rac_id=getattr(args, 'rac_id', None),
+        cli_rac_number=getattr(args, 'rac_number', None),
+        reconfigure=reconfigure,
+    )
+    if ok and not getattr(args, 'dry_run', False):
+        print()
+        _rac_show_status()
+    return 0 if ok else 1
+
+
+def cmd_rac(args) -> int:
+    """State-aware lifecycle for the wd-rac (frpc) remote-access tunnel.
+
+    Bare ``smd admin rac`` dispatches on the current state of the service:
+      * not installed          → offer to install + configure, then status
+      * installed, unconfigured → configure, then status
+      * installed + configured  → show status
+
+    Explicit subverbs: ``status``; ``configure`` / ``reconfigure`` (always
+    re-prompt, current values as editable defaults); ``install`` (one-shot
+    provision, accepts ``NUMBER`` / ``--id``); ``start`` / ``stop`` /
+    ``restart`` (thin wrappers over wd-rac.service).
+    """
+    action = getattr(args, 'rac_command', None)
     unit = f'{_RAC_SERVICE}.service'
     unit_path = Path(f'/etc/systemd/system/{unit}')
 
-    if action == 'status':
+    # --- bare `smd admin rac`: do the right thing for the current state --------
+    if action is None:
         st = rac_status()
-        _heading('wd-rac (frpc) remote-access tunnel')
-        if not st['frpc_installed']:
-            _warn('frpc binary not installed')
-            _info('provision with:  smd rac install')
-            return 0
-        _ok(f"frpc binary : {_FRPC_BIN} "
-            f"({st['frpc_version'] or 'unknown version'})")
-        if not st['config_exists'] or not unit_path.exists():
-            _warn(f'not configured on this host ({_FRPC_CONFIG} / {unit} missing)')
-            _info('provision with:  smd rac install'
-                  '   (or  smd tui  → RAC screen)')
-            return 0
-        rnum = st['rac_number']
-        frps_host = (_FRPS_URL_HAMSCI if isinstance(rnum, int)
-                     and 200 <= rnum <= 299 else _FRPS_URL)
-        _ok(f"config      : {_FRPC_CONFIG}")
-        if st.get('config_unreadable'):
-            _warn(f"            : not readable as {os.getenv('USER', 'this user')} "
-                  f"— re-run as root, or  smd rac install  to fix group perms")
-        else:
-            _info(f"rac_id      : {st['rac_id'] or '(unset)'}")
-            _info(f"rac_number  : {rnum if rnum >= 0 else '(unset)'}")
-            _info(f"ssh tunnel  : {frps_host}:"
-                  f"{st['ssh_port'] if st['ssh_port'] > 0 else '?'}")
-        if st['service_active']:
-            _ok(f"service     : {unit} active")
-            if st['tunnel_ok']:
-                _ok(f"gateway     : {_FRPS_URL}:{_FRPS_PORT} reachable")
-            else:
-                _warn(f"gateway     : {_FRPS_URL}:{_FRPS_PORT} UNREACHABLE "
-                      f"— service up but tunnel not established")
-        else:
-            _warn(f"service     : {unit} inactive  "
-                  f"(bring up with  smd rac start)")
-        r = _run(['systemctl', 'is-enabled', unit])
-        _info(f"boot        : {r.stdout.strip() or 'unknown'}")
-        return 0
+        installed  = st['frpc_installed']
+        configured = (st['config_exists'] and unit_path.exists()
+                      and (st.get('config_unreadable')
+                           or (st['rac_id'] and st['rac_number'] >= 0)))
+        # Up-and-configured, or no terminal to prompt on → just report.
+        if (installed and configured) or not sys.stdin.isatty():
+            return _rac_show_status()
+        if not installed and os.geteuid() != 0:
+            # State A — confirm once, before elevating.  After the sudo
+            # re-exec (geteuid 0) we skip straight to configuring so the
+            # operator is not asked twice.
+            _heading('wd-rac (Remote Access Channel)')
+            _warn('RAC tunnel is not installed on this host.')
+            try:
+                ans = input('  Install and configure it now? [y/N]: ').strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                ans = ''
+            if ans not in ('y', 'yes'):
+                _info('Nothing changed.  Install later with:  '
+                      'smd admin rac install <number>')
+                return 0
+        # State A (confirmed) or State B (installed-but-unconfigured): go
+        # configure.  _install_wd_rac prompts for whatever is still missing.
+        return _rac_configure(False, args)
 
-    if action == 'install':
-        # Alias for `smd install --components wd-rac` — call the native
-        # provisioner directly.  (wd-rac is NOT a catalog *client*, so the
-        # single-positional `smd component install wd-rac` path fails its
-        # get_entry() lookup; the working path is the frpc-native one.)
-        if _need_root('rac install'):
-            return 1
-        _netdiag_auto_refresh('install')
-        _heading('wd-rac (Remote Access Channel)')
-        topology = _load_topology(TOPOLOGY_PATH)
-        return 0 if _install_wd_rac(
-            topology,
-            getattr(args, 'dry_run', False),
-            yes=getattr(args, 'yes', False),
-        ) else 1
+    if action == 'status':
+        return _rac_show_status()
+
+    if action in ('install', 'configure', 'reconfigure'):
+        # install: prompt only missing values.  (re)configure: re-prompt both.
+        return _rac_configure(action != 'install', args)
 
     if action in ('start', 'stop', 'restart'):
         if not unit_path.exists():
             _err(f'{unit} is not installed on this host')
-            _info('provision the tunnel first:  smd rac install')
+            _info('provision the tunnel first:  smd admin rac install')
             return 1
         if _need_root(f'rac {action}'):
             return 1
@@ -2066,7 +2313,7 @@ def cmd_uninstall(args) -> int:
     try:
         from sigmond.uninstall import plan_uninstall, execute_uninstall, render_plan
     except Exception as exc:  # noqa: BLE001
-        print(f'smd uninstall: sigmond.uninstall unavailable: {exc}', file=sys.stderr)
+        print(f'smd admin uninstall: sigmond.uninstall unavailable: {exc}', file=sys.stderr)
         return 1
     keep_config = bool(getattr(args, 'keep_config', False))
     full = not keep_config
@@ -2078,6 +2325,16 @@ def cmd_uninstall(args) -> int:
             return False
         return default
 
+    # Self-elevate like every other mutating verb (sigmond#11): when actually
+    # executing (--yes, not --dry-run), re-exec under sudo up front so the plan
+    # is built + shown + executed once, as root, and the operator never types
+    # `sudo` (uninstall used to just error "must run as root").  The planning /
+    # dry-run path stays unprivileged.  _need_root carries SIGMOND_ALLOW_SUDO=1
+    # so the top-of-main guard lets the elevated re-exec through.
+    will_execute = getattr(args, 'yes', False) and not getattr(args, 'dry_run', False)
+    if will_execute and _need_root('admin uninstall'):
+        return 1
+
     plan = plan_uninstall(
         keep_config=keep_config,
         wipe_data=_resolve(full, 'wipe_data', 'keep_data'),
@@ -2087,14 +2344,11 @@ def cmd_uninstall(args) -> int:
     )
     for line in render_plan(plan):
         print(line)
-    if getattr(args, 'dry_run', False) or not getattr(args, 'yes', False):
+    if not will_execute:
         print()
-        print('  DRY RUN — nothing removed.  Re-run with --yes (as root) to execute.')
+        print('  DRY RUN — nothing removed.  Re-run with --yes to execute '
+              '(smd self-elevates; no sudo needed).')
         return 0
-    if os.geteuid() != 0:
-        print('smd uninstall: must run as root to execute '
-              '(sudo smd uninstall --yes)', file=sys.stderr)
-        return 1
     print()
     print('  EXECUTING uninstall ...')
     return execute_uninstall(plan, dry_run=False)
@@ -2217,27 +2471,34 @@ def _detect_local_radiod() -> bool:
     return False
 
 
-def _lsusb() -> str:
-    try:
-        return subprocess.run(['lsusb'], capture_output=True, text=True,
-                              timeout=5).stdout
-    except Exception:
-        return ''
-
-
 def _detect_local_sdr() -> bool:
-    """True when a radiod-capable SDR is on the USB bus.  The upfront check for
-    a local-radiod profile — hardware, not whether ka9q-radio is built yet.
-    RX888 / RX888mk2 present as a Cypress FX3 (04b4:00f0/00f1/00f3)."""
-    return bool(re.search(r'rx888|04b4:00f[013]', _lsusb(), re.I))
+    """True when a radiod-capable SDR is present.  The upfront check for a
+    local-radiod profile — hardware, not whether ka9q-radio is built yet.
+    Delegates to the shared readiness probe (CONTRACT §3 / Phase D); ka9q-radio
+    has no inventory CLI so this resolves via the lsusb fallback (RX888 =
+    Cypress FX3 04b4:00f0/00f1/00f3).  Unknown (None) is treated as absent —
+    don't claim a local radiod stack without a confirmed SDR."""
+    from sigmond.hardware import hardware_ready
+    return hardware_ready('ka9q-radio') is True
 
 
 def _detect_magnetometer() -> bool:
-    """True when the RM3100's Pololu USB-I2C adapter (1ffb:2502/2503) is on the
-    bus (or its udev symlink exists).  mag-recorder can't run without it."""
-    if os.path.exists('/dev/ttyMAG0'):
-        return True
-    return bool(re.search(r'1ffb:250[23]|pololu', _lsusb(), re.I))
+    """True when mag-recorder's data source is available, per its own
+    `inventory --json hardware_present` self-describe (CONTRACT §3 / Phase D),
+    falling back to the Pololu USB-I2C / `/dev/ttyMAG0` lsusb probe.  Unknown
+    (None) is treated as absent — don't scaffold a client whose hardware we
+    can't confirm."""
+    from sigmond.hardware import hardware_ready
+    return hardware_ready('mag-recorder') is True
+
+
+def _detect_gpsdo() -> bool:
+    """True when a Leo Bodnar GPSDO is attached, per gpsdo-monitor's own
+    `inventory --json hardware_present` self-describe (CONTRACT §3 / Phase D),
+    falling back to the `1dd2:` USB/HID lsusb probe.  Unknown (None) is treated
+    as absent — don't scaffold gpsdo-monitor for hardware we can't confirm."""
+    from sigmond.hardware import hardware_ready
+    return hardware_ready('gpsdo-monitor') is True
 
 
 def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -> bool:
@@ -2265,6 +2526,69 @@ def _bringup_wait_wisdom(wisdom_file, timeout_s: int = 3600, poll_s: int = 15) -
     return wisdom_file.exists()
 
 
+def _radiod_streaming(unit: str) -> bool:
+    """True when the radiod process behind ``unit`` has logged 'rx888 running'
+    — i.e. it's actually streaming samples, not merely forked/active.  The
+    marker is matched against the CURRENT MainPID so a stale 'rx888 running'
+    from a prior run doesn't count."""
+    pid = _run(['systemctl', 'show', '-p', 'MainPID', '--value', unit],
+               capture=True).stdout.strip()
+    if not pid or pid == '0':
+        return False
+    r = _run(['journalctl', f'_PID={pid}', '-g', 'rx888 running',
+              '--no-pager', '-q'], capture=True, sudo=True)
+    return 'rx888 running' in (getattr(r, 'stdout', '') or '')
+
+
+def _bringup_wait_streaming(timeout_s: int = 300, settle_s: int = 15,
+                            poll_s: int = 5) -> bool:
+    """Block until every local radiod is actually streaming ('rx888 running'),
+    then sleep a settle margin so clients don't provision against a radiod whose
+    RX888/threads are still stabilizing.  Returns True once all are streaming,
+    False on timeout (advisory — the caller continues either way)."""
+    import time, glob
+    confs = glob.glob('/etc/radio/radiod@*.conf')
+    ids = [os.path.basename(c)[len('radiod@'):-len('.conf')] for c in confs]
+    if not ids:
+        _warn('wait-streaming: no /etc/radio/radiod@*.conf found — skipping '
+              'the streaming gate')
+        return False
+    ok_all = True
+    for rid in ids:
+        unit = f'radiod@{rid}.service'
+        _info(f'waiting for {unit} to stream (rx888 running)...')
+        waited, streaming = 0, False
+        while waited < timeout_s:
+            active = _run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0
+            if active and _radiod_streaming(unit):
+                streaming = True
+                break
+            time.sleep(poll_s)
+            waited += poll_s
+            if waited % 60 == 0:
+                _info(f'  ... still warming up ({waited // 60} min elapsed)')
+        if streaming:
+            _ok(f'{unit} streaming (~{waited}s); settling {settle_s}s before clients')
+            time.sleep(settle_s)
+        else:
+            _warn(f'{unit} never logged "rx888 running" within {timeout_s}s — '
+                  'clients may fail channel provisioning; continuing')
+            ok_all = False
+    return ok_all
+
+
+# Sentinel that recorder config templates ship for the radiod status address;
+# `config init` replaces it.  A config that still contains it is unconfigured.
+_CONFIG_PLACEHOLDER = '<configure-via-config-init>'
+
+
+def _read_text_safe(p) -> str:
+    try:
+        return Path(p).read_text()
+    except OSError:
+        return ''
+
+
 def _bringup_probe(check: str, smd_bin: str):
     """Run a lightweight checkpoint probe.  Returns (ok, detail)."""
     if check == 'radiod-configured':
@@ -2287,14 +2611,81 @@ def _bringup_probe(check: str, smd_bin: str):
             except Exception:
                 cfgp = None
             if cfgp:
-                present = Path(cfgp).exists()
+                p = Path(cfgp)
+                present = p.exists()
+                # An install-rendered placeholder config (the `if_absent` render
+                # of a *.example/.template that ships the
+                # "<configure-via-config-init>" sentinel) EXISTS but is NOT
+                # configured.  Report it as unconfigured so bring-up runs
+                # config-init (with --reconfig) instead of skipping — else the
+                # radiod status stays the sentinel and the recorder can't resolve
+                # radiod (sigmond#15; greenfield: wspr came up with a placeholder).
+                if present and _CONFIG_PLACEHOLDER in _read_text_safe(p):
+                    return (False,
+                            f"{name}: {cfgp} present but UNCONFIGURED (placeholder)")
                 return (present, f"{name}: {cfgp} {'present' if present else 'MISSING'}")
-        ok = Path(f'/etc/{name}').is_dir()
+        etc = Path(f'/etc/{name}')
+        ok = etc.is_dir()
+        if ok:
+            tomls = list(etc.glob('*.toml'))
+            if tomls and all(_CONFIG_PLACEHOLDER in _read_text_safe(f)
+                             for f in tomls):
+                return (False, f"/etc/{name} present but UNCONFIGURED (placeholder)")
         return (ok, f"/etc/{name} {'present' if ok else 'missing'} (no inventory CLI)")
     if check == 'validate':
-        r = _run([smd_bin, 'validate'], capture=False)
+        r = _run([smd_bin, 'admin', 'validate'], capture=False)
         return (getattr(r, 'returncode', 1) == 0, 'see validate output above')
     return (True, 'no probe')
+
+
+def _bringup_env_blockers(local_radiod: bool) -> list:
+    """Detect known environment blockers that would otherwise surface mid-run as
+    an opaque apt or git error, and return ``[(what, fix), ...]`` so cmd_bringup
+    can explain them up front instead of letting the raw error escape.
+
+    Covers the two that bit the first greenfield run (sigmond#12, #13):
+      • a broken /etc/default/grub (shell-syntax error → grub-mkconfig fails →
+        EVERY apt transaction fails on the kernel postrm hook);
+      • dpkg left half-configured (apt installs fail until repaired);
+      • a shallow ka9q-radio clone that can't reach the pinned build commit
+        (`git checkout <pin>` → "unable to read tree" during install).
+    The apt/grub checks only matter for local-radiod profiles (the ones that
+    apt-install + build natively).  All checks are read-only and run as the
+    operator (pre-elevation)."""
+    blockers: list = []
+
+    if local_radiod:
+        grub = Path('/etc/default/grub')
+        if grub.exists():
+            r = subprocess.run(['sh', '-n', str(grub)],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                detail = (r.stderr.strip().splitlines() or ['parse failed'])[-1]
+                blockers.append((
+                    f'/etc/default/grub has a shell-syntax error ({detail}) — '
+                    'grub-mkconfig fails, so the kernel postrm hook fails and '
+                    'EVERY apt transaction errors out (often an unterminated '
+                    'quote in GRUB_CMDLINE_LINUX_DEFAULT)',
+                    'fix the offending line in /etc/default/grub, then: '
+                    'sudo update-grub'))
+
+        audit = subprocess.run(['dpkg', '--audit'], capture_output=True, text=True)
+        if audit.returncode != 0 or audit.stdout.strip():
+            blockers.append((
+                'dpkg is half-configured (packages partially installed/removed) '
+                '— apt installs will fail until repaired',
+                'sudo apt-get -f install   (or: sudo dpkg --configure -a)'))
+
+    # NOTE: a shallow ka9q-radio clone that can't reach its build pin used to be
+    # flagged here as a FATAL blocker (b504e14).  sigmond#13 made the install
+    # self-healing — installer._checkout_ref deepens a shallow clone via
+    # `git fetch --unshallow` to reach the pin before building (or fails loudly
+    # there if the pin genuinely doesn't exist upstream).  So it's no longer a
+    # pre-run blocker: flagging it here was a FALSE POSITIVE that aborted a run
+    # the install would have completed (caught live on the first greenfield
+    # reinstall, where install.sh's --depth 1 clone always tripped it).
+
+    return blockers
 
 
 def cmd_bringup(args) -> int:
@@ -2307,6 +2698,11 @@ def cmd_bringup(args) -> int:
     """
     from sigmond.catalog import load_profiles
     from sigmond.bringup import build_plan, WISDOM_FILE
+
+    # Profile resolution: positional arg wins, then the back-compat --profile
+    # alias, else the canonical `dasi2` station.  So `smd bringup` == dasi2.
+    args.profile = (getattr(args, 'profile', None)
+                    or getattr(args, 'profile_flag', None) or 'dasi2')
 
     try:
         profiles = load_profiles()
@@ -2326,9 +2722,10 @@ def cmd_bringup(args) -> int:
         # Local-radiod profile: the upfront check is the SDR HARDWARE on the USB
         # bus, NOT whether ka9q-radio is built yet (bringup builds it).
         if not _detect_local_sdr():
-            _err('bringup: this is a local-radiod profile but no RX888/SDR was '
-                 'found on the USB bus.  Attach the SDR, or use the "client" '
-                 'profile / --remote-radiod to bind a remote radiod.')
+            _err('bringup: no RX888/SDR on the USB bus — without it radiod '
+                 'cannot run and NOTHING decodes (WSPR / PSK / GRAPE all dark). '
+                 'Attach the RX888 and re-run, or use --remote-radiod / the '
+                 '"client" profile to bind a remote radiod.')
             return 1
         local = True
     else:
@@ -2343,20 +2740,66 @@ def cmd_bringup(args) -> int:
                 return 1
             remote_dns = entered
 
-    # Environment-aware preflight: hardware-gated clients that can't run on this
-    # host are skipped (not scaffolded into a broken state) with a clear note.
-    skip = set()
+    # Hardware-aware kit check (docs/install-redesign.md §3).  Hardware-gated
+    # components stay in the plan and install DORMANT (enabled, but `smd start`
+    # skips them while their device is absent — they light up when it is later
+    # attached).  The warnings here are about LOST FUNCTIONALITY and are
+    # dependency-aware: a missing GPSDO degrades the whole recorder chain, not
+    # just gpsdo-monitor.  Nothing is removed from the plan (`skip` stays empty);
+    # dormancy is enforced at start.
+    skip: set = set()
+    dormant: set = set()
     if 'mag-recorder' in prof.clients and not _detect_magnetometer():
-        _warn('no magnetometer found (RM3100 / Pololu USB-I2C adapter not on the '
-              'bus) — skipping mag-recorder')
-        skip.add('mag-recorder')
+        _warn('no magnetometer (RM3100 / Pololu USB-I2C) on the bus — '
+              'mag-recorder installs DORMANT; magnetometer uploads stay dark '
+              'until one is attached.')
+        dormant.add('mag-recorder')
+    if 'gpsdo-monitor' in prof.local_radiod_infra and not _detect_gpsdo():
+        _warn('no Leo Bodnar GPSDO on the bus — gpsdo-monitor installs DORMANT, '
+              'and the RX888 runs UNDISCIPLINED: WSPR / PSK / GRAPE (hf-timestd) '
+              'frequency accuracy is degraded until a GPSDO is attached.')
+        dormant.add('gpsdo-monitor')
 
     smd_bin = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else 'smd'
+
+    # --- Station identity (source it ONCE; route it to every client) ---------
+    # The operant id is the REPORTER id (common to WSPR + PSK), not the callsign
+    # (an optional ham-operator id).  grid is the station location hf-timestd and
+    # the reporting clients need.  Collected from flags; prompted when on a TTY;
+    # required (reporter+grid) under --non-interactive.  Seeded into coordination
+    # [host] after elevation (below) so STATION_CALL/STATION_GRID propagate to
+    # all client configurators, and handed to build_plan so the reporter id names
+    # the wspr/psk instances.
+    reporter = (getattr(args, 'reporter', None) or '').strip()
+    grid = (getattr(args, 'grid', None) or '').strip()
+    callsign = (getattr(args, 'callsign', None) or '').strip()
+    psws_id = (getattr(args, 'psws_station_id', None) or '').strip()
+
+    needs_reporter = any(c in prof.clients and c not in skip
+                         for c in ('wspr-recorder', 'psk-recorder'))
+    needs_grid = ('hf-timestd' in prof.clients and 'hf-timestd' not in skip) or needs_reporter
+    interactive = sys.stdin.isatty() and not getattr(args, 'non_interactive', False)
+
+    def _ask_identity(label, cur, *, optional=False):
+        if cur or not interactive:
+            return cur
+        suffix = ' (optional — Enter to skip)' if optional else ''
+        try:
+            return input(f'  {label}{suffix}: ').strip()
+        except EOFError:
+            return ''
+
+    if needs_reporter:
+        reporter = _ask_identity('Reporter id for WSPR/PSK (e.g. AC0G/S)', reporter)
+    if needs_grid:
+        grid = _ask_identity('Maidenhead grid square (e.g. EM38ww)', grid)
+    callsign = _ask_identity('Callsign', callsign, optional=True)
 
     plan = build_plan(prof, local_radiod=local, remote_status_dns=remote_dns,
                       smd=smd_bin, with_optional=getattr(args, 'with_optional', False),
                       non_interactive=getattr(args, 'non_interactive', False),
-                      skip=frozenset(skip))
+                      skip=frozenset(skip), dormant=frozenset(dormant),
+                      reporter=reporter or None)
 
     _heading(f'bringup: {prof.name}  ({"LOCAL" if local else "REMOTE"} radiod)')
     if prof.description:
@@ -2368,17 +2811,80 @@ def cmd_bringup(args) -> int:
             _info(st.stage)
             cur = st.stage
         mark = {'checkpoint': '  ✓', 'wisdom': '  ⟳', 'wait-wisdom': '  ⏳',
-                'note': '  …', 'start': '  ▶'}.get(st.kind, '  •')
+                'wait-streaming': '  ⏳', 'note': '  …', 'start': '  ▶',
+                'enable': '  ⊕'}.get(st.kind, '  •')
         extra = ' [HARD]' if st.hard else (' (background)' if st.background else '')
+        if st.settle_s:
+            extra += f' (+{st.settle_s}s settle)'
         print(f"{mark} {st.label}{extra}")
     print()
+
+    # Environment preflight — surface known blockers (broken grub/apt, shallow
+    # pinned clone) with a plain-language fix rather than an opaque apt/git error
+    # mid-run.  Reported here so --dry-run shows them too; the real run aborts.
+    env_blockers = _bringup_env_blockers(local)
+    if env_blockers:
+        _warn('environment blocker(s) detected — these would break the run:')
+        for what, fix in env_blockers:
+            _warn(f'  • {what}')
+            _info(f'      fix: {fix}')
+        print()
 
     if getattr(args, 'dry_run', False):
         _info('(dry-run — no changes made)')
         return 0
 
+    if env_blockers:
+        _err('bringup: aborting — resolve the environment blocker(s) above, '
+             'then re-run.')
+        return 1
+
+    # Enforce required identity on the real run (dry-run previews freely above).
+    missing = []
+    if needs_reporter and not reporter:
+        missing.append('--reporter')
+    if needs_grid and not grid:
+        missing.append('--grid')
+    if missing:
+        _err(f"bringup: missing required station identity: {', '.join(missing)}. "
+             f"Pass the flag(s), or run interactively (without --non-interactive) "
+             f"to be prompted.")
+        return 1
+
+    # Elevate once, like every other mutating verb: _need_root re-execs the
+    # whole bringup under sudo (carrying SIGMOND_ALLOW_SUDO so the guard lets it
+    # and its sub-smd steps through).  The operator never types `sudo` — smd
+    # does it.  Sub-steps then run already-as-root (sudo=False below).
     if _need_root('bringup'):
         return 1
+
+    # Seed station identity into coordination [host] BEFORE any config step, so
+    # client config (which builds STATION_CALL/STATION_GRID from coord.host) hands
+    # the real identity to every configurator — radiod, hf-timestd, wspr, psk —
+    # instead of each falling back to its placeholder.  radiod config appends its
+    # [radiod.*] block without disturbing [host].  Also export to the process env
+    # for configurators that read it directly (hf-timestd's setup-station.sh).
+    if callsign or grid:
+        from sigmond.coordination import (write_host_identity, load_coordination,
+                                          render_env)
+        from sigmond.paths import COORDINATION_ENV
+        try:
+            if write_host_identity(call=callsign, grid=grid):
+                _ok(f'seeded station identity into coordination.toml '
+                    f'(call={callsign or "—"}, grid={grid or "—"})')
+                # Refresh the rendered env so runtime units (EnvironmentFile)
+                # see STATION_CALL/STATION_GRID too — radiod config would do this
+                # on a fresh host, but it's skipped when already configured.
+                COORDINATION_ENV.parent.mkdir(parents=True, exist_ok=True)
+                COORDINATION_ENV.write_text(render_env(load_coordination()))
+        except OSError as exc:
+            _warn(f'could not seed coordination [host]: {exc}')
+    if callsign:
+        os.environ['STATION_CALL'] = callsign
+    if grid:
+        os.environ['STATION_GRID'] = grid
+    if psws_id:
+        os.environ['STATION_ID'] = psws_id
 
     for st in plan.steps:
         if st.kind == 'note':
@@ -2389,6 +2895,10 @@ def cmd_bringup(args) -> int:
                 _warn('FFT wisdom not ready — radiod may not start cleanly yet; '
                       'continuing (it will start once wisdom finishes).')
             continue
+        if st.kind == 'wait-streaming':
+            _info(f'» {st.label}')
+            _bringup_wait_streaming()
+            continue
         if st.kind == 'checkpoint':
             ok, detail = _bringup_probe(st.check, smd_bin)
             if ok:
@@ -2396,23 +2906,53 @@ def cmd_bringup(args) -> int:
             elif st.hard:
                 _err(f'{st.label} FAILED — {detail}')
                 _err(f'aborting (hard checkpoint). Fix, then re-run: '
-                     f'{os.path.basename(smd_bin)} bringup --profile {prof.name}')
+                     f'{os.path.basename(smd_bin)} bringup {prof.name}')
                 return 1
             else:
                 _warn(f'{st.label} — {detail} (advisory; continuing)')
             continue
         # install / tune / config / wisdom / start
         if st.kind == 'config':
+            # Idempotency: bringup is bring-up, not reconfigure.  Re-running
+            # `config init` on an already-configured host regenerates the file —
+            # some clients' non-interactive configurators don't preserve
+            # operator edits/comments (observed: hf-timestd lost its comments on
+            # a live re-run).  Skip when already configured; `--reconfigure`
+            # forces it.  (radiod has its own _refuse_overwrite guard.)
+            client = (st.argv[st.argv.index('init') + 1]
+                      if 'init' in st.argv else None)
+            if client and not getattr(args, 'reconfigure', False):
+                done, detail = _bringup_probe(f'configured:{client}', smd_bin)
+                if done:
+                    _info(f'» {st.label} — already configured ({detail}); '
+                          f'skipping (smd config edit {client}, or '
+                          f'bringup --reconfigure to force)')
+                    continue
+                # An install-rendered placeholder config EXISTS but isn't really
+                # configured.  config init refuses to overwrite an existing file
+                # without --reconfig, so force it — else the placeholder survives
+                # and the hard 'configured' checkpoint below would abort the run.
+                if 'placeholder' in detail and '--reconfig' not in st.argv:
+                    st.argv = st.argv + ['--reconfig']
+                    _info(f'» {st.label} — {client} config is an unconfigured '
+                          f'placeholder; reconfiguring (--reconfig)')
             _heading(st.label)
         else:
             _info(f'» {st.label}')
-        r = _run(st.argv, capture=False, sudo=False)
+        # `config` steps run the per-client wizards, which prompt the operator
+        # — they must inherit the terminal's stdin (not /dev/null).
+        r = _run(st.argv, capture=False, sudo=False,
+                 interactive=(st.kind == 'config'))
         if getattr(r, 'returncode', 0) != 0 and not st.background:
             _warn(f'step exited {r.returncode}: {" ".join(st.argv)}')
+        if st.settle_s:
+            import time
+            _info(f'  settling {st.settle_s}s before the next client...')
+            time.sleep(st.settle_s)
 
     print()
     _ok(f"bringup '{prof.name}' complete")
-    _info('verify anytime with: smd validate')
+    _info('verify anytime with: smd admin validate')
     return 0
 
 
@@ -2927,8 +3467,18 @@ def _install_radiod_native(catalog, *, force: bool = False) -> bool:
         return False
     if not _ensure_fftw_dir():
         return False
+    # Pin the checkout to ka9q-python's compat commit, not bare `main` — a plain
+    # pull silently advances ka9q-radio past the pin every install, drifting the
+    # wire-protocol headers (rule_ka9q_python_compat then warns).  Advancing is
+    # a deliberate sync_types.py step, never a side effect of install.
+    pin = _ka9q_radio_pin()
     try:
-        src_dir = _clone_repo(entry, pull_if_exists=True)
+        if pin:
+            _info(f'ka9q-radio: pinning to ka9q-python compat commit {pin[:12]}')
+            src_dir = _clone_repo(entry, pull_if_exists=True, ref=pin)
+        else:
+            _warn('ka9q-radio: no ka9q-python pin found — building current HEAD')
+            src_dir = _clone_repo(entry, pull_if_exists=True)
     except RuntimeError as exc:
         _err(f'ka9q-radio clone failed: {exc}')
         return False
@@ -3252,7 +3802,7 @@ def cmd_apply(args) -> int:
                 # boots as 'powersave'; radiod needs 'performance' pinned
                 # or its FFT cores throttle after every reboot.  The
                 # affinity writer above only sets CPUAffinity — without
-                # this the governor reverted until someone ran `smd diag
+                # this the governor reverted until someone ran `smd admin diag
                 # cpu-affinity --apply` by hand.  Idempotent; same writer.
                 try:
                     _radiod_cpus = _get_radiod_cpus()
@@ -3662,6 +4212,7 @@ def cmd_start(args) -> int:
     try:
         from sigmond.component_state import compute_state
         from sigmond.catalog import load_catalog
+        from sigmond.harmonize import dormant_reason as _dormant_reason
         topo_for_state = _load_topology(TOPOLOGY_PATH)
         catalog = load_catalog()
         startable: list[str] = []
@@ -3669,6 +4220,16 @@ def cmd_start(args) -> int:
             entry = catalog.get(name)
             if entry is not None and getattr(entry, 'kind', None) == 'library':
                 continue  # library entries have no services
+            # Dormant: an enabled, hardware-gated component (mag-recorder,
+            # gpsdo-monitor) whose device is CONFIDENTLY absent.  Don't start
+            # it — it would crash-loop; it lights up when the hardware is
+            # attached and `smd start` runs again.  Same source of truth as
+            # `smd validate` / the status surfaces (harmonize.dormant_reason),
+            # which only fires on a confident `False` (unknown → still started).
+            hw = _dormant_reason(name, enabled=True)
+            if hw:
+                _info(f'{name}: dormant — {hw} not present; starts when attached')
+                continue
             alias = getattr(entry, 'topology_alias', None) if entry else None
             s = compute_state(name, topo_for_state, alias=alias)
             if s.can_start:
@@ -3713,6 +4274,15 @@ def cmd_start(args) -> int:
     _netdiag_auto_refresh('start')
     rc = 0
     for unit in units:
+        # No-op on already-active units.  `systemctl start` is a no-op for a
+        # plain long-running service, but some units re-trigger work on start
+        # (hf-timestd's templated metrology instances re-derive and restart,
+        # re-warming the timing chain).  Skipping active units keeps `smd start`
+        # — and a `smd bringup` re-run — idempotent.  Use `smd restart` to force.
+        chk = _run(['systemctl', 'is-active', '--quiet', unit.unit])
+        if getattr(chk, 'returncode', 1) == 0:
+            _ok(f'{unit.unit} (already running)')
+            continue
         r = _run(['systemctl', 'start', unit.unit], sudo=True)
         if r.returncode == 0:
             _ok(f'{unit.unit}')
@@ -3874,10 +4444,10 @@ def _disable_hftimestd_affinity_watcher() -> bool:
 def _apply_radiod_governor(radiod_cpus, governor='performance') -> int:
     """Set scaling_governor on radiod CPUs (runtime sysfs + boot-time service).
 
-    Runs as part of `smd diag cpu-affinity --apply`.  Closes the gap
+    Runs as part of `smd admin diag cpu-affinity --apply`.  Closes the gap
     between sigmond's CPU-affinity surface (which already manages
     systemd AllowedCPUs drop-ins) and the cpufreq governor (which
-    `smd validate` checks via `_aff_report.capabilities.governors`).
+    `smd admin validate` checks via `_aff_report.capabilities.governors`).
 
     - Writes ``performance`` (or the operator's choice) to each
       radiod CPU's ``scaling_governor`` sysfs node for immediate effect.
@@ -3916,12 +4486,12 @@ def _apply_radiod_governor(radiod_cpus, governor='performance') -> int:
         _ok(f'cpu{cpu:2d}: governor {prev} → {governor}')
 
     # Boot-time persistence via a one-shot service.  CPU list is
-    # embedded into the unit at apply time; re-run `smd diag
+    # embedded into the unit at apply time; re-run `smd admin diag
     # cpu-affinity --apply` after editing topology.toml's
     # [cpu_affinity] radiod_cpus or radiod_governor.
     cpu_list = ' '.join(str(c) for c in sorted(radiod_cpus))
     unit_content = (
-        '# Managed by `smd diag cpu-affinity --apply`.  Sets cpufreq\n'
+        '# Managed by `smd admin diag cpu-affinity --apply`.  Sets cpufreq\n'
         '# scaling_governor on radiod CPUs at boot so the setting\n'
         '# survives reboot.  Re-run the apply verb after editing\n'
         '# /etc/sigmond/topology.toml [cpu_affinity] to refresh this\n'
@@ -4734,7 +5304,7 @@ def cmd_status(args) -> int:
             if unenforced:
                 warnings.append(
                     f'{len(unenforced)} radiod unit(s) unenforced — run '
-                    f'smd diag cpu-affinity --apply')
+                    f'smd admin diag cpu-affinity --apply')
             if foreign_count:
                 warnings.append(f'{foreign_count} foreign drop-in(s) present')
             if pinned:
@@ -4757,7 +5327,7 @@ def cmd_status(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# smd log
+# smd admin log
 # ---------------------------------------------------------------------------
 
 def cmd_log(args) -> int:
@@ -4797,7 +5367,7 @@ def cmd_log(args) -> int:
 
     # --- follow mode (requires a client name) ---
     if not client:
-        _err('smd log: specify a client name (e.g. smd log psk-recorder)')
+        _err('smd admin log: specify a client name (e.g. smd admin log psk-recorder)')
         return 1
 
     if files:
@@ -5541,7 +6111,7 @@ def cmd_list(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# smd diag
+# smd admin diag
 # ---------------------------------------------------------------------------
 
 def _netdiag_auto_refresh(verb: str) -> None:
@@ -5598,7 +6168,7 @@ def _netdiag_auto_refresh(verb: str) -> None:
                 smd_bin = sys.argv[0] if (sys.argv and
                                           os.path.isfile(sys.argv[0])) else 'smd'
                 subprocess.Popen(
-                    [smd_bin, 'diag', 'net'],
+                    [smd_bin, 'admin', 'diag', 'net'],
                     stdout=lf, stderr=lf,
                     start_new_session=True,
                     close_fds=True,
@@ -5623,7 +6193,7 @@ def _netdiag_status_line() -> None:
     cache = net_diag.load_cache()
     print('\n  network:')
     if cache is None:
-        _info('no cached diagnosis — run: smd diag net')
+        _info('no cached diagnosis — run: smd admin diag net')
         return
     report = net_diag._report_from_dict(cache['report'])
     age_min = int(cache['age_s'] / 60)
@@ -5675,7 +6245,7 @@ def cmd_diag_net(args) -> int:
     except KeyboardInterrupt:
         _warn('interrupted before classification could complete')
         return 130
-    # Explicit `smd diag net` always refreshes the cache so subsequent
+    # Explicit `smd admin diag net` always refreshes the cache so subsequent
     # fast verbs (status, list, validate) see the latest classification.
     if report.listen_root and report.classification != 'unknown':
         net_diag.save_cache(report)
@@ -5759,7 +6329,7 @@ def cmd_diag_net(args) -> int:
 
 
 def cmd_diag_drop_in(args) -> int:
-    """`smd diag drop-in <client>` — lint a single client's drop-in
+    """`smd admin diag drop-in <client>` — lint a single client's drop-in
     surface (repo present, deploy.toml parses, contract subcommands
     callable, [client_features] declarations sane, catalog/topology
     pickup, end-to-end ContractAdapter view).  Exits non-zero if any
@@ -5857,13 +6427,13 @@ def cmd_diag(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# smd completion
+# smd admin completion
 # ---------------------------------------------------------------------------
 
 _BASH_COMPLETION = r"""
 # bash completion for smd
 # Source this file or drop it in /etc/bash_completion.d/smd
-# Generate with: smd completion bash
+# Generate with: smd admin completion bash
 
 _smd_complete() {
     local cur prev words cword
@@ -5877,9 +6447,11 @@ _smd_complete() {
     # Keep alphabetical except for grouping by lifecycle/observe/configure.
     # When adding a new top-level verb, also add it here.  TODO: derive
     # this list from argparse rather than hand-maintaining it.
-    local top_cmds="add software install apply enable disable remove start stop restart reload status list log config tui environment cpu diag validate watch verifier rac ka9q-watch psk-watch wspr-watch hfdl-watch codar-watch wisdom timestd-tune-storage storage sources public-ip completion component instance"
+    local top_cmds="install apply enable disable start stop restart reload status list config tui watch bringup component admin"
+    local admin_cmds="diag validate verifier wisdom storage environment sources public-ip log rac timing radiod instance uninstall completion"
     local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web wd-rac"
     local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
+    local profiles="dasi2 base client"
 
     if [[ "$prev" == "--components" ]]; then
         COMPREPLY=($(compgen -W "$components" -- "$cur"))
@@ -5917,6 +6489,9 @@ _smd_complete() {
                 install)
                     COMPREPLY=($(compgen -W "$components --components --client-dir --dry-run --yes --topology" -- "$cur"))
                     ;;
+                bringup)
+                    COMPREPLY=($(compgen -W "$profiles --remote-radiod --with-optional --non-interactive --dry-run" -- "$cur"))
+                    ;;
                 apply)
                     COMPREPLY=($(compgen -W "--dry-run --topology" -- "$cur"))
                     ;;
@@ -5929,59 +6504,17 @@ _smd_complete() {
                 list)
                     COMPREPLY=($(compgen -W "--update --apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
                     ;;
-                log)
-                    COMPREPLY=($(compgen -W "$log_clients set-level --files --level --topology" -- "$cur"))
-                    ;;
-                diag)
-                    COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
-                    ;;
-                cpu)
-                    COMPREPLY=($(compgen -W "--apply --reapply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
-                    ;;
-                validate)
-                    COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
-                    ;;
                 config)
-                    COMPREPLY=($(compgen -W "show migrate backup restore init edit" -- "$cur"))
-                    ;;
-                storage)
-                    COMPREPLY=($(compgen -W "migrate-to-sqlite trim tune-timestd" -- "$cur"))
+                    COMPREPLY=($(compgen -W "show migrate backup restore init edit help" -- "$cur"))
                     ;;
                 component)
-                    COMPREPLY=($(compgen -W "list install update add remove enable disable" -- "$cur"))
-                    ;;
-                instance)
-                    COMPREPLY=($(compgen -W "list show add remove edit enable disable migrate" -- "$cur"))
-                    ;;
-                software)
-                    COMPREPLY=($(compgen -W "install apply" -- "$cur"))
+                    COMPREPLY=($(compgen -W "list install update add remove enable disable help" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk radiod hfdl codar ka9q uploads verifier" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk hfdl codar hf-gps-tec mag ka9q radiod uploads verifier" -- "$cur"))
                     ;;
-                verifier)
-                    COMPREPLY=($(compgen -W "report" -- "$cur"))
-                    ;;
-                rac)
-                    COMPREPLY=($(compgen -W "status start stop restart install" -- "$cur"))
-                    ;;
-                completion)
-                    COMPREPLY=($(compgen -W "bash" -- "$cur"))
-                    ;;
-                wspr-watch)
-                    COMPREPLY=($(compgen -W "-v --verbose --instance --backlog --rejected -r" -- "$cur"))
-                    ;;
-                psk-watch|hfdl-watch|codar-watch)
-                    COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
-                    ;;
-                ka9q-watch)
-                    COMPREPLY=($(compgen -W "--ka9q-python --ka9q-radio --remote --branch --no-fetch --json" -- "$cur"))
-                    ;;
-                public-ip)
-                    COMPREPLY=($(compgen -W "--no-v6 -q --quiet" -- "$cur"))
-                    ;;
-                sources)
-                    COMPREPLY=($(compgen -W "list add remove apply" -- "$cur"))
+                admin)
+                    COMPREPLY=($(compgen -W "$admin_cmds" -- "$cur"))
                     ;;
                 tui)
                     COMPREPLY=()
@@ -5990,22 +6523,12 @@ _smd_complete() {
             ;;
         *)
             case "${words[1]}" in
-                storage)
-                    case "${words[2]}" in
-                        migrate-to-sqlite)
-                            COMPREPLY=($(compgen -W "--yes" -- "$cur"))
-                            ;;
-                        trim)
-                            COMPREPLY=($(compgen -W "--max-age --db --target-db --target-table --yes" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
                 watch)
                     case "${words[2]}" in
                         wspr)
                             COMPREPLY=($(compgen -W "-v --verbose --instance --backlog --rejected -r" -- "$cur"))
                             ;;
-                        psk|hfdl|codar)
+                        psk|hfdl|codar|mag|hf-gps-tec)
                             COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
                             ;;
                         ka9q)
@@ -6013,16 +6536,6 @@ _smd_complete() {
                             ;;
                         radiod)
                             COMPREPLY=($(compgen -W "--host -n --lines --all-lines" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                software)
-                    case "${words[2]}" in
-                        install)
-                            COMPREPLY=($(compgen -W "$components --components --client-dir --dry-run --yes --force --topology" -- "$cur"))
-                            ;;
-                        apply)
-                            COMPREPLY=($(compgen -W "--dry-run --topology" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -6040,28 +6553,6 @@ _smd_complete() {
                     ;;
                 list)
                     COMPREPLY=($(compgen -W "--update --apply --catalog --fetch --components --ref --dry-run --json --topology" -- "$cur"))
-                    ;;
-                log)
-                    COMPREPLY=($(compgen -W "$log_clients set-level --files --level --topology" -- "$cur"))
-                    ;;
-                diag)
-                    case "${words[2]}" in
-                        cpu-affinity)
-                            COMPREPLY=($(compgen -W "--components --threads --apply --json --topology" -- "$cur"))
-                            ;;
-                        cpu-freq)
-                            COMPREPLY=($(compgen -W "--apply --reapply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
-                            ;;
-                        net)
-                            COMPREPLY=($(compgen -W "--interface --listen --json --topology" -- "$cur"))
-                            ;;
-                        *)
-                            COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                validate)
-                    COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
                     ;;
                 config)
                     case "${words[2]}" in
@@ -6081,30 +6572,7 @@ _smd_complete() {
                             COMPREPLY=($(compgen -W "$components radiod" -- "$cur"))
                             ;;
                         *)
-                            COMPREPLY=($(compgen -W "show migrate backup restore init edit" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                completion)
-                    case "${words[2]}" in
-                        bash)
-                            COMPREPLY=($(compgen -W "--install" -- "$cur"))
-                            ;;
-                        *)
-                            COMPREPLY=($(compgen -W "bash" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                verifier)
-                    case "${words[2]}" in
-                        report)
-                            COMPREPLY=($(compgen -W "--window --rx-call --lost --in-flight --delivered --cadence --rejected --silent-drop --suppressed --json --db" -- "$cur"))
-                            ;;
-                        rehabilitate)
-                            COMPREPLY=($(compgen -W "--db" -- "$cur"))
-                            ;;
-                        *)
-                            COMPREPLY=($(compgen -W "report rehabilitate" -- "$cur"))
+                            COMPREPLY=($(compgen -W "show migrate backup restore init edit help" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -6126,104 +6594,178 @@ _smd_complete() {
                             COMPREPLY=($(compgen -W "$components" -- "$cur"))
                             ;;
                         *)
-                            COMPREPLY=($(compgen -W "list install update add remove enable disable" -- "$cur"))
+                            COMPREPLY=($(compgen -W "list install update add remove enable disable help" -- "$cur"))
                             ;;
                     esac
                     ;;
-                instance)
+                admin)
+                    # `smd admin <subverb> ...` — deeper completion keyed on
+                    # the relocated subverb (words[2]); operand positions are
+                    # shifted one slot right vs the old top-level forms.
                     case "${words[2]}" in
-                        list)
-                            COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                        diag)
+                            case "${words[3]}" in
+                                cpu-affinity)
+                                    COMPREPLY=($(compgen -W "--components --threads --apply --json --topology" -- "$cur"))
+                                    ;;
+                                cpu-freq)
+                                    COMPREPLY=($(compgen -W "--apply --reapply --radiod-max-mhz --other-max-mhz --topology" -- "$cur"))
+                                    ;;
+                                net)
+                                    COMPREPLY=($(compgen -W "--interface --listen --json --topology" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "cpu-affinity cpu-freq net --components --topology" -- "$cur"))
+                                    ;;
+                            esac
                             ;;
-                        show|edit|enable|disable)
-                            # Position 3 = client; position 4 = reporter ID (operator-typed).
-                            if [[ $cword -eq 3 ]]; then
-                                COMPREPLY=($(compgen -W "$components" -- "$cur"))
-                            fi
+                        validate)
+                            COMPREPLY=($(compgen -W "--json --topology" -- "$cur"))
                             ;;
-                        add)
-                            if [[ $cword -eq 3 ]]; then
-                                COMPREPLY=($(compgen -W "$components" -- "$cur"))
-                            elif [[ $cword -ge 5 ]]; then
-                                COMPREPLY=($(compgen -W "--force --dry-run" -- "$cur"))
-                            fi
+                        storage)
+                            case "${words[3]}" in
+                                migrate-to-sqlite)
+                                    COMPREPLY=($(compgen -W "--yes" -- "$cur"))
+                                    ;;
+                                trim)
+                                    COMPREPLY=($(compgen -W "--max-age --db --target-db --target-table --yes --all" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "migrate-to-sqlite trim tune-timestd" -- "$cur"))
+                                    ;;
+                            esac
                             ;;
-                        remove)
-                            if [[ $cword -eq 3 ]]; then
-                                COMPREPLY=($(compgen -W "$components" -- "$cur"))
-                            elif [[ $cword -ge 5 ]]; then
-                                COMPREPLY=($(compgen -W "--purge --yes --dry-run" -- "$cur"))
-                            fi
+                        verifier)
+                            case "${words[3]}" in
+                                report)
+                                    COMPREPLY=($(compgen -W "--window --rx-call --lost --in-flight --delivered --cadence --rejected --silent-drop --suppressed --json --db --target" -- "$cur"))
+                                    ;;
+                                rehabilitate)
+                                    COMPREPLY=($(compgen -W "--db" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "report rehabilitate help" -- "$cur"))
+                                    ;;
+                            esac
                             ;;
-                        migrate)
-                            COMPREPLY=()
+                        wisdom)
+                            COMPREPLY=($(compgen -W "plan status help" -- "$cur"))
+                            ;;
+                        public-ip)
+                            COMPREPLY=($(compgen -W "--no-v6 -q --quiet" -- "$cur"))
+                            ;;
+                        rac)
+                            COMPREPLY=($(compgen -W "status start stop restart install configure reconfigure help" -- "$cur"))
+                            ;;
+                        timing)
+                            COMPREPLY=($(compgen -W "status reconcile --dry-run" -- "$cur"))
+                            ;;
+                        radiod)
+                            COMPREPLY=($(compgen -W "migrate --yes" -- "$cur"))
+                            ;;
+                        uninstall)
+                            COMPREPLY=($(compgen -W "--keep-config --wipe-data --keep-data --revert-host --keep-host --remove-users --keep-users --remove-source --keep-source --yes --dry-run" -- "$cur"))
+                            ;;
+                        completion)
+                            case "${words[3]}" in
+                                bash)
+                                    COMPREPLY=($(compgen -W "--install" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "bash" -- "$cur"))
+                                    ;;
+                            esac
+                            ;;
+                        environment)
+                            COMPREPLY=($(compgen -W "list probe describe help" -- "$cur"))
+                            ;;
+                        log)
+                            case "${words[3]}" in
+                                set-level)
+                                    # Position 4 = client; position 5 = level.
+                                    if [[ $cword -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$log_clients" -- "$cur"))
+                                    elif [[ $cword -eq 5 ]]; then
+                                        COMPREPLY=($(compgen -W "DEBUG INFO WARNING ERROR CRITICAL" -- "$cur"))
+                                    fi
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "$log_clients set-level --files --level --topology" -- "$cur"))
+                                    ;;
+                            esac
+                            ;;
+                        instance)
+                            case "${words[3]}" in
+                                list)
+                                    COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                                    ;;
+                                show|edit|enable|disable)
+                                    # Position 4 = client; position 5 = reporter ID (operator-typed).
+                                    if [[ $cword -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                                    fi
+                                    ;;
+                                add)
+                                    if [[ $cword -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                                    elif [[ $cword -ge 6 ]]; then
+                                        COMPREPLY=($(compgen -W "--force --dry-run" -- "$cur"))
+                                    fi
+                                    ;;
+                                remove)
+                                    if [[ $cword -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$components" -- "$cur"))
+                                    elif [[ $cword -ge 6 ]]; then
+                                        COMPREPLY=($(compgen -W "--purge --yes --dry-run" -- "$cur"))
+                                    fi
+                                    ;;
+                                migrate)
+                                    COMPREPLY=($(compgen -W "--yes" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "list show add remove edit enable disable migrate help" -- "$cur"))
+                                    ;;
+                            esac
+                            ;;
+                        sources)
+                            case "${words[3]}" in
+                                list)
+                                    COMPREPLY=($(compgen -W "--clients-only --inventory --keys" -- "$cur"))
+                                    ;;
+                                add|remove)
+                                    # Position 4 = client; position 5+ = source key.
+                                    if [[ $cword -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "wspr-recorder psk-recorder hfdl-recorder codar-sounder" -- "$cur"))
+                                    elif [[ $cword -ge 5 ]]; then
+                                        # Re-glue the partial colon-broken key.
+                                        local _partial="" _i
+                                        for ((_i = 5; _i <= cword; _i++)); do
+                                            _partial="${_partial}${words[_i]}"
+                                        done
+                                        local _keys
+                                        _keys=$(smd admin sources list --keys 2>/dev/null)
+                                        COMPREPLY=($(compgen -W "$_keys" -- "$_partial"))
+                                        if type -t __ltrim_colon_completions &>/dev/null; then
+                                            __ltrim_colon_completions "$_partial"
+                                        elif [[ "$_partial" == *:* ]]; then
+                                            local _strip="${_partial%:*}:"
+                                            local _j
+                                            for _j in "${!COMPREPLY[@]}"; do
+                                                COMPREPLY[_j]="${COMPREPLY[_j]#$_strip}"
+                                            done
+                                        fi
+                                    fi
+                                    ;;
+                                apply)
+                                    COMPREPLY=($(compgen -W "--dry-run" -- "$cur"))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "list add remove apply help" -- "$cur"))
+                                    ;;
+                            esac
                             ;;
                         *)
-                            COMPREPLY=($(compgen -W "list show add remove edit enable disable migrate" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                log)
-                    case "${words[2]}" in
-                        set-level)
-                            # Position 3 = client; position 4 = level.
-                            if [[ $cword -eq 3 ]]; then
-                                COMPREPLY=($(compgen -W "$log_clients" -- "$cur"))
-                            elif [[ $cword -eq 4 ]]; then
-                                COMPREPLY=($(compgen -W "DEBUG INFO WARNING ERROR CRITICAL" -- "$cur"))
-                            fi
-                            ;;
-                    esac
-                    ;;
-                sources)
-                    case "${words[2]}" in
-                        list)
-                            COMPREPLY=($(compgen -W "--clients-only --inventory --keys" -- "$cur"))
-                            ;;
-                        add|remove)
-                            # Position 3 = client; position 4+ = source key.
-                            # Static list of well-known clients (matches sources.KNOWN_CLIENTS).
-                            if [[ $cword -eq 3 ]]; then
-                                COMPREPLY=($(compgen -W "wspr-recorder psk-recorder hfdl-recorder codar-sounder" -- "$cur"))
-                            elif [[ $cword -ge 4 ]]; then
-                                # Bash's COMP_WORDBREAKS includes ':' by default,
-                                # so `radiod:bee1` arrives as three words
-                                # ("radiod" ":" "bee1") with cword=6.  Re-glue
-                                # everything past the client position into the
-                                # partial key, then strip the pre-colon prefix
-                                # from each reply so bash inserts only the
-                                # post-colon portion.
-                                local _partial="" _i
-                                for ((_i = 4; _i <= cword; _i++)); do
-                                    _partial="${_partial}${words[_i]}"
-                                done
-                                # Costs one mDNS round-trip (~1 s).  Acceptable
-                                # since the operator already typed a verb +
-                                # client and is committed to the action; cache
-                                # would help if it gets annoying.
-                                local _keys
-                                _keys=$(smd sources list --keys 2>/dev/null)
-                                COMPREPLY=($(compgen -W "$_keys" -- "$_partial"))
-                                if type -t __ltrim_colon_completions &>/dev/null; then
-                                    __ltrim_colon_completions "$_partial"
-                                elif [[ "$_partial" == *:* ]]; then
-                                    # Manual strip: drop everything up to and
-                                    # including the last colon from each reply,
-                                    # because bash will substitute starting at
-                                    # the colon (the wordbreak).
-                                    local _strip="${_partial%:*}:"
-                                    local _j
-                                    for _j in "${!COMPREPLY[@]}"; do
-                                        COMPREPLY[_j]="${COMPREPLY[_j]#$_strip}"
-                                    done
-                                fi
-                            fi
-                            ;;
-                        apply)
-                            COMPREPLY=($(compgen -W "--dry-run" -- "$cur"))
-                            ;;
-                        *)
-                            COMPREPLY=($(compgen -W "list add remove apply" -- "$cur"))
+                            COMPREPLY=($(compgen -W "$admin_cmds" -- "$cur"))
                             ;;
                     esac
                     ;;
@@ -6235,7 +6777,7 @@ _smd_complete() {
 complete -F _smd_complete smd
 
 # Short aliases for common smd subcommands.
-# Add to your shell with: source <(smd completion bash)
+# Add to your shell with: source <(smd admin completion bash)
 smdt()   { smd tui "$@"; }
 smdtui() { smd tui "$@"; }
 
@@ -6246,7 +6788,7 @@ smdtui() { smd tui "$@"; }
 # because `source <(...)` only takes effect when run in the caller's own
 # scope, which aliases don't provide.
 smdrefresh() {
-    source <(smd completion bash) && echo "smd: tab-completion refreshed"
+    source <(smd admin completion bash) && echo "smd: tab-completion refreshed"
 }
 
 # smdt / smdtui take no subcommands; just complete --topology via file completion.
@@ -6624,7 +7166,7 @@ def cmd_wisdom_plan(args) -> int:
         if len(busy) > 6:
             print(f'      … and {len(busy) - 6} more')
         _info('Run:  smd stop')
-        _info('Then re-run:  smd wisdom plan')
+        _info('Then re-run:  smd admin wisdom plan')
         return 1
 
     WISDOM_TMP.parent.mkdir(parents=True, exist_ok=True)
@@ -6693,7 +7235,7 @@ def cmd_wisdom_plan(args) -> int:
         try:
             with open(WISDOM_LOG, 'a') as logf:
                 logf.write(f'\n# {time.strftime("%Y-%m-%dT%H:%M:%S%z")} '
-                           f'— smd wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)\n')
+                           f'— smd admin wisdom plan ({len(FFT_WISDOM_PROFILES)} profiles)\n')
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, bufsize=1,
@@ -6761,7 +7303,7 @@ def cmd_wisdom_status(args) -> int:
     if not WISDOM_FILE.exists():
         _warn(f'{WISDOM_FILE} does not exist — radiod will fall back to a '
               'fast (but suboptimal) "measure"-level plan at startup')
-        _info('To generate:  smd wisdom plan   (after smd stop)')
+        _info('To generate:  smd admin wisdom plan   (after smd stop)')
         return 1
     st = WISDOM_FILE.stat()
     age_s = time.time() - st.st_mtime
@@ -6845,7 +7387,7 @@ def _sources_inventory():
     """
     if not _HAS_SIGMOND_LIB:
         return None, ('sigmond library not found; install lib/sigmond '
-                      'alongside bin/smd to use `smd sources`')
+                      'alongside bin/smd to use `smd admin sources`')
     from sigmond.environment import Environment
     from sigmond.discovery import mdns
     from sigmond import sources as _sources_mod
@@ -6880,7 +7422,7 @@ def _sources_resolve_key(token: str, inventory_rows):
     if not matches:
         return None, (
             f"no source matches {token!r}; pass a full "
-            "'<type>:<identifier>' key, or run `smd sources list` "
+            "'<type>:<identifier>' key, or run `smd admin sources list` "
             "to see what's available"
         )
     return None, (
@@ -6970,7 +7512,7 @@ def cmd_sources_add(args) -> int:
     client = args.client
     # Normalize a per-instance arg `<client>@<reporter-id>` so a slashed
     # WSPRnet reporter id (AC0G/SIGMA) is stored in its canonical `=` form
-    # (AC0G=SIGMA) — the same encoder `smd instance add` uses.  Without this
+    # (AC0G=SIGMA) — the same encoder `smd admin instance add` uses.  Without this
     # the raw '/' lands in the .sources.toml path and the write blows up.
     if '@' in client:
         from sigmond import instance as _inst
@@ -6999,7 +7541,7 @@ def cmd_sources_add(args) -> int:
         return 0
     cs.save()
     print(f'{client}: added {key} ({len(cs.selected)} source(s) total)')
-    _info('  run `smd sources apply` to render the change into the client config')
+    _info('  run `smd admin sources apply` to render the change into the client config')
     return 0
 
 
@@ -7037,7 +7579,7 @@ def cmd_sources_remove(args) -> int:
         return 0
     cs.save()
     print(f'{client}: removed {key} ({len(cs.selected)} source(s) remain)')
-    _info('  run `smd sources apply` to render the change into the client config')
+    _info('  run `smd admin sources apply` to render the change into the client config')
     return 0
 
 
@@ -7267,7 +7809,7 @@ def cmd_sources_apply(args) -> int:
         inst_config = _IP('/etc/wspr-recorder') / f'{rid}.toml'
         if not inst_config.exists():
             _info(f'  ⚠ {stem}: no per-instance config at {inst_config} — '
-                  f'run `smd instance add wspr-recorder {rid}` first')
+                  f'run `smd admin instance add wspr-recorder {rid}` first')
             continue
         changed, message = _apply_sources_to_wspr_recorder(
             sel, inventory_rows, inst_config, dry_run=dry_run)
@@ -11062,20 +11604,20 @@ def cmd_completion(args) -> int:
             dest.write_text(_BASH_COMPLETION.strip() + '\n')
             print(f'Installed to {dest}')
             print('Activate in your current session with:')
-            print('  source <(smd completion bash)')
+            print('  source <(smd admin completion bash)')
             return 0
         print(_BASH_COMPLETION.strip())
         return 0
-    print('Usage: smd completion bash [--install]')
+    print('Usage: smd admin completion bash [--install]')
     print()
     print('To activate in the current session:')
-    print('  source <(smd completion bash)')
+    print('  source <(smd admin completion bash)')
     print()
     print('To install for your user (creates the directory automatically):')
-    print('  smd completion bash --install')
+    print('  smd admin completion bash --install')
     print()
     print('To install system-wide:')
-    print('  smd completion bash | sudo tee /etc/bash_completion.d/smd >/dev/null')
+    print('  smd admin completion bash | sudo tee /etc/bash_completion.d/smd >/dev/null')
     print()
     print('The completion script also defines short aliases:')
     print('  smdt   →  smd tui')
@@ -11179,7 +11721,7 @@ def cmd_config_edit(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# smd instance — per-reporter client instance lifecycle
+# smd admin instance — per-reporter client instance lifecycle
 # (MULTI-INSTANCE-ARCHITECTURE.md §6)
 # ---------------------------------------------------------------------------
 
@@ -11264,7 +11806,7 @@ def cmd_instance_list(args) -> int:
             _info(f'no instances of {client_filter} on this host')
         else:
             _info('no per-reporter instances on this host yet '
-                  '(see `smd instance add --help`)')
+                  '(see `smd admin instance add --help`)')
         return 0
     _heading('instances')
     print(f'  {"CLIENT":<22} {"REPORTER ID":<18} '
@@ -11292,7 +11834,7 @@ def cmd_instance_show(args) -> int:
     display_rid = _display_reporter(args.reporter_id, inst)
     if i is None:
         _err(f'{args.client}@{display_rid}: no per-instance files '
-             f'(use `smd instance add` to create)')
+             f'(use `smd admin instance add` to create)')
         return 1
     _heading(f'instance: {args.client}@{display_rid}')
     print(f'  reporter ID:  {display_rid}')
@@ -11341,7 +11883,7 @@ def cmd_instance_add(args) -> int:
         return 1
     if not _check_systemd_template(client):
         _warn(f'{client}@.service systemd template is NOT installed; '
-              f'`smd instance enable` will fail until it is')
+              f'`smd admin instance enable` will fail until it is')
         _info(f'  install with: smd component install {client}')
     try:
         paths = inst.create_instance(client, reporter_id,
@@ -11361,9 +11903,9 @@ def cmd_instance_add(args) -> int:
     if not getattr(args, 'dry_run', False):
         _info('')
         _info(f'next: wire sources and edit the config, then enable:')
-        _info(f'  smd sources add {client}@{display_rid} <kind>:<id>')
-        _info(f'  smd instance edit {client} {display_rid}')
-        _info(f'  smd instance enable {client} {display_rid}')
+        _info(f'  smd admin sources add {client}@{display_rid} <kind>:<id>')
+        _info(f'  smd admin instance edit {client} {display_rid}')
+        _info(f'  smd admin instance enable {client} {display_rid}')
     return 0
 
 
@@ -11409,7 +11951,7 @@ def cmd_instance_remove(args) -> int:
     if not dry_run:
         _info('')
         _info(f'unit {i.paths.unit_name} is NOT touched; '
-              f'run `smd instance disable {args.client} {display_rid}` '
+              f'run `smd admin instance disable {args.client} {display_rid}` '
               f'separately if needed')
     return 0
 
@@ -11432,7 +11974,7 @@ def cmd_instance_enable(args) -> int:
              f'cannot enable')
         return 1
     if not paths.config.exists():
-        _err(f'{paths.config} missing — run `smd instance add` first')
+        _err(f'{paths.config} missing — run `smd admin instance add` first')
         return 1
     import subprocess
     for action in ('enable', 'start'):
@@ -11493,7 +12035,7 @@ def cmd_instance_edit(args) -> int:
         _err(str(exc))
         return 1
     if not paths.config.exists():
-        _err(f'{paths.config} missing — run `smd instance add` first')
+        _err(f'{paths.config} missing — run `smd admin instance add` first')
         return 1
     _warn('Phase-2 stub: clients have not yet been refactored to read '
           'per-instance config.  Edit the per-instance config directly:')
@@ -12475,19 +13017,450 @@ def cmd_notify(args) -> int:
     return _notify_run(conf)
 
 
+# ===========================================================================
+# secrets — provision per-site delivered credentials (smd admin secrets)
+#
+# Most station secrets generate themselves on-host (PSWS / hs-uploader SSH
+# keys), so the *delivered* surface is small: the Earthdata netrc (fleet-
+# shared) and the RAC frpc token (per-station). This command standardises
+# placement / perms / validation and supports an age-encrypted per-site
+# bundle as the default delivery channel.
+# See sigmond/docs/PROVISIONING-INPUTS.md §10.
+# ===========================================================================
+
+def _validate_earthdata(path: Path):
+    try:
+        text = path.read_text()
+    except OSError as e:
+        return False, f'unreadable ({e.__class__.__name__})'
+    if 'urs.earthdata.nasa.gov' not in text:
+        return False, "missing 'machine urs.earthdata.nasa.gov'"
+    if 'YOUR_' in text:
+        return False, 'still contains placeholder values'
+    has_login = any(l.split()[:1] == ['login'] and len(l.split()) >= 2
+                    for l in text.splitlines())
+    has_pw = any(l.split()[:1] == ['password'] and len(l.split()) >= 2
+                 for l in text.splitlines())
+    if not (has_login and has_pw):
+        return False, 'login/password incomplete'
+    return True, 'ok'
+
+
+def _validate_frpc(path: Path):
+    try:
+        text = path.read_text()
+    except OSError as e:
+        return False, f'unreadable ({e.__class__.__name__})'
+    m = re.search(r'token\s*=\s*"([^"]*)"', text)
+    if not m:
+        return False, 'no token field'
+    tok = m.group(1)
+    if not tok or 'FROM_WD_ADMIN' in tok or tok.startswith('<'):
+        return False, 'token is a placeholder'
+    return True, 'ok'
+
+
+# Registry of the few *delivered* secrets. SSH-key secrets are intentionally
+# absent — they self-generate on-host (setup-psws-keys.sh / hs-uploader).
+_SECRETS = [
+    {
+        'name': 'earthdata',
+        'dest': Path('/etc/hf-timestd/earthdata-netrc'),
+        'owner': 'timestd', 'group': 'timestd', 'mode': 0o600,
+        'scope': 'fleet',
+        'used_by': 'hf-timestd IONEX/DCB',
+        'aliases': ('earthdata-netrc', 'earthdata', 'earthdata.netrc'),
+        'placeholder': ('machine urs.earthdata.nasa.gov\n'
+                        '    login YOUR_EARTHDATA_USERNAME\n'
+                        '    password YOUR_EARTHDATA_PASSWORD\n'),
+        'validate': _validate_earthdata,
+    },
+    {
+        'name': 'rac',
+        'dest': _FRPC_CONFIG,                  # /etc/sigmond/frpc.toml
+        'owner': 'root', 'group': 'root', 'mode': 0o600,
+        'scope': 'station',
+        'used_by': 'rac (frpc reverse tunnel)',
+        'aliases': ('frpc.toml', 'rac', 'rac.toml'),
+        'placeholder': None,                   # rac/install.sh renders a template
+        'validate': _validate_frpc,
+    },
+]
+
+
+def _secrets_find(workdir: Path, entry):
+    for cand in entry['aliases']:
+        p = workdir / cand
+        if p.is_file():
+            return p
+    return None
+
+
+def _secrets_place(src_file: Path, entry):
+    dest = entry['dest']
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(src_file.read_bytes())
+    try:
+        shutil.chown(dest, entry['owner'], entry['group'])
+    except (LookupError, PermissionError) as e:
+        _warn(f"{entry['name']}: chown {entry['owner']}:{entry['group']} failed ({e})")
+    dest.chmod(entry['mode'])
+
+
+def _age_available() -> bool:
+    return shutil.which('age') is not None
+
+
+def cmd_secrets_status(args) -> int:
+    _info('Delivered secrets (SSH keys self-generate and are not shown here):')
+    for e in _SECRETS:
+        dest = e['dest']
+        label = f"{e['name']} [{e['scope']}, {e['used_by']}] -> {dest}"
+        if not dest.exists():
+            _warn(f"{label}: MISSING")
+            continue
+        mode = dest.stat().st_mode & 0o777
+        if not os.access(dest, os.R_OK):
+            _info(f"{label}: present (run as root to validate)")
+            continue
+        ok, msg = e['validate'](dest)
+        if ok and mode == e['mode']:
+            _ok(f"{label}: valid")
+        elif ok:
+            _warn(f"{label}: valid but perms {oct(mode)} (want {oct(e['mode'])})")
+        else:
+            _warn(f"{label}: {msg}")
+    return 0
+
+
+def cmd_secrets_template(args) -> int:
+    if os.geteuid() != 0:
+        _err('secrets template must run as root (writes under /etc)')
+        return 1
+    made = 0
+    for e in _SECRETS:
+        if e['placeholder'] is None:
+            _info(f"{e['name']}: get user/token/remotePort from wd-admin and fill "
+                  f"{e['dest']} (rac/install.sh renders a template)")
+            continue
+        dest = e['dest']
+        if dest.exists():
+            _info(f"{e['name']}: {dest} already exists — left unchanged")
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(e['placeholder'])
+        try:
+            shutil.chown(dest, e['owner'], e['group'])
+        except (LookupError, PermissionError):
+            pass
+        dest.chmod(e['mode'])
+        _ok(f"{e['name']}: wrote placeholder {dest} — fill in real values")
+        made += 1
+    _info(f"{made} placeholder(s) written.")
+    return 0
+
+
+def cmd_secrets_install(args) -> int:
+    if os.geteuid() != 0:
+        _err('secrets install must run as root (writes under /etc)')
+        return 1
+    import tempfile
+    src = Path(args.source)
+    if not src.exists():
+        _err(f'source not found: {src}')
+        return 1
+
+    tmp = None
+    try:
+        if src.is_file() and src.suffix == '.age':
+            if not _age_available():
+                _err('age not installed — run: sudo apt install age '
+                     '(see PROVISIONING-INPUTS.md §10)')
+                return 1
+            tmp = Path(tempfile.mkdtemp(prefix='smd-secrets-'))
+            tmp.chmod(0o700)
+            age_cmd = ['age', '--decrypt']
+            if getattr(args, 'identity', None):
+                age_cmd += ['-i', args.identity]
+            age_cmd += [str(src)]
+            ap = subprocess.Popen(age_cmd, stdout=subprocess.PIPE)
+            tar = subprocess.run(['tar', '-xf', '-', '-C', str(tmp)],
+                                 stdin=ap.stdout)
+            if ap.stdout:
+                ap.stdout.close()
+            ap.wait()
+            if ap.returncode != 0 or tar.returncode != 0:
+                _err('failed to decrypt/extract bundle '
+                     '(wrong identity/passphrase, or not an smd secrets bundle?)')
+                return 1
+            workdir = tmp
+        elif src.is_dir():
+            workdir = src
+        else:
+            _err(f'source must be a directory or a .age bundle: {src}')
+            return 1
+
+        placed = 0
+        for e in _SECRETS:
+            f = _secrets_find(workdir, e)
+            if f is None:
+                _info(f"{e['name']}: not in source — skipped")
+                continue
+            _secrets_place(f, e)
+            ok, msg = e['validate'](e['dest'])
+            if ok:
+                _ok(f"{e['name']}: installed -> {e['dest']} "
+                    f"({oct(e['mode'])} {e['owner']}:{e['group']})")
+            else:
+                _warn(f"{e['name']}: installed but validation failed: {msg}")
+            placed += 1
+        if placed == 0:
+            _warn('no known secret files found in source '
+                  '(expected e.g. earthdata-netrc, frpc.toml)')
+        else:
+            _info('Done. Verify with: smd admin secrets status')
+        return 0
+    finally:
+        if tmp and tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def cmd_secrets_bundle(args) -> int:
+    src = Path(args.source)
+    if not src.is_dir():
+        _err(f'bundle source must be a directory of secret files: {src}')
+        return 1
+    if not _age_available():
+        _err('age not installed — run: sudo apt install age')
+        return 1
+    if not args.recipients_file and not args.passphrase:
+        _err('specify -R/--recipients-file FILE or -p/--passphrase')
+        return 1
+    files = []
+    for e in _SECRETS:
+        f = _secrets_find(src, e)
+        if f is not None:
+            files.append(f.name)
+    if not files:
+        _err('no known secret files in source '
+             '(expected e.g. earthdata-netrc, frpc.toml)')
+        return 1
+    out = Path(args.out)
+    age_enc = ['age', '--encrypt']
+    if args.recipients_file:
+        age_enc += ['-R', args.recipients_file]
+    else:
+        age_enc += ['--passphrase']
+    age_enc += ['-o', str(out)]
+    tarp = subprocess.Popen(['tar', '-cf', '-', '-C', str(src)] + files,
+                            stdout=subprocess.PIPE)
+    enc = subprocess.run(age_enc, stdin=tarp.stdout)
+    if tarp.stdout:
+        tarp.stdout.close()
+    tarp.wait()
+    if tarp.returncode != 0 or enc.returncode != 0:
+        _err('bundle creation failed')
+        return 1
+    _ok(f'wrote {out} containing: {", ".join(files)}')
+    _info(f'Deliver it, then on the host: sudo smd admin secrets install {out.name}')
+    return 0
+
+
+# ===========================================================================
+# personalize — first-boot re-identification for a cloned golden image
+#
+# A DASI2 golden image is captured from a reference host; each clone must become
+# its own host on first boot. This orchestrates the safe + (opt-in) destructive
+# steps and points at the human ones. Plan-first; --yes executes (self-elevates).
+# See docs/PROVISIONING-INPUTS.md §9.
+# ===========================================================================
+
+def _run_smd(*argv) -> int:
+    """Invoke another smd verb in a child process (same interpreter/script)."""
+    return subprocess.run([sys.executable, str(_SCRIPT), *argv]).returncode
+
+
+def _patch_etc_hosts(new_host: str) -> None:
+    """Ensure /etc/hosts has a 127.0.1.1 <new_host> line (Debian convention)."""
+    p = Path('/etc/hosts')
+    try:
+        lines = p.read_text().splitlines()
+    except OSError:
+        return
+    out, found = [], False
+    for line in lines:
+        if line.split()[:1] == ['127.0.1.1']:
+            out.append(f'127.0.1.1\t{new_host}')
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        out.append(f'127.0.1.1\t{new_host}')
+    try:
+        p.write_text('\n'.join(out) + '\n')
+    except OSError as e:
+        _warn(f'could not update /etc/hosts: {e}')
+
+
+def cmd_personalize(args) -> int:
+    import datetime as _dt
+    import socket as _sock
+
+    cur_host = _sock.gethostname().split('.')[0]
+    target_host = (getattr(args, 'hostname', None) or '').strip()
+
+    # site-profile (for hostname fallback + whether render is possible)
+    sp_path = Path('/etc/sigmond/site-profile.toml')
+    sp_present = sp_path.is_file()
+    if not target_host and sp_present:
+        try:
+            from sigmond.site_profile import load_site_profile
+            sp = load_site_profile(sp_path)
+            if sp and sp.hostname:
+                target_host = sp.hostname
+        except Exception:
+            pass
+
+    reset_identity = bool(getattr(args, 'reset_identity', False))
+    will_execute = bool(getattr(args, 'yes', False))
+    force = bool(getattr(args, 'force', False))
+    sentinel = Path('/etc/sigmond/.personalized')
+    already = sentinel.is_file()
+
+    _heading('personalize (first-boot re-identification)')
+    if already and not force:
+        _info(f'note: this host was already personalized ({sentinel} exists).')
+        _info('      identity-reset steps are skipped unless you pass --force.')
+    print()
+    print('  plan:')
+
+    # 1. hostname
+    if target_host and target_host != cur_host:
+        _info(f'  • hostname: {cur_host} → {target_host}  (radiod mDNS names follow the hostname)')
+    elif target_host:
+        _info(f'  • hostname: keep {cur_host} (already matches)')
+    else:
+        _info(f'  • hostname: keep {cur_host} (pass --hostname or set [host].hostname in site-profile)')
+
+    # 2. identity reset (opt-in; clone-only)
+    do_identity = reset_identity and (not already or force)
+    if reset_identity and already and not force:
+        _info('  • identity reset: skipped (already personalized; use --force to repeat)')
+    elif reset_identity:
+        _info('  • identity reset: regenerate /etc/machine-id + SSH host keys  (clone-only)')
+    else:
+        _info('  • identity reset: NOT requested — pass --reset-identity on a fresh clone')
+        _info('      (regenerates machine-id + SSH host keys so clones are distinct)')
+
+    # 3. coordination render from site-profile
+    if sp_present:
+        _info('  • config: render coordination.toml/.env from site-profile.toml')
+    else:
+        _info('  • config: site-profile.toml absent → scaffold it (then edit + re-run)')
+
+    # 4/5 informational
+    _info('  • secrets: check delivered secrets (smd admin secrets status)')
+    _info('  • validate: cross-client checks (smd admin validate)')
+
+    if not will_execute:
+        print()
+        _info('DRY RUN — nothing changed. Re-run with --yes to execute '
+              '(smd self-elevates; no sudo needed).')
+        return 0
+
+    if _need_root('admin personalize'):
+        return 1
+
+    print()
+    _info('executing …')
+
+    # 1. hostname
+    if target_host and target_host != cur_host:
+        rc = subprocess.run(['hostnamectl', 'set-hostname', target_host]).returncode
+        if rc == 0:
+            _patch_etc_hosts(target_host)
+            _ok(f'hostname set to {target_host}')
+            _warn('radiod instance/mDNS names derive from the hostname — '
+                  're-run `smd config init radiod` / restart radiod if it was already configured')
+        else:
+            _warn('hostnamectl failed — hostname unchanged')
+
+    # 2. identity reset
+    if do_identity:
+        for f in ('/etc/machine-id', '/var/lib/dbus/machine-id'):
+            try:
+                Path(f).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                _warn(f'could not remove {f}: {e}')
+        subprocess.run(['systemd-machine-id-setup'])
+        if shutil.which('dbus-uuidgen'):
+            subprocess.run(['dbus-uuidgen', '--ensure'])
+        _ok('regenerated /etc/machine-id')
+        for k in Path('/etc/ssh').glob('ssh_host_*'):
+            try:
+                k.unlink()
+            except OSError:
+                pass
+        subprocess.run(['ssh-keygen', '-A'])
+        _ok('regenerated SSH host keys (restart sshd or reboot to apply)')
+
+    # 3. config render (or scaffold)
+    if sp_present:
+        if _run_smd('config', 'render') == 0:
+            _ok('rendered coordination from site-profile.toml')
+        else:
+            _warn('config render reported an issue — check site-profile.toml')
+    else:
+        _run_smd('config', 'render', '--init')
+        _warn(f'scaffolded {sp_path} — edit it, then re-run `smd admin personalize --yes`')
+
+    # 4. secrets status (informational)
+    print()
+    _info('delivered secrets:')
+    _run_smd('admin', 'secrets', 'status')
+
+    # 5. validate (informational)
+    print()
+    _info('validation:')
+    _run_smd('admin', 'validate')
+
+    # sentinel
+    try:
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        stamp = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec='seconds')
+        sentinel.write_text(f'personalized_at={stamp}\nhostname={target_host or cur_host}\n')
+    except OSError as e:
+        _warn(f'could not write {sentinel}: {e}')
+
+    # remaining human steps
+    print()
+    _heading('remaining manual steps')
+    _info('• install per-site secrets if MISSING above:  sudo smd admin secrets install <bundle.age>')
+    _info('• register the PSWS SFTP public key in the portal (if this is a new key)')
+    _info('• regenerate FFT wisdom for this CPU (slow):  see `smd admin wisdom`')
+    _info('• apply host tuning (isolcpus/grub) and reboot if changed')
+    if do_identity:
+        _info('• reboot (or restart sshd) so the new SSH host keys take effect')
+    print()
+    _ok('personalize complete')
+    return 0
+
+
 def main() -> int:
-    # v2 canonical `smd log set-level [<client>] <level>` — pre-argparse
+    # v2 canonical `smd admin log set-level [<client>] <level>` — pre-argparse
     # intercept because argparse can't cleanly mix a sub-verb with the
-    # legacy positional-client shape (`smd log [<client>]`), which must
+    # legacy positional-client shape (`smd admin log [<client>]`), which must
     # keep working.  Routes the same write semantics as the legacy
-    # `smd log [<client>] --level <level>` path.
+    # `smd admin log [<client>] --level <level>` path.
     # Narrow intercept: only matches when `log` is the FIRST positional
     # (no `--topology` etc. before it).  Operators needing a topology
     # override should use the legacy `log <client> --level X` shape
     # during the deprecation window.
     # Two argv shapes:
-    #   smd log set-level <level>            — global CLIENT_LOG_LEVEL default
-    #   smd log set-level <client> <level>   — per-client override + SIGHUP
+    #   smd admin log set-level <level>            — global CLIENT_LOG_LEVEL default
+    #   smd admin log set-level <client> <level>   — per-client override + SIGHUP
     if len(sys.argv) >= 3 and sys.argv[1] == 'log' and sys.argv[2] == 'set-level':
         if len(sys.argv) == 4:
             return cmd_log(argparse.Namespace(
@@ -12505,7 +13478,7 @@ def main() -> int:
                 files=False,
                 topology=None,
             ))
-        print('smd log set-level: requires <level> (global default) '
+        print('smd admin log set-level: requires <level> (global default) '
               'or <client> <level> (per-client)',
               file=sys.stderr)
         return 2
@@ -12531,10 +13504,6 @@ def main() -> int:
               Operator (daily, read-mostly):
                 status     service health snapshot
                 watch      live tail (wspr | psk | hfdl | codar | ka9q | uploads | verifier)
-                log        tail journal or file logs
-                           (`log set-level <client> <lvl>` to mutate)
-                validate   cross-client harmonization checks
-                public-ip  external IP probe
                 tui        launch interactive TUI
 
               Operator (mutating — needs sudo):
@@ -12543,24 +13512,19 @@ def main() -> int:
                 enable / disable                  toggle component in topology
 
               Installer / maintenance:
+                install    install and configure components
+                list       per-component status (lifecycle + git + version policy)
                 component  catalog (list | install | update | add | remove | enable | disable)
-                instance   per-reporter client instance lifecycle
-                           (list | show | add | remove | edit | enable | disable | migrate)
                 config     show / migrate / init / edit per-client config
-                sources    per-client sensor feed selection (radiod / KiwiSDR / mag / vlf)
-                environment    declared vs observed network peers (list | probe | describe)
-                wisdom     FFTW3 wisdom planner (plan | status)
-                storage    sink backend (migrate-to-sqlite | trim | tune-timestd)
+                bringup    guided station bring-up from a catalog profile
 
-              Diagnostics / debug:
-                diag       cpu-affinity | cpu-freq | net
-                verifier   wsprnet upload audit (report | rehabilitate)
-                rac        wd-rac tunnel lifecycle (status | start | stop | restart | install)
+              Diagnostics & maintenance (under `admin`):
+                admin diag | validate | verifier | wisdom | storage |
+                      environment | sources | public-ip | log | rac |
+                      timing | radiod | instance | uninstall | completion
 
-              Meta:
-                completion bash    emit bash tab-completion script
-
-            Run  smd <verb> --help  for verb-specific options.
+            Run  smd <verb> --help  (or  smd admin <verb> --help)  for
+            verb-specific options.
             Verbs deprecated in v2 still work but emit a warning naming
             their replacement; see CLI-V2-SPEC.md §5 for the full list.
         '''),
@@ -12569,9 +13533,14 @@ def main() -> int:
                         help=f'topology file (default: {TOPOLOGY_PATH})')
     sub = parser.add_subparsers(dest='command')
 
-    # add — clone (or pull) a component repo into /opt/git/sigmond/<name>/
-    p = sub.add_parser('add', help='clone a component repo (run smd install + enable to bring it online)')
-    p.add_argument('url', help='git URL of the component repo (e.g. git@github.com:owner/foo.git)')
+    # admin — umbrella for diagnostic / maintenance / occasional verbs, kept
+    # off the small daily top-level surface.  Each subcommand is a relocated
+    # former top-level verb and keeps its own sub-subparsers unchanged.
+    p_admin = sub.add_parser('admin',
+        help='diagnostics & maintenance (diag | validate | verifier | wisdom | '
+             'storage | environment | sources | public-ip | log | rac | timing | '
+             'radiod | instance | uninstall | completion)')
+    admin_sub = p_admin.add_subparsers(dest='admin_command')
 
     # enable — set [component.<name>].enabled = true in topology.toml
     p = sub.add_parser('enable', help='enable component(s) in /etc/sigmond/topology.toml')
@@ -12581,29 +13550,9 @@ def main() -> int:
     p = sub.add_parser('disable', help='disable component(s) and stop their units')
     p.add_argument('names', nargs='+', help='one or more component names')
 
-    # remove — delete the [component.<name>] section AND stop units;
-    # `--purge` (or any deprecated name) escalates to a full clean
-    p = sub.add_parser(
-        'remove',
-        help='remove component (default: topology section + stop units; '
-             '--purge or deprecated names: full clean)',
-    )
-    p.add_argument('names', nargs='+', help='one or more component names')
-    p.add_argument('--purge', action='store_true',
-                   help='full clean: stop+disable units, rm source / venv / '
-                        '/etc/<name>/.  Implied for names in the deprecation list.')
-    p.add_argument('--force', '-f', action='store_true',
-                   help='allow --purge against a name not in the deprecation list')
-    p.add_argument('--yes', '-y', action='store_true',
-                   help='skip the interactive confirmation prompt')
-    p.add_argument('--dry-run', action='store_true',
-                   help='with --purge: show the plan without making changes')
-
-    # install + apply share their option set between the top-level form
-    # (`smd install`, `smd apply` — kept for muscle memory) and the
-    # grouped form (`smd software install`, `smd software apply` — the
-    # preferred form going forward; "software" reads as a noun verb-pair
-    # the way operators already think about it).
+    # install + apply share their option set, defined once here and
+    # reused by the top-level `smd install` / `smd apply` and the
+    # `smd component install` form.
     def _add_install_args(p):
         p.add_argument('client', nargs='?', default=None,
                        help='specific client to install from catalog (e.g. psk-recorder)')
@@ -12625,35 +13574,49 @@ def main() -> int:
         p.add_argument('--dry-run', action='store_true')
 
     p_bringup = sub.add_parser(
-        'bringup', help='guided station bring-up from a catalog profile')
-    p_bringup.add_argument('--profile', required=True, metavar='NAME',
-                           help='catalog [profile.<name>] to bring up (e.g. dasi2)')
+        'bringup', help='guided station bring-up (default: the canonical `dasi2` station)')
+    p_bringup.add_argument('profile', nargs='?', default=None, metavar='PROFILE',
+                           help='catalog [profile.<name>] to bring up '
+                                '(default: dasi2 — local radiod + GRAPE + WSPR + PSK + '
+                                'magnetometer; e.g. base or client)')
+    p_bringup.add_argument('--profile', dest='profile_flag', metavar='NAME',
+                           help=argparse.SUPPRESS)   # back-compat alias for the positional
     p_bringup.add_argument('--remote-radiod', metavar='STATUS_DNS', dest='remote_radiod',
                            help='bind a remote radiod by status DNS instead of installing '
                                 'one locally (skips the radiod stack + FFT wisdom)')
     p_bringup.add_argument('--with-optional', action='store_true', dest='with_optional',
                            help='also install the profile optional add-ons (e.g. ka9q-web)')
     p_bringup.add_argument('--non-interactive', action='store_true', dest='non_interactive',
-                           help='drive each client config interview non-interactively, applying the §14 commons defaults (unattended bring-up)')
+                           help='also run the radiod config non-interactively (fully unattended). '
+                                'Client config interviews are already non-interactive by default — '
+                                'their wizards can\'t run inside bring-up\'s nested terminal; sigmond '
+                                'supplies callsign/grid/radiod via the env and you fine-tune later '
+                                'with `smd config edit <client>`')
+    p_bringup.add_argument('--reconfigure', action='store_true',
+                           help='re-run config init even for already-configured clients (default: skip them — bringup is idempotent and preserves existing config)')
+    # Station identity — the operant id is the REPORTER id (common to WSPR +
+    # PSK), NOT the callsign (which is an optional ham-operator id).  GRAPE
+    # (hf-timestd) and the magnetometer upload under their own PSWS station ids.
+    # Seeded into coordination.toml [host] so STATION_CALL/STATION_GRID reach
+    # every client (radiod / hf-timestd / wspr / psk); reporter id names the
+    # per-reporter recorder instances.
+    p_bringup.add_argument('--reporter', metavar='ID', dest='reporter',
+                           help='reporter id for WSPR/PSK (e.g. AC0G/S) — the operant '
+                                'station identifier; names the wspr/psk instances')
+    p_bringup.add_argument('--grid', metavar='LOCATOR', dest='grid',
+                           help='Maidenhead grid square (e.g. EM38ww) — station location')
+    p_bringup.add_argument('--callsign', metavar='CALL', dest='callsign',
+                           help='amateur radio callsign (optional; hams only) — recorded '
+                                'as the host identity in coordination.toml')
+    p_bringup.add_argument('--psws-station-id', metavar='ID', dest='psws_station_id',
+                           help='PSWS station id for GRAPE/hf-timestd uploads (e.g. S000171; '
+                                'optional — leave unset to configure PSWS upload later)')
     p_bringup.add_argument('--dry-run', action='store_true',
                            help='print the staged plan without running it')
 
     _add_install_args(sub.add_parser(
-        'install', help='install and configure components '
-                       '(alias for `smd software install`)'))
-    _add_apply_args(sub.add_parser(
-        'apply', help='reconcile services with current config '
-                      '(alias for `smd software apply`)'))
-
-    # software — grouped parent for the install/apply pair.  Both
-    # subverbs accept the exact same flags as the top-level forms.
-    p_software = sub.add_parser(
-        'software',
-        help='install or reconcile sigmond-managed software components')
-    software_sub = p_software.add_subparsers(dest='software_command')
-    _add_install_args(software_sub.add_parser(
         'install', help='install and configure components'))
-    _add_apply_args(software_sub.add_parser(
+    _add_apply_args(sub.add_parser(
         'apply', help='reconcile services with current config'))
 
     # component — v2 canonical namespace for catalog operations.
@@ -12665,6 +13628,7 @@ def main() -> int:
         help='catalog operations (v2 canonical namespace; '
              'list / install / update / add / remove / enable / disable)')
     component_sub = p_component.add_subparsers(dest='component_command')
+    component_sub.add_parser('help', help='show this help')
 
     p_c_list = component_sub.add_parser(
         'list',
@@ -12730,11 +13694,12 @@ def main() -> int:
 
     # instance — v2 per-reporter client instances
     # (MULTI-INSTANCE-ARCHITECTURE.md §6)
-    p_instance = sub.add_parser(
+    p_instance = admin_sub.add_parser(
         'instance',
         help='per-reporter client instance lifecycle '
              '(list / show / add / remove / edit / enable / disable / migrate)')
     instance_sub = p_instance.add_subparsers(dest='instance_command')
+    instance_sub.add_parser('help', help='show this help')
 
     p_i_list = instance_sub.add_parser(
         'list',
@@ -12802,8 +13767,8 @@ def main() -> int:
         help='actually perform the migration (requires root); '
              'without this, only the candidate list is printed')
 
-    # smd radiod — RADIOD-IDENTIFICATION.md §6 Phase 5
-    p_radiod = sub.add_parser(
+    # smd admin radiod — RADIOD-IDENTIFICATION.md §6 Phase 5
+    p_radiod = admin_sub.add_parser(
         'radiod',
         help='radiod identification / canonical-naming operations '
              '(see docs/RADIOD-IDENTIFICATION.md)')
@@ -12886,7 +13851,7 @@ def main() -> int:
                    help='emit machine-readable JSON')
 
     # log
-    p = sub.add_parser('log', help='view logs or set log level for a client')
+    p = admin_sub.add_parser('log', help='view logs or set log level for a client')
     p.add_argument('client', nargs='?', default=None,
                    help='client name (e.g. psk-recorder, hf-timestd)')
     p.add_argument('--files', action='store_true',
@@ -12895,7 +13860,7 @@ def main() -> int:
                    help='set log level (DEBUG/INFO/WARNING/ERROR/CRITICAL) in coordination.env + SIGHUP')
 
     # wisdom — FFTW3 wisdom-file planner
-    p_wisdom = sub.add_parser('wisdom',
+    p_wisdom = admin_sub.add_parser('wisdom',
                               help='FFTW3 wisdom-file planner (radiod uses /etc/fftw/wisdomf)')
     wisdom_sub = p_wisdom.add_subparsers(dest='wisdom_command')
 
@@ -12905,10 +13870,13 @@ def main() -> int:
                    help='leave the result at /etc/fftw/wisdomf.new without renaming over wisdomf')
 
     p = wisdom_sub.add_parser('status',
-                              help='show whether /etc/fftw/wisdomf exists and how old it is')
+                              help='show whether /etc/fftw/wisdomf exists and how old it is '
+                                   '(default for bare `smd admin wisdom`)')
+
+    wisdom_sub.add_parser('help', help='show this help')
 
     # diag  (with its own sub-commands)
-    p_diag = sub.add_parser('diag', help='run cross-component diagnostics')
+    p_diag = admin_sub.add_parser('diag', help='run cross-component diagnostics')
     p_diag.add_argument('--components', metavar='C1,C2')
     diag_sub = p_diag.add_subparsers(dest='diag_command')
 
@@ -12943,57 +13911,6 @@ def main() -> int:
     p.add_argument('--other-max-mhz', type=int, metavar='MHZ',
                    help='override other CPU max frequency (default: from topology.toml or 1400)')
 
-    # `smd cpu` — short alias for `smd diag cpu-freq`.  When running in a
-    # Proxmox VM, fetches live per-pCPU freqs from the host via the same
-    # SSH path install.sh used for grub edits.  No sub-command needed: it
-    # just shows the live table.
-    p_cpu = sub.add_parser(
-        'cpu',
-        help='show + manage per-CPU frequency caps (live data via SSH on Proxmox VMs)',
-        description=(
-            'Show per-CPU frequencies and apply the radiod/worker freq cap '
-            'policy.  By default just prints the live table: cur/max/hw_max '
-            'MHz per CPU + governor.  On a Proxmox VM the live data comes '
-            'from the host over SSH (the VM kernel cannot see real freqs).  '
-            'On bare metal it reads /sys/devices/system/cpu/cpu*/cpufreq.'
-        ),
-        epilog=(
-            'Examples:\n'
-            '  smd cpu                  # show live table (no changes)\n'
-            '  smd cpu --apply     # bare-metal: write the caps to /sys\n'
-            '  smd cpu --reapply   # VM: re-run the host hookscript\n'
-            '\n'
-            'Policy comes from /etc/sigmond/topology.toml [cpu_freq]:\n'
-            '  radiod_max_mhz (default 3200)  applied to CPUs running radiod\n'
-            '  other_max_mhz  (default 1400)  applied to every other CPU\n'
-            'Override per-invocation with --radiod-max-mhz / --other-max-mhz.\n'
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p_cpu.add_argument(
-        '--apply', action='store_true',
-        help=('BARE-METAL ONLY: write the policy caps to '
-              '/sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq.  '
-              'No effect inside a Proxmox VM (the VM does not own the '
-              'real CPU policy — use --reapply there instead).  '
-              'Requires root.'))
-    p_cpu.add_argument(
-        '--reapply', action='store_true',
-        help=('PROXMOX VM ONLY: SSH to the host and re-execute the '
-              'cpu-pin hookscript (/var/lib/vz/snippets/cpu-pin-<VMID>.sh).  '
-              'That rewrites scaling_max_freq for every pinned pCPU AND '
-              're-pins KVM vCPU threads — the same operation the hookscript '
-              'performs at VM start.  Use this when host-side tuned or a '
-              'host reboot has reset the caps; avoids bouncing the VM.'))
-    p_cpu.add_argument(
-        '--radiod-max-mhz', type=int, metavar='MHZ',
-        help='override radiod CPU max frequency for this invocation '
-             '(default: topology.toml cpu_freq.radiod_max_mhz, else 3200)')
-    p_cpu.add_argument(
-        '--other-max-mhz', type=int, metavar='MHZ',
-        help='override other CPU max frequency for this invocation '
-             '(default: topology.toml cpu_freq.other_max_mhz, else 1400)')
-
     p = diag_sub.add_parser('net',
                              help='classify network for multi-host radiod (IGMP, multicast)')
     p.add_argument('--interface', metavar='IFACE',
@@ -13017,8 +13934,8 @@ def main() -> int:
         ),
         epilog=(
             'Examples:\n'
-            '  smd diag drop-in psk-recorder\n'
-            '  smd diag drop-in your-new-client\n'
+            '  smd admin diag drop-in psk-recorder\n'
+            '  smd admin diag drop-in your-new-client\n'
             '\n'
             'See docs/ADD-A-CLIENT.md for the full checklist.\n'
         ),
@@ -13028,7 +13945,7 @@ def main() -> int:
                       help='client name (catalog key, e.g. psk-recorder)')
 
     # public-ip — quick outbound-IP lookup
-    p_pip = sub.add_parser(
+    p_pip = admin_sub.add_parser(
         'public-ip',
         help='show this host\'s outbound public IP (IPv4 + IPv6)',
         description=(
@@ -13043,10 +13960,10 @@ def main() -> int:
                        help='skip IPv6 probe (default: try both)')
     p_pip.add_argument('-q', '--quiet', action='store_true',
                        help='print only the IP(s) on stdout, no decorations '
-                            '(scriptable: `MY_IP=$(smd public-ip -q --no-v6)`)')
+                            '(scriptable: `MY_IP=$(smd admin public-ip -q --no-v6)`)')
 
     # sources — per-client SDR source selection (multi-RX888 plan, phase 2)
-    p_sources = sub.add_parser(
+    p_sources = admin_sub.add_parser(
         'sources',
         help='select which SDR sources each client (wspr-recorder, '
              'psk-recorder, …) consumes from',
@@ -13059,6 +13976,7 @@ def main() -> int:
         ),
     )
     sources_sub = p_sources.add_subparsers(dest='sources_command')
+    sources_sub.add_parser('help', help='show this help')
     p_src_list = sources_sub.add_parser(
         'list',
         help='show current selections and discovered inventory',
@@ -13095,18 +14013,49 @@ def main() -> int:
     )
 
     # completion
-    p_completion = sub.add_parser('completion', help='emit shell tab-completion script')
+    p_completion = admin_sub.add_parser('completion', help='emit shell tab-completion script')
     completion_sub = p_completion.add_subparsers(dest='completion_command')
     p_bash = completion_sub.add_parser('bash', help='emit bash completion script (source or install)')
     p_bash.add_argument('--install', action='store_true',
                         help='install to ~/.local/share/bash-completion/completions/smd (creates dir)')
 
     # validate (Phase 1)
-    p = sub.add_parser('validate',
+    p = admin_sub.add_parser('validate',
                        help='run cross-client harmonization rules (read-only)')
     p.add_argument('--json', action='store_true',
                    help='emit machine-readable JSON')
-    p_timing = sub.add_parser('timing',
+
+    # secrets — install/validate the few *delivered* per-site secrets
+    # (Earthdata netrc, RAC token). SSH-key secrets self-generate on-host and
+    # are not handled here. See PROVISIONING-INPUTS.md §10.
+    p_secrets = admin_sub.add_parser('secrets',
+        help='install/validate delivered per-site secrets (Earthdata netrc, RAC token)',
+        description=('Standardises placement + perms + validation of the few '
+                     'delivered station secrets; default delivery channel is an '
+                     'age-encrypted per-site bundle. SSH-key secrets generate '
+                     'on-host and are not handled here.'))
+    secrets_sub = p_secrets.add_subparsers(dest='secrets_command')
+    secrets_sub.add_parser('help', help='show this help')
+    secrets_sub.add_parser('status',
+        help='show presence / perms / validity of delivered secrets (no contents)')
+    secrets_sub.add_parser('template',
+        help='write placeholder secret files at canonical paths (root)')
+    p_sec_install = secrets_sub.add_parser('install',
+        help='install secrets from a directory or an age bundle (root)')
+    p_sec_install.add_argument('source',
+        help='directory of secret files, or a .age bundle')
+    p_sec_install.add_argument('-i', '--identity',
+        help='age identity file (for .age bundles; omit to be prompted for a passphrase)')
+    p_sec_bundle = secrets_sub.add_parser('bundle',
+        help='create an age-encrypted secrets bundle from a directory')
+    p_sec_bundle.add_argument('source', help='directory containing the secret files')
+    p_sec_bundle.add_argument('-o', '--out', required=True, help='output .age bundle path')
+    p_sec_bundle.add_argument('-R', '--recipients-file',
+        help='age recipients file (public keys) to encrypt to')
+    p_sec_bundle.add_argument('-p', '--passphrase', action='store_true',
+        help='encrypt with a passphrase instead of recipient keys')
+
+    p_timing = admin_sub.add_parser('timing',
                               help='timing-chain reconciler (GPSDO/gpsd/chrony/hf-timestd)')
     p_timing.add_argument('timing_cmd', nargs='?', choices=['status', 'reconcile'],
                           default='status',
@@ -13114,7 +14063,7 @@ def main() -> int:
     p_timing.add_argument('--dry-run', action='store_true',
                           help='reconcile: show the actions without applying them')
 
-    p_uninstall = sub.add_parser('uninstall',
+    p_uninstall = admin_sub.add_parser('uninstall',
         help='tear down the whole sigmond install (plan-first; --yes to execute)')
     p_uninstall.add_argument('--keep-config', action='store_true',
         help='preserve /etc config + /var/lib data + source checkouts + users')
@@ -13129,21 +14078,26 @@ def main() -> int:
     p_uninstall.add_argument('--yes', action='store_true', help='execute (default: plan only)')
     p_uninstall.add_argument('--dry-run', action='store_true', help='print plan and exit')
 
-    # psk-watch — live tail of psk-recorder's PSK Reporter upload activity
-    p_tts = sub.add_parser('timestd-tune-storage',
-                           help='size hf-timestd retention policy to local '
-                                'disk (writes timestd-prune drop-ins)')
-    p_tts.add_argument('--apply', action='store_true',
-                       help='write the drop-ins (default: print recommendation only)')
+    # personalize — first-boot re-identification for a cloned golden image
+    p_personalize = admin_sub.add_parser('personalize',
+        help='first-boot re-identification of a cloned image (hostname, identity, '
+             'config render, secrets/validate); plan-first, --yes to execute')
+    p_personalize.add_argument('--hostname',
+        help='new hostname for this clone (else site-profile [host].hostname / keep current)')
+    p_personalize.add_argument('--reset-identity', action='store_true',
+        help='regenerate /etc/machine-id + SSH host keys (clone-only; destructive)')
+    p_personalize.add_argument('--yes', action='store_true', help='execute (default: plan only)')
+    p_personalize.add_argument('--force', action='store_true',
+        help='repeat identity-reset even if already personalized')
 
     # storage — local sink backend management (SQLite is now the default;
     # this verb removes leftover ClickHouse installs on migrated hosts).
-    # smd verifier report — windowed audit of "uploaded but never
+    # smd admin verifier report — windowed audit of "uploaded but never
     # appeared in wspr.rx" cohort.  Source data lives in
     # ``/var/lib/sigmond/sink.db``'s ``wsprnet_audit`` +
     # ``wsprnet_audit_batch`` tables, populated by wspr-recorder when
     # ``WSPRNET_AUDIT=1`` is set in its env file.
-    p_verifier = sub.add_parser(
+    p_verifier = admin_sub.add_parser(
         'verifier',
         help='report on wsprnet upload audit (uploaded → verified '
              'in wspr.rx → lost / dropped)',
@@ -13202,7 +14156,7 @@ def main() -> int:
         help='list callsigns the negative cache has marked as '
              'consistently-rejected by wsprnet — these are filtered '
              'out of hashtable.txt / fst4w_calls.txt automatically. '
-             'Use `smd verifier rehabilitate <rx_call> <call>` to '
+             'Use `smd admin verifier rehabilitate <rx_call> <call>` to '
              'undo a suppression manually.',
     )
     p_v_report.add_argument(
@@ -13270,10 +14224,14 @@ def main() -> int:
         help='sink.db path (default /var/lib/sigmond/sink.db)',
     )
 
-    p_rac = sub.add_parser(
+    verifier_sub.add_parser('help', help='show this help')
+
+    p_rac = admin_sub.add_parser(
         'rac',
-        help='wd-rac (frpc) remote-access tunnel lifecycle '
-             '(status | start | stop | restart)',
+        help='wd-rac (frpc) remote-access tunnel — bare `smd admin rac` is '
+             'state-aware (installs/configures/shows status); also: '
+             'status | configure | reconfigure | install | start | stop | '
+             'restart',
     )
     rac_sub = p_rac.add_subparsers(dest='rac_command')
     rac_sub.add_parser(
@@ -13290,26 +14248,48 @@ def main() -> int:
     rac_sub.add_parser(
         'restart', help='restart wd-rac.service (elevates automatically)',
     )
-    p_rac_install = rac_sub.add_parser(
+    rac_sub.add_parser('help', help='show this help')
+    def _add_rac_provision_args(p):
+        p.add_argument(
+            'rac_number', nargs='?', type=int, default=None, metavar='NUMBER',
+            help='RAC number assigned by the administrator (sets the ssh '
+                 'tunnel port = 35800 + NUMBER); prompted first if omitted',
+        )
+        p.add_argument(
+            '--id', dest='rac_id', metavar='ID', default=None,
+            help='RAC ID (default: detected receiver id, else this host '
+                 'name); only prompted when not already configured',
+        )
+        p.add_argument(
+            '--dry-run', action='store_true',
+            help='show what would be done without making changes',
+        )
+        p.add_argument(
+            '--yes', '-y', action='store_true',
+            help='accept defaults, no interactive prompts',
+        )
+        p.add_argument(
+            '--force', '-f', action='store_true',
+            help='reinstall even if frpc appears current',
+        )
+
+    _add_rac_provision_args(rac_sub.add_parser(
         'install',
         help='provision the tunnel (frpc binary + frpc.toml + keypair + '
              'gateway registration + unit) — alias for '
              '`smd install --components wd-rac`',
-    )
-    p_rac_install.add_argument(
-        '--dry-run', action='store_true',
-        help='show what would be done without making changes',
-    )
-    p_rac_install.add_argument(
-        '--yes', '-y', action='store_true',
-        help='accept defaults, no interactive prompts',
-    )
-    p_rac_install.add_argument(
-        '--force', '-f', action='store_true',
-        help='reinstall even if frpc appears current',
-    )
+    ))
+    _add_rac_provision_args(rac_sub.add_parser(
+        'configure',
+        help='(re)configure the tunnel — prompt for RAC number and ID with '
+             'the current values as editable defaults, then re-apply',
+    ))
+    _add_rac_provision_args(rac_sub.add_parser(
+        'reconfigure',
+        help='alias for `smd admin rac configure`',
+    ))
 
-    p_storage = sub.add_parser('storage',
+    p_storage = admin_sub.add_parser('storage',
                                help='manage the local sink backend '
                                     '(SQLite default; remove leftover '
                                     'ClickHouse install)')
@@ -13370,43 +14350,6 @@ def main() -> int:
              '(canonical; replaces top-level `timestd-tune-storage`)')
     p_storage_tune.add_argument('--apply', action='store_true',
                                 help='write the drop-ins (default: print recommendation only)')
-
-    p_psk = sub.add_parser('psk-watch',
-                           help='live tail of PSK Reporter upload events '
-                                '(alias: smd watch psk)')
-    _add_psk_watch_args(p_psk)
-
-    # wspr-watch — live tail of wsprdaemon-client's WSPRnet upload activity
-    p_wspr = sub.add_parser('wspr-watch',
-                            help='live tail of WSPRnet upload events '
-                                 '(alias: smd watch wspr)')
-    _add_wspr_watch_args(p_wspr)
-
-    # hfdl-watch — live tail of hfdl-recorder per-band decoded frames
-    p_hfdl = sub.add_parser('hfdl-watch',
-                            help='live tail of HFDL decoded-frame activity '
-                                 '(alias: smd watch hfdl)')
-    _add_hfdl_watch_args(p_hfdl)
-
-    # codar-watch — live tail of codar-sounder per-station soundings
-    p_codar = sub.add_parser('codar-watch',
-                             help='live tail of CODAR ionospheric soundings '
-                                  '(alias: smd watch codar)')
-    _add_codar_watch_args(p_codar)
-
-    # mag-watch — live tail of mag-recorder sample/packager/upload activity
-    p_mag = sub.add_parser('mag-watch',
-                           help='live tail of RM3100 magnetometer sample '
-                                'activity + daily packager/PSWS-upload events '
-                                '(alias: smd watch mag)')
-    _add_mag_watch_args(p_mag)
-
-    # ka9q-watch — alert on upstream ka9q-radio changes that could break clients
-    p = sub.add_parser('ka9q-watch',
-                       help='check ka9q-radio upstream for changes that could '
-                            'break ka9q-python RTP clients '
-                            '(alias: smd watch ka9q)')
-    _add_ka9q_watch_args(p)
 
     # watch — unified live-tail / observe interface
     #
@@ -13511,6 +14454,7 @@ def main() -> int:
     p_config = sub.add_parser('config',
                               help='inspect or migrate sigmond coordination config')
     config_sub = p_config.add_subparsers(dest='config_command')
+    config_sub.add_parser('help', help='show this help')
 
     p = config_sub.add_parser('show',
                               help='dump effective coordination + client view')
@@ -13535,6 +14479,14 @@ def main() -> int:
                                    'from coordination.toml (after a hand-edit)')
     p.add_argument('--dry-run', action='store_true',
                    help='print the rendered env file to stdout, do not write')
+
+    p = config_sub.add_parser('render',
+                              help='render coordination.toml/.env from the single '
+                                   'per-site /etc/sigmond/site-profile.toml')
+    p.add_argument('--init', action='store_true',
+                   help='scaffold a placeholder site-profile.toml (does not overwrite)')
+    p.add_argument('--dry-run', action='store_true',
+                   help='print what would be published, do not write')
 
     p = config_sub.add_parser(
         'catalog-prune',
@@ -13605,9 +14557,10 @@ def main() -> int:
                    help='optional instance name for multi-source clients')
 
     # environment — situational awareness (site inventory + reconciliation).
-    p_env = sub.add_parser('environment',
+    p_env = admin_sub.add_parser('environment',
                            help='inventory peers declared in environment.toml vs what is observed')
     env_sub = p_env.add_subparsers(dest='env_command')
+    env_sub.add_parser('help', help='show this help')
 
     # Argparse choices are derived from the same registries the loader
     # and dispatch tables use, so a new kind/source added in
@@ -13646,16 +14599,36 @@ def main() -> int:
     sub.add_parser('tui', help='launch the sigmond TUI')
 
     args = parser.parse_args()
+
+    # smd self-elevates each privileged step on its own (see _run sudo=True), so
+    # it is designed to run AS THE OPERATOR, never wrapped in sudo.  Refuse a
+    # sudo-wrapped invocation (EUID 0 with SUDO_USER set) so config files,
+    # interactive prompts, and station identity land under the operator and not
+    # root.  Internal callers that must run smd in a genuine root context
+    # (install.sh) set SIGMOND_ALLOW_SUDO=1 to bypass; systemd units run as root
+    # without SUDO_USER and are unaffected.
+    if (os.geteuid() == 0 and os.environ.get('SUDO_USER')
+            and not os.environ.get('SIGMOND_ALLOW_SUDO')):
+        _err("don't run smd under sudo — it elevates itself when a verb needs "
+             "root.  Re-run as yourself:  " + ' '.join(['smd', *sys.argv[1:]]))
+        return 1
+
     if not args.command:
         print(BANNER)
         parser.print_help()
         return 0
 
+    # admin — umbrella verb.  Rewrite into the relocated former top-level
+    # verb so every existing per-verb dispatch branch below works unchanged.
+    if args.command == 'admin':
+        args.command = getattr(args, 'admin_command', None)
+        if not args.command:
+            p_admin.print_help()
+            return 0
+
     dispatch = {
-        'add':     cmd_add,
         'enable':  cmd_enable,
         'disable': cmd_disable,
-        'remove':  cmd_remove,
         'install': cmd_install,
         'bringup': cmd_bringup,
         'apply':   cmd_apply,
@@ -13670,8 +14643,33 @@ def main() -> int:
         'public-ip': cmd_public_ip,
     }
 
+    if args.command == 'secrets':
+        sub_cmd = getattr(args, 'secrets_command', None)
+        if sub_cmd in (None, 'help'):
+            p_secrets.print_help()
+            return 0
+        if sub_cmd == 'status':
+            return cmd_secrets_status(args)
+        if sub_cmd == 'template':
+            return cmd_secrets_template(args)
+        if sub_cmd == 'install':
+            return cmd_secrets_install(args)
+        if sub_cmd == 'bundle':
+            return cmd_secrets_bundle(args)
+        p_secrets.print_help()
+        return 0
+
+    if args.command == 'personalize':
+        return cmd_personalize(args)
+
     if args.command == 'sources':
         sub_cmd = getattr(args, 'sources_command', None)
+        if sub_cmd == 'help':
+            p_sources.print_help()
+            return 0
+        if sub_cmd is None:                 # bare `smd admin sources` -> list
+            p_src_list.parse_args([], namespace=args)
+            sub_cmd = 'list'
         if sub_cmd == 'list':
             return cmd_sources_list(args)
         if sub_cmd == 'add':
@@ -13692,22 +14690,15 @@ def main() -> int:
             if _need_root('wisdom plan'):
                 return 1
             return cmd_wisdom_plan(args)
-        if wis_cmd == 'status':
+        if wis_cmd == 'help':
+            p_wisdom.print_help()
+            return 0
+        # Bare `smd admin wisdom` (or explicit `status`) defaults to status;
+        # `smd admin wisdom help` (above) prints help.
+        if wis_cmd in (None, 'status'):
             return cmd_wisdom_status(args)
         p_wisdom.print_help()
         return 0
-
-    if args.command == 'cpu':
-        # Shortcut: `smd cpu` → cmd_diag_cpu_freq with the same topology
-        # override pipeline as `smd diag cpu-freq`.
-        _deprecated('cpu', 'diag cpu-freq')
-        topo = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
-        if getattr(args, 'radiod_max_mhz', None):
-            topo['cpu_freq']['radiod_max_mhz'] = args.radiod_max_mhz
-        if getattr(args, 'other_max_mhz', None):
-            topo['cpu_freq']['other_max_mhz'] = args.other_max_mhz
-        args._topology_override = topo
-        return cmd_diag_cpu_freq(args)
 
     if args.command == 'diag':
         diag_cmd = getattr(args, 'diag_command', None)
@@ -13726,26 +14717,6 @@ def main() -> int:
         if diag_cmd == 'drop-in':
             return cmd_diag_drop_in(args)
         return cmd_diag(args)
-
-    if args.command == 'psk-watch':
-        _deprecated('psk-watch', 'watch psk')
-        return cmd_psk_watch(args)
-
-    if args.command == 'wspr-watch':
-        _deprecated('wspr-watch', 'watch wspr')
-        return cmd_wspr_watch(args)
-
-    if args.command == 'hfdl-watch':
-        _deprecated('hfdl-watch', 'watch hfdl')
-        return cmd_hfdl_watch(args)
-
-    if args.command == 'codar-watch':
-        _deprecated('codar-watch', 'watch codar')
-        return cmd_codar_watch(args)
-
-    if args.command == 'mag-watch':
-        _deprecated('mag-watch', 'watch mag')
-        return cmd_mag_watch(args)
 
     if args.command == 'notify':
         return cmd_notify(args)
@@ -13791,10 +14762,22 @@ def main() -> int:
         return 0
 
     if args.command == 'rac':
+        if getattr(args, 'rac_command', None) == 'help':
+            p_rac.print_help()
+            return 0
         return cmd_rac(args)
 
     if args.command == 'verifier':
         verifier_cmd = getattr(args, 'verifier_command', None)
+        if verifier_cmd == 'help':
+            p_verifier.print_help()
+            return 0
+        if verifier_cmd is None:
+            # Bare `smd admin verifier` defaults to `report`; pull in the report
+            # subparser's own defaults (--target wspr, --window 1h, flags off)
+            # so cmd_verifier_report has every attribute it expects.
+            p_v_report.parse_args([], namespace=args)
+            verifier_cmd = 'report'
         if verifier_cmd == 'report' and getattr(args, 'target', 'wspr') == 'psk':
             try:
                 from sigmond.commands.verifier_report_psk import (
@@ -13840,11 +14823,7 @@ def main() -> int:
         p_verifier.print_help()
         return 0
 
-    if args.command == 'timestd-tune-storage':
-        _deprecated('timestd-tune-storage', 'storage tune-timestd')
-        return cmd_timestd_tune_storage(args)
-
-    if args.command in ('validate', 'config', 'environment', 'ka9q-watch', 'timing', 'uninstall'):
+    if args.command in ('validate', 'config', 'environment', 'timing', 'uninstall'):
         if not _HAS_SIGMOND_LIB:
             print('smd: sigmond library not found; install lib/sigmond alongside bin/smd',
                   file=sys.stderr)
@@ -13855,11 +14834,17 @@ def main() -> int:
             return cmd_timing(args)
         if args.command == 'uninstall':
             return cmd_uninstall(args)
-        if args.command == 'ka9q-watch':
-            _deprecated('ka9q-watch', 'watch ka9q')
-            return cmd_ka9q_watch(args)
         if args.command == 'environment':
             env_cmd = getattr(args, 'env_command', None)
+            if env_cmd == 'help':
+                p_env.print_help()
+                return 0
+            if env_cmd is None:             # bare `smd admin environment` -> list
+                if not hasattr(args, 'json'):
+                    args.json = False
+                if not hasattr(args, 'kind'):
+                    args.kind = None
+                env_cmd = 'list'
             if env_cmd == 'list':
                 return cmd_environment_list(args)
             if env_cmd == 'probe':
@@ -13870,6 +14855,13 @@ def main() -> int:
             return 0
         # config
         sub_cmd = getattr(args, 'config_command', None)
+        if sub_cmd == 'help':
+            p_config.print_help()
+            return 0
+        if sub_cmd is None:                 # bare `smd config` -> show
+            if not hasattr(args, 'json'):
+                args.json = False
+            sub_cmd = 'show'
         if sub_cmd == 'show':
             return cmd_config_show(args)
         if sub_cmd == 'identity':
@@ -13884,6 +14876,12 @@ def main() -> int:
             if not getattr(args, 'dry_run', False) and _need_root('config refresh'):
                 return 1
             return cmd_config_refresh(args)
+        if sub_cmd == 'render':
+            # --dry-run / --init(scaffold) read-only-ish; writing path needs root.
+            writing = not getattr(args, 'dry_run', False)
+            if writing and _need_root('config render'):
+                return 1
+            return cmd_config_render(args)
         if sub_cmd == 'catalog-prune':
             return cmd_config_catalog_prune(args)
         if sub_cmd == 'migrate':
@@ -13919,11 +14917,17 @@ def main() -> int:
         p_config.print_help()
         return 0
 
-    # `smd instance <verb>` — v2 per-reporter client instance lifecycle
+    # `smd admin instance <verb>` — v2 per-reporter client instance lifecycle
     # (MULTI-INSTANCE-ARCHITECTURE.md §6).  All verbs handle their own
     # root-check via _need_root in the handler.
     if args.command == 'instance':
         ic = getattr(args, 'instance_command', None)
+        if ic == 'help':
+            p_instance.print_help()
+            return 0
+        if ic is None:                      # bare `smd admin instance` -> list
+            p_i_list.parse_args([], namespace=args)
+            ic = 'list'
         if ic == 'list':
             return cmd_instance_list(args)
         if ic == 'show':
@@ -13943,7 +14947,7 @@ def main() -> int:
         p_instance.print_help()
         return 0
 
-    # `smd radiod <verb>` — radiod-identification canonical naming
+    # `smd admin radiod <verb>` — radiod-identification canonical naming
     # (RADIOD-IDENTIFICATION.md §6 Phase 5).
     if args.command == 'radiod':
         rc = getattr(args, 'radiod_command', None)
@@ -13959,6 +14963,12 @@ def main() -> int:
     # do their own root checks.
     if args.command == 'component':
         cc = getattr(args, 'component_command', None)
+        if cc == 'help':
+            p_component.print_help()
+            return 0
+        if cc is None:                      # bare `smd component` -> list
+            p_c_list.parse_args([], namespace=args)
+            cc = 'list'
         if cc == 'list':
             # Read-only catalog view — synthesize the flags cmd_list
             # expects but that aren't on the `component list` parser.
@@ -13988,34 +14998,9 @@ def main() -> int:
             return cmd_enable(args)
         elif cc == 'disable':
             return cmd_disable(args)
-        elif cc is None:
-            p_component.print_help()
-            return 0
 
-    # `smd software <install|apply>` — rewrite into the corresponding
-    # top-level command so the rest of the dispatch (mutating-lock,
-    # root check, sigmond-lib gate) and the cmd_install/cmd_apply
-    # handlers themselves can stay unaware of the new grouping.  The
-    # arg namespaces are identical because both forms share the same
-    # _add_install_args / _add_apply_args definitions.
-    if args.command == 'software':
-        sub_cmd = getattr(args, 'software_command', None)
-        if sub_cmd in ('install', 'apply'):
-            _deprecated(f'software {sub_cmd}', sub_cmd)
-            args.command = sub_cmd  # fall through to dispatch below
-        else:
-            p_software.print_help()
-            return 0
-
-    # v2 deprecations for bare verbs and mutating-flag-on-read.
-    # Component-namespace forms (`component add`, etc.) bypass this
-    # check because their dispatch returns earlier — these only fire
-    # on the bare top-level path being phased out.
-    if args.command == 'add':
-        _deprecated('add', 'component add')
-    elif args.command == 'remove':
-        _deprecated('remove', 'component remove')
-    elif args.command == 'list' and getattr(args, 'update', False):
+    # v2 deprecations for mutating-flag-on-read.
+    if args.command == 'list' and getattr(args, 'update', False):
         _deprecated('list --update / --apply', 'component update')
     elif args.command == 'log' and getattr(args, 'level', None):
         _deprecated('log --level', 'log set-level <client> <level>')

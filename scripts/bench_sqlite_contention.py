@@ -172,7 +172,7 @@ def run_scenario(
         # simultaneously and the loser gets "database is locked" until
         # the winner commits — which masquerades as steady-state
         # contention but is really a startup phenomenon.  In production
-        # the DB is pre-created by `smd storage migrate-to-sqlite`.
+        # the DB is pre-created by `smd admin storage migrate-to-sqlite`.
         prewarm_cfg = SqliteConfig(path=db_path)
         prewarm = Writer(database="prewarm", table="spots",
                          schema_version=1, batch_rows=1,

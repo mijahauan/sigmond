@@ -22,7 +22,7 @@ from sigmond.harmonize import (
     rule_data_path_upstream,
     rule_frequency_coverage, rule_gpsdo_governor_coverage,
     rule_kernel_rcvbuf_adequate,
-    rule_radiod_resolution, rule_timing_chain,
+    rule_radiod_resolution, rule_radiod_status_configured, rule_timing_chain,
     run_all, worst_severity,
 )
 from sigmond.sysview import SystemView
@@ -349,8 +349,121 @@ class TestRuleCpuIsolationRuntime(unittest.TestCase):
                 "rule_kernel_rcvbuf_adequate",
                 "rule_timing_reference",
                 "rule_wspr_decode_enabled",
+                "rule_hardware_gated_core",
+                "rule_secrets",
             ],
         )
+
+
+class TestRuleHardwareGatedCore(unittest.TestCase):
+    """A hardware-gated core component (mag-recorder) that is enabled in
+    topology but whose hardware is absent should read as core-but-gated
+    (pass, visible), not vanish; present-but-not-running is an actionable warn."""
+
+    def _view(self, enabled: bool, comp: str = "mag-recorder") -> SystemView:
+        from sigmond.topology import Component
+        comps = {}
+        if enabled:
+            comps[comp] = Component(comp, enabled=True)
+        topo = Topology(client_dir=None, smd_bin=None, components=comps)
+        return SystemView(coordination=Coordination(), topology=topo,
+                          client_views={})
+
+    def _patch(self, *, ready, running: bool, registry=None) -> None:
+        """Swap the gated registry + readiness self-probe + unit probe for
+        hermetic ones (no catalog / host access).  ``ready`` is the tri-state
+        _hardware_ready returns; ``registry`` defaults to mag/gpsdo labels."""
+        if registry is None:
+            registry = {"mag-recorder": "magnetometer (test)",
+                        "gpsdo-monitor": "GPSDO (test)"}
+        orig_reg = harmonize._hardware_gated_registry
+        orig_ready = harmonize._hardware_ready
+        orig_active = harmonize._unit_active
+        harmonize._hardware_gated_registry = lambda: registry
+        harmonize._hardware_ready = lambda comp: ready
+        harmonize._unit_active = lambda pattern: running
+        self.addCleanup(lambda: setattr(harmonize, "_hardware_gated_registry", orig_reg))
+        self.addCleanup(lambda: setattr(harmonize, "_hardware_ready", orig_ready))
+        self.addCleanup(lambda: setattr(harmonize, "_unit_active", orig_active))
+
+    def test_not_enabled_is_skipped(self):
+        self._patch(ready=False, running=False)
+        r = harmonize.rule_hardware_gated_core(self._view(enabled=False))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("skipped", r.message)
+
+    def test_enabled_hardware_absent_is_dormant_pass(self):
+        self._patch(ready=False, running=False)
+        r = harmonize.rule_hardware_gated_core(self._view(enabled=True))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("core-but-gated", r.message)
+        self.assertIn("mag-recorder", r.message)
+
+    def test_enabled_hardware_present_not_running_warns(self):
+        self._patch(ready=True, running=False)
+        r = harmonize.rule_hardware_gated_core(self._view(enabled=True))
+        self.assertEqual(r.severity, "warn")
+        self.assertIn("mag-recorder", r.affected)
+
+    def test_enabled_hardware_present_running_passes(self):
+        self._patch(ready=True, running=True)
+        r = harmonize.rule_hardware_gated_core(self._view(enabled=True))
+        self.assertEqual(r.severity, "pass")
+        self.assertNotIn("core-but-gated", r.message)
+
+    def test_enabled_readiness_unknown_is_not_guessed(self):
+        # _hardware_ready None (client doesn't report, no fallback) -> the
+        # component is neither claimed dormant nor warned about.
+        self._patch(ready=None, running=False)
+        r = harmonize.rule_hardware_gated_core(self._view(enabled=True))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("skipped", r.message)
+        self.assertNotIn("core-but-gated", r.message)
+
+    def test_dormant_reason_for_component_status(self):
+        # The TUI/CLI per-component overlay: enabled + gated + hardware absent
+        # -> the hardware label; everything else -> None.  Registry is patched
+        # so the test doesn't depend on the real catalog.
+        reg = {"mag-recorder": "magnetometer (test)"}
+        orig_reg = harmonize._hardware_gated_registry
+        orig_ready = harmonize._hardware_ready
+        self.addCleanup(lambda: setattr(harmonize, "_hardware_gated_registry", orig_reg))
+        self.addCleanup(lambda: setattr(harmonize, "_hardware_ready", orig_ready))
+        harmonize._hardware_gated_registry = lambda: reg
+
+        harmonize._hardware_ready = lambda comp: False   # hardware absent
+        self.assertIsNotNone(harmonize.dormant_reason("mag-recorder", enabled=True))
+        self.assertIsNone(harmonize.dormant_reason("mag-recorder", enabled=False))
+
+        harmonize._hardware_ready = lambda comp: True    # hardware present
+        self.assertIsNone(harmonize.dormant_reason("mag-recorder", enabled=True))
+
+        harmonize._hardware_ready = lambda comp: None    # unknown
+        self.assertIsNone(harmonize.dormant_reason("mag-recorder", enabled=True))
+
+        harmonize._hardware_ready = lambda comp: False
+        self.assertIsNone(harmonize.dormant_reason("ka9q-radio", enabled=True))  # not gated
+
+    def test_gpsdo_monitor_gated_via_registry(self):
+        # gpsdo-monitor is hardware-gated (Leo Bodnar GPSDO).  Enabled with
+        # hardware absent -> core-but-gated dormant, like mag-recorder.
+        self._patch(ready=False, running=True)   # daemon runs but no device
+        r = harmonize.rule_hardware_gated_core(
+            self._view(enabled=True, comp="gpsdo-monitor"))
+        self.assertEqual(r.severity, "pass")
+        self.assertIn("core-but-gated", r.message)
+        self.assertIn("gpsdo-monitor", r.message)
+
+    def test_registry_is_loaded_from_catalog(self):
+        # Integration: the gated set is DECLARED in etc/catalog.toml
+        # (hardware_gated field), not hard-coded.  Reset the cache so the real
+        # loader runs against the repo catalog.
+        harmonize._HW_GATED_CACHE = None
+        self.addCleanup(lambda: setattr(harmonize, "_HW_GATED_CACHE", None))
+        reg = harmonize._hardware_gated_registry()
+        self.assertIn("mag-recorder", reg)
+        self.assertIn("gpsdo-monitor", reg)
+        self.assertTrue(reg["mag-recorder"] and reg["gpsdo-monitor"])
 
 
 class TestRuleGpsdoGovernorCoverage(unittest.TestCase):
@@ -737,6 +850,32 @@ class TestRuleKa9qPythonCompat(unittest.TestCase):
             (repo / '.git').mkdir(parents=True)
             (repo / '.git' / 'HEAD').write_text(self.PIN + "\n")
             self.assertEqual(_git_head(repo), self.PIN)
+
+
+class TestRadiodStatusConfigured(unittest.TestCase):
+    """A recorder config still carrying the <configure-via-config-init>
+    placeholder is unconfigured — validate must FAIL on it, not mask it."""
+
+    def _view(self, addr):
+        cv = ClientView(client_type="wspr-recorder",
+                        instances=[InstanceView(instance="AC0G-S",
+                                                radiod_id=addr)])
+        return _make_view(Coordination(), {"wspr-recorder": cv})
+
+    def test_fails_on_placeholder(self):
+        r = rule_radiod_status_configured(
+            self._view("<configure-via-config-init>"))
+        self.assertEqual(r.severity, "fail")
+        self.assertIn("wspr-recorder", r.message)
+
+    def test_passes_on_real_address(self):
+        r = rule_radiod_status_configured(
+            self._view("sigma-rx888mk2-status.local"))
+        self.assertEqual(r.severity, "pass")
+
+    def test_passes_when_no_instances(self):
+        r = rule_radiod_status_configured(_make_view(Coordination()))
+        self.assertEqual(r.severity, "pass")
 
 
 if __name__ == "__main__":

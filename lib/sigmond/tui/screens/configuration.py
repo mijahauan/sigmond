@@ -8,7 +8,7 @@ is one atomic workflow — pick a client, pick a reporter ID, fill in
 the per-instance config, enable the unit.  The three legacy screens
 each owned one verb of that workflow and forced the operator to
 bounce between them.  The CLI side already has the right
-abstraction (`smd instance {list, add, edit, remove, enable, disable}`
+abstraction (`smd admin instance {list, add, edit, remove, enable, disable}`
 is one namespace); this screen mirrors it.
 
 Layout:
@@ -63,7 +63,7 @@ def _smd_binary() -> str:
     if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
         return argv0
     found = shutil.which('smd')
-    return found or '/usr/local/sbin/smd'
+    return found or '/usr/local/bin/smd'
 
 
 # Clients that accept per-instance config files (matches
@@ -112,7 +112,7 @@ def _sources_for(client: str, reporter_id: str) -> str:
     """Read the per-instance sources file and render a one-line summary.
 
     Returns "[dim]—[/]" when the file is missing or unreadable (operator
-    hasn't picked sources yet — common right after `smd instance add`).
+    hasn't picked sources yet — common right after `smd admin instance add`).
     """
     try:
         from ...instance import instance_paths
@@ -484,16 +484,16 @@ class ConfigurationScreen(Vertical):
             self._set_last("[yellow]select a row first[/]")
             return
         client, reporter = sel
-        cmd = [_smd_binary(), 'instance', 'remove', client, reporter,
+        cmd = [_smd_binary(), 'admin', 'instance', 'remove', client, reporter,
                '--yes']
         confirm_and_run(
             self.app,
             title=f"Remove {client}@{_display(reporter)}?",
             body=(
-                f"Run [bold]smd instance remove {client} {reporter} "
+                f"Run [bold]smd admin instance remove {client} {reporter} "
                 f"--yes[/]\n\n"
                 "Removes the per-instance config / env / sources files.  "
-                "Does NOT stop the running unit — `smd instance disable` "
+                "Does NOT stop the running unit — `smd admin instance disable` "
                 "is a separate step.  Use [italic]--purge[/] from the CLI "
                 "to also delete state / log dirs."
             ),
@@ -519,7 +519,7 @@ class ConfigurationScreen(Vertical):
         except Exception as exc:
             self._set_last(f"[red]Add: bad reporter ID: {exc}[/]")
             return
-        cmd = [_smd_binary(), 'instance', 'add', client, reporter]
+        cmd = [_smd_binary(), 'admin', 'instance', 'add', client, reporter]
         if dry_run:
             cmd.append('--dry-run')
             self._exec_async(cmd)
@@ -528,11 +528,11 @@ class ConfigurationScreen(Vertical):
             self.app,
             title=f"Add instance {client}@{_display(reporter)}?",
             body=(
-                f"Run [bold]smd instance add {client} {reporter}[/]\n\n"
+                f"Run [bold]smd admin instance add {client} {reporter}[/]\n\n"
                 "Creates per-instance config / env / sources skeletons.  "
                 "Does NOT enable or start the systemd unit — that's a "
                 "follow-up step (Edit the config, then "
-                "`smd instance enable` from the CLI)."
+                "`smd admin instance enable` from the CLI)."
             ),
             cmd=cmd, sudo=True,
             on_complete=self._after_mutation,
@@ -542,7 +542,7 @@ class ConfigurationScreen(Vertical):
         """Dry-run scan.  Live migration is interactive (prompts the
         operator per candidate) and is CLI-only — the dry-run here
         surfaces what's eligible without changing anything."""
-        cmd = [_smd_binary(), 'instance', 'migrate']
+        cmd = [_smd_binary(), 'admin', 'instance', 'migrate']
         self._exec_async(cmd)
 
     # ------------------------------------------------------------------

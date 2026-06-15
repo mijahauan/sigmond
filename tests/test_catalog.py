@@ -421,7 +421,9 @@ class TestNextSteps:
             if k == 'install' and s == 'ka9q-python'
         ]
         assert len(lib_installs) == 1, items
-        assert 'sudo smd install ka9q-python' in lib_installs[0][2]
+        # next_steps emits a bare `smd install <x>` hint (smd handles its own
+        # privilege elevation); it no longer prefixes `sudo`.
+        assert 'smd install ka9q-python' in lib_installs[0][2]
 
     def test_non_library_dep_still_flagged_for_topology(self):
         # hf-timestd requires radiod (kind=server).  If radiod is not

@@ -1,8 +1,8 @@
-"""Logs screen — TUI counterpart to `smd log <client>`.
+"""Logs screen — TUI counterpart to `smd admin log <client>`.
 
 Read-only modes: per-component `journalctl --follow` or `tail -f` of
 inventory file-logs.  Streams subprocess output live into a RichLog
-widget.  Mutation mode: set CLIENT_LOG_LEVEL via `smd log
+widget.  Mutation mode: set CLIENT_LOG_LEVEL via `smd admin log
 set-level <client> <level>`, gated by a confirm modal.
 """
 
@@ -32,7 +32,7 @@ def _smd_binary() -> str:
     if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
         return argv0
     found = shutil.which('smd')
-    return found or '/usr/local/sbin/smd'
+    return found or '/usr/local/bin/smd'
 
 
 def _installed_components() -> dict:
@@ -240,7 +240,7 @@ class LogsScreen(Vertical):
             self._set_status("[yellow]Pick a log level first[/]")
             return
         level = str(level)
-        cmd = [_smd_binary(), 'log', 'set-level', comp, level]
+        cmd = [_smd_binary(), 'admin', 'log', 'set-level', comp, level]
         confirm_and_run(
             self.app,
             title=f"Set {comp} log level to {level}?",

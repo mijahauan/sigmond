@@ -259,7 +259,7 @@ Match the count of radiod instances (one HT pair each):
 | 3 | `0-5` |
 | N | `0-(2N-1)` |
 
-The remaining vCPUs (e.g. 6-9 for three radiods) carry the guest kernel, sigmond, hf-timestd, wd-decode, ka9q-web, psk-recorder, and so on. Sigmond's `smd diag cpu-affinity --apply` already separates radiod from the "other" pool with cgroup `AllowedCPUs=` drop-ins, so the kernel-level `isolcpus=` reinforces what sigmond already enforces at the cgroup level — defense in depth.
+The remaining vCPUs (e.g. 6-9 for three radiods) carry the guest kernel, sigmond, hf-timestd, wd-decode, ka9q-web, psk-recorder, and so on. Sigmond's `smd admin diag cpu-affinity --apply` already separates radiod from the "other" pool with cgroup `AllowedCPUs=` drop-ins, so the kernel-level `isolcpus=` reinforces what sigmond already enforces at the cgroup level — defense in depth.
 
 ### Apply
 
@@ -284,10 +284,10 @@ sudo reboot
 cat /proc/cmdline                                     # should include the three params
 cat /sys/devices/system/cpu/isolated                  # should print 0-5
 ps -eo psr,comm | awk '$1 <= 5' | sort -u | head -20  # only radiod + unmovable per-CPU kthreads
-sudo smd validate                                     # cpu_isolation_runtime should pass
+smd admin validate                                     # cpu_isolation_runtime should pass
 ```
 
-`smd validate cpu_isolation_runtime` is the canonical pass/fail signal — it confirms radiod has its assigned CPUs uncontested. Expected output line:
+`smd admin validate cpu_isolation_runtime` is the canonical pass/fail signal — it confirms radiod has its assigned CPUs uncontested. Expected output line:
 
 ```
 ✓  cpu_isolation_runtime: radiod cores [0, 1, 2, 3, 4, 5] uncontested
@@ -846,7 +846,7 @@ done
 There is no `/sys/devices/system/cpu/cpufreq/` inside the guest, but **`/proc/cpuinfo` does report the host pCPU's current running frequency** for each vCPU. So you can verify the cap is in effect by watching the `cpu MHz` field under load:
 
 ```bash
-sudo smd diag cpu-freq            # sigmond reads /proc/cpuinfo and shows running MHz per vCPU
+smd admin diag cpu-freq            # sigmond reads /proc/cpuinfo and shows running MHz per vCPU
 ```
 
 When workers are bursting at a minute boundary, the worker vCPUs (2-9) should top out at ~1400 MHz; radiod's vCPUs (0-1) should top out at ~3200 MHz.
@@ -1211,7 +1211,7 @@ If you're applying these gotcha fixes to a VM that's already been running, you m
 # Inside the VM:
 sudo /usr/local/bin/smd stop
 sudo rm /etc/fftw/wisdomf
-sudo systemd-run --unit=smd-wisdom-plan --collect /usr/local/bin/smd wisdom plan
+sudo systemd-run --unit=smd-wisdom-plan --collect /usr/local/bin/smd admin wisdom plan
 # Monitor:  sudo journalctl -fu smd-wisdom-plan
 # Wait ~90 min on the 5560U (the rof3240000 transform alone runs ~60 min).
 # When done:

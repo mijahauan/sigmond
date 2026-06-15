@@ -29,6 +29,17 @@ class Host:
 
 
 @dataclass
+class Station:
+    """Non-secret per-site identity beyond call/grid — published from
+    site-profile.toml by `smd config render`. Additive to [host]; the existing
+    identity path (config identity/refresh) never touches this block."""
+    psws_id: str = ""
+    instrument_id: str = ""
+    wsprnet_call: str = ""
+    pskreporter_call: str = ""
+
+
+@dataclass
 class Radiod:
     id: str
     host: str = "localhost"
@@ -43,6 +54,21 @@ class Radiod:
     # physical SDR is already named, and only prompt when a *new*
     # serial appears on the USB bus.
     sdr_serial: str = ""
+
+    @property
+    def effective_status_dns(self) -> str:
+        """The radiod's status/control mDNS name.
+
+        Normally the ``status_dns`` field.  But coordination keys radiods two
+        ways: ``smd config register-radiod`` writes a short ``id`` WITH a
+        ``status_dns`` field, while the bring-up path keys the block by the full
+        status DNS and leaves the field empty.  In that second form the ``id``
+        IS the status DNS — fall back to it.  Without this, single-radiod
+        ``_resolve_radiod_status`` returned '' and config-init never learned the
+        radiod address (greenfield: wspr-recorder came up with a placeholder)."""
+        if self.status_dns:
+            return self.status_dns
+        return self.id if self.id.endswith(".local") else ""
 
     @property
     def is_local(self) -> bool:
@@ -113,6 +139,7 @@ class TimingAuthority:
 @dataclass
 class Coordination:
     host:    Host                  = field(default_factory=Host)
+    station: Station               = field(default_factory=Station)
     radiods: dict                  = field(default_factory=dict)   # id -> Radiod
     cpu:     Cpu                   = field(default_factory=Cpu)
     clients: list                  = field(default_factory=list)   # list[ClientInstance]
@@ -157,6 +184,14 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
         grid=host_raw.get('grid', ''),
         lat=float(host_raw.get('lat', 0.0) or 0.0),
         lon=float(host_raw.get('lon', 0.0) or 0.0),
+    )
+
+    station_raw = raw.get('station', {}) or {}
+    station = Station(
+        psws_id=str(station_raw.get('psws_id', '') or ''),
+        instrument_id=str(station_raw.get('instrument_id', '') or ''),
+        wsprnet_call=str(station_raw.get('wsprnet_call', '') or ''),
+        pskreporter_call=str(station_raw.get('pskreporter_call', '') or ''),
     )
 
     radiods: dict = {}
@@ -226,6 +261,7 @@ def parse_coordination(raw: dict, source_path: Optional[Path] = None) -> Coordin
 
     return Coordination(
         host=host,
+        station=station,
         radiods=radiods,
         cpu=cpu,
         clients=clients,
@@ -285,6 +321,60 @@ def _passthrough_extras_for(client_type: str) -> list:
     return [str(k) for k in keys if isinstance(k, str)]
 
 
+def write_host_identity(call: str = '', grid: str = '', *,
+                        lat: float = 0.0, lon: float = 0.0,
+                        path: Path = COORDINATION_PATH) -> bool:
+    """Merge a ``[host]`` identity section into coordination.toml.
+
+    This is the source of station identity for the whole suite: client config
+    builds STATION_CALL / STATION_GRID (and LAT/LON) from ``coord.host`` (see
+    client_config._build_env_bag), so seeding ``[host]`` here propagates the
+    callsign/grid to every client configurator — radiod, hf-timestd, wspr, psk.
+    Without it, a greenfield host has no ``[host]`` section and every client
+    falls back to its placeholder identity.
+
+    Merges field-by-field (only non-empty arguments override existing values,
+    so a later richer config isn't clobbered with blanks) and text-merges the
+    section so existing ``[radiod.*]`` / ``[cpu]`` / ``[[clients]]`` blocks are
+    preserved verbatim.  Idempotent: returns True only when the file changed.
+    """
+    cur = load_coordination(path).host
+    call = call or cur.call
+    grid = grid or cur.grid
+    lat = lat or cur.lat
+    lon = lon or cur.lon
+
+    fields = []
+    if call:
+        fields.append(f'call = "{call}"')
+    if grid:
+        fields.append(f'grid = "{grid}"')
+    if lat:
+        fields.append(f'lat = {lat}')
+    if lon:
+        fields.append(f'lon = {lon}')
+    if not fields:
+        return False
+    block = '[host]\n' + '\n'.join(fields) + '\n'
+
+    existing = path.read_text() if path.exists() else ''
+    lines = existing.splitlines(keepends=True)
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == '[host]'), None)
+    if start is None:
+        # Host identity belongs at the top; keep a blank line before the rest.
+        new_text = block + ('\n' + existing if existing.strip() else '')
+    else:
+        end = next((j for j in range(start + 1, len(lines))
+                    if lines[j].lstrip().startswith('[')), len(lines))
+        new_text = ''.join(lines[:start]) + block + ''.join(lines[end:])
+
+    if new_text == existing:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_text)
+    return True
+
+
 def render_env(coord: Coordination,
                passthrough_lookup: Optional[Callable[[str], list]] = None) -> str:
     """Render the coordination as KEY=VALUE lines suitable for systemd
@@ -305,6 +395,10 @@ def render_env(coord: Coordination,
     ]
     if coord.host.call:
         lines.append(f'STATION_CALL={coord.host.call}')
+        # Compat alias: mag-recorder (wizard + config mapping) reads
+        # STATION_CALLSIGN; emit both so every client auto-seeds the callsign
+        # regardless of which name it expects. STATION_CALL is canonical.
+        lines.append(f'STATION_CALLSIGN={coord.host.call}')
     if coord.host.grid:
         lines.append(f'STATION_GRID={coord.host.grid}')
     if coord.host.lat:
@@ -314,11 +408,31 @@ def render_env(coord: Coordination,
     if any((coord.host.call, coord.host.grid, coord.host.lat, coord.host.lon)):
         lines.append('')
 
+    # Station identity beyond call/grid, published from site-profile.toml by
+    # `smd config render` (CLIENT-CONTRACT §14.2 extension). Clients adopt these
+    # as wizard defaults the same way they already read STATION_CALL/STATION_GRID.
+    st = coord.station
+    st_lines = []
+    # Names match what clients already read (mag-recorder reads
+    # STATION_PSWS_STATION_ID); reporter-call keys are an override hook for
+    # clients whose reporter call differs from STATION_CALL.
+    if st.psws_id:
+        st_lines.append(f'STATION_PSWS_STATION_ID={st.psws_id}')
+    if st.instrument_id:
+        st_lines.append(f'STATION_PSWS_INSTRUMENT_ID={st.instrument_id}')
+    if st.wsprnet_call:
+        st_lines.append(f'STATION_WSPRNET_CALL={st.wsprnet_call}')
+    if st.pskreporter_call:
+        st_lines.append(f'STATION_PSKREPORTER_CALL={st.pskreporter_call}')
+    if st_lines:
+        lines.extend(st_lines)
+        lines.append('')
+
     for rid, r in sorted(coord.radiods.items()):
         prefix = _env_key('RADIOD', rid)
         lines.append(f'{prefix}_HOST={r.host}')
-        if r.status_dns:
-            lines.append(f'{prefix}_STATUS={r.status_dns}')
+        if r.effective_status_dns:
+            lines.append(f'{prefix}_STATUS={r.effective_status_dns}')
         if r.samprate_hz:
             lines.append(f'{prefix}_SAMPRATE={r.samprate_hz}')
         # CLIENT-CONTRACT §18.3 per-radiod scope.  Per-radiod overrides
@@ -359,8 +473,8 @@ def render_env(coord: Coordination,
         lines.append(f'SIGMOND_RADIOD_COUNT={len(coord.radiods)}')
         if len(coord.radiods) == 1:
             only = next(iter(coord.radiods.values()))
-            if only.status_dns:
-                lines.append(f'SIGMOND_RADIOD_STATUS={only.status_dns}')
+            if only.effective_status_dns:
+                lines.append(f'SIGMOND_RADIOD_STATUS={only.effective_status_dns}')
         lines.append('')
 
     for c in coord.clients:

@@ -1,8 +1,8 @@
-"""Instance screen — TUI counterpart to `smd instance` (MULTI-INSTANCE-ARCHITECTURE.md §6).
+"""Instance screen — TUI counterpart to `smd admin instance` (MULTI-INSTANCE-ARCHITECTURE.md §6).
 
 Lists all per-reporter instances on this host, lets the operator add
 a new instance, remove one, or invoke the migration tool.  All
-destructive actions shell out to `smd instance ...` (root via the
+destructive actions shell out to `smd admin instance ...` (root via the
 shared confirm_and_run helper); read-only listing reads
 `sigmond.instance.list_instances()` directly.
 
@@ -35,7 +35,7 @@ def _smd_binary() -> str:
     if argv0 and os.path.isfile(argv0) and os.path.basename(argv0) == 'smd':
         return argv0
     found = shutil.which('smd')
-    return found or '/usr/local/sbin/smd'
+    return found or '/usr/local/bin/smd'
 
 
 # Catalog clients the operator might create instances for.  Subset
@@ -141,7 +141,7 @@ class InstanceScreen(Vertical):
             "migration to `<client>@<reporter-id>.service`.  Dry-run "
             "lists candidates without changing anything; running the "
             "migration is currently CLI-only (interactive prompts per "
-            "candidate) — invoke `smd instance migrate --yes` in "
+            "candidate) — invoke `smd admin instance migrate --yes` in "
             "a terminal.",
             classes="in-body")
         with Horizontal():
@@ -184,7 +184,7 @@ class InstanceScreen(Vertical):
         if not instances:
             self.query_one("#in-last", Static).update(
                 "[dim]no per-reporter instances yet — add one below, or "
-                "run `smd instance migrate` to convert legacy "
+                "run `smd admin instance migrate` to convert legacy "
                 "radiod-keyed deployments[/]")
             return
         for i in instances:
@@ -192,7 +192,7 @@ class InstanceScreen(Vertical):
             e = "✓" if i.has_env else "-"
             s = "✓" if i.has_sources else "-"
             # Display the slash form (user-facing); keep the row key
-            # in storage form (`=`-encoded) so downstream `smd instance
+            # in storage form (`=`-encoded) so downstream `smd admin instance
             # remove` argv is path-safe.
             table.add_row(i.client, _display(i.reporter_id), c, e, s,
                           key=f"{i.client}|{i.reporter_id}")
@@ -209,7 +209,7 @@ class InstanceScreen(Vertical):
             self.query_one("#in-last", Static).update(
                 "[red]Add: client and reporter both required[/]")
             return
-        cmd = [_smd_binary(), 'instance', 'add', client, reporter]
+        cmd = [_smd_binary(), 'admin', 'instance', 'add', client, reporter]
         if dry_run:
             cmd.append('--dry-run')
         if dry_run:
@@ -220,7 +220,7 @@ class InstanceScreen(Vertical):
                 title=f"Add instance {client}@{reporter}?",
                 body=("Creates per-instance config / env / sources "
                       "files.  Does NOT enable or start the systemd "
-                      "unit — that's a separate `smd instance enable` "
+                      "unit — that's a separate `smd admin instance enable` "
                       "step after editing the per-instance config."),
                 cmd=cmd, sudo=True,
                 on_complete=self._after_mutation,
@@ -247,14 +247,14 @@ class InstanceScreen(Vertical):
                 "[red]Remove: couldn't resolve selected row[/]")
             return
         client, reporter = key_value.split("|", 1)
-        cmd = [_smd_binary(), 'instance', 'remove', client, reporter,
+        cmd = [_smd_binary(), 'admin', 'instance', 'remove', client, reporter,
                '--yes']
         confirm_and_run(
             self.app,
             title=f"Remove instance {client}@{_display(reporter)}?",
             body=("Removes per-instance config / env / sources files. "
                   "Does NOT stop or disable the systemd unit — run "
-                  "`smd instance disable` first if the unit is "
+                  "`smd admin instance disable` first if the unit is "
                   "running.  Use `--purge` from the CLI for state/log "
                   "dirs."),
             cmd=cmd, sudo=True,
@@ -265,7 +265,7 @@ class InstanceScreen(Vertical):
     # Migrate (dry-run only from the TUI; live needs CLI)
     # ------------------------------------------------------------------
     def _do_migrate_dry(self) -> None:
-        cmd = [_smd_binary(), 'instance', 'migrate']
+        cmd = [_smd_binary(), 'admin', 'instance', 'migrate']
         self._exec_async(cmd)
 
     # ------------------------------------------------------------------

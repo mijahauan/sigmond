@@ -1,4 +1,4 @@
-"""`smd environment` — situational-awareness inventory of peers around
+"""`smd admin environment` — situational-awareness inventory of peers around
 this host.  Read-only, lock-free.
 
 Subcommands:
@@ -27,7 +27,7 @@ from ..discovery import reconciler as _reconciler
 
 
 # ---------------------------------------------------------------------------
-# smd environment list
+# smd admin environment list
 # ---------------------------------------------------------------------------
 
 def cmd_environment_list(args) -> int:
@@ -65,7 +65,7 @@ def _print_human(view: EnvironmentView, wanted_kind: Optional[str]) -> None:
         age = time.time() - view.probed_at
         info(f"last probe: {_fmt_age(age)} ago")
     else:
-        info("last probe: never (run `smd environment probe`)")
+        info("last probe: never (run `smd admin environment probe`)")
 
     by_kind: dict = {}
     for d in view.deltas:
@@ -87,7 +87,7 @@ def _print_human(view: EnvironmentView, wanted_kind: Optional[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# smd environment probe
+# smd admin environment probe
 # ---------------------------------------------------------------------------
 
 def cmd_environment_probe(args) -> int:
@@ -165,14 +165,14 @@ def _print_summary(deltas: list) -> None:
 
 
 # ---------------------------------------------------------------------------
-# smd environment describe <peer-id>
+# smd admin environment describe <peer-id>
 # ---------------------------------------------------------------------------
 
 def cmd_environment_describe(args) -> int:
     env  = load_environment()
     peer = getattr(args, "peer", None)
     if not peer:
-        err("usage: smd environment describe <peer-id>")
+        err("usage: smd admin environment describe <peer-id>")
         return 2
 
     declared = _find_declared(env, peer)
@@ -216,7 +216,7 @@ def cmd_environment_describe(args) -> int:
     heading(f"environment describe {peer}")
     if declared is None and not matching_obs:
         err(f"no declared peer or cached observation matches {peer!r}")
-        info("run `smd environment list` to see declared peers")
+        info("run `smd admin environment list` to see declared peers")
         return 1
 
     if declared:
@@ -246,7 +246,7 @@ def cmd_environment_describe(args) -> int:
             for k, v in sorted(o.fields.items()):
                 print(f"        {k}: {_fmt_value(v)}")
     else:
-        info("no cached observations — run `smd environment probe`")
+        info("no cached observations — run `smd admin environment probe`")
 
     return 0
 

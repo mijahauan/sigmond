@@ -236,7 +236,7 @@ class ReceiverChannelsScreen(Vertical):
                 result["error"] = (
                     f"could not load parser "
                     f"{feature.parser_file}:{feature.parser_attr} from "
-                    f"{client} (check `smd diag drop-in {client}`)"
+                    f"{client} (check `smd admin diag drop-in {client}`)"
                 )
                 return result
             try:

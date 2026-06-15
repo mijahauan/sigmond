@@ -9,8 +9,13 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from ..coordination import Host, load_coordination, render_env
+from ..coordination import (
+    Host, Station, load_coordination, render_env, write_host_identity,
+)
 from ..paths import COORDINATION_ENV, COORDINATION_PATH
+from ..site_profile import (
+    SITE_PROFILE_PATH, TEMPLATE as SITE_PROFILE_TEMPLATE, load_site_profile,
+)
 from ..sysview import build_system_view
 from ..ui import err, heading, info, ok, warn
 
@@ -474,4 +479,136 @@ def _patch_host_block(path: Path, host: Host) -> None:
             i += 1
         out = lines[:i] + new_block + lines[i:]
 
+    path.write_text('\n'.join(out).rstrip() + '\n')
+
+
+# ---------------------------------------------------------------------------
+# smd config render  (site-profile.toml -> coordination.toml/.env)
+# ---------------------------------------------------------------------------
+
+def cmd_config_render(args) -> int:
+    """Render coordination.toml/.env from /etc/sigmond/site-profile.toml.
+
+    site-profile.toml is the single non-secret per-site source of truth. This
+    maps [station] -> coordination [host] (call/grid/lat/lon) and PSWS/reporter
+    identity -> a coordination [station] block, then re-renders coordination.env
+    that all clients consume. Secrets are out of scope (see `smd admin secrets`).
+    """
+    if getattr(args, 'init', False):
+        if SITE_PROFILE_PATH.exists():
+            info(f'{SITE_PROFILE_PATH} already exists — left unchanged')
+            return 0
+        try:
+            SITE_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            SITE_PROFILE_PATH.write_text(SITE_PROFILE_TEMPLATE)
+        except PermissionError:
+            err(f'permission denied writing {SITE_PROFILE_PATH}; re-run smd as root')
+            return 1
+        ok(f'wrote {SITE_PROFILE_PATH} — edit it, then run: smd config render')
+        return 0
+
+    profile = load_site_profile(SITE_PROFILE_PATH)
+    if profile is None:
+        err(f'{SITE_PROFILE_PATH} not found')
+        info('  scaffold one with:  smd config render --init')
+        return 1
+
+    problems = []
+    if not profile.call:
+        problems.append('station.callsign is empty')
+    if not profile.grid and not (profile.lat or profile.lon):
+        problems.append('need station.grid_square or latitude/longitude')
+    if profile.psws_enabled and not (profile.psws_station_id and profile.psws_instrument_id):
+        problems.append('psws.enabled but station_id/instrument_id missing')
+    if problems:
+        for p in problems:
+            err(p)
+        return 1
+
+    station = Station(
+        psws_id=profile.psws_station_id if profile.psws_enabled else '',
+        instrument_id=profile.psws_instrument_id if profile.psws_enabled else '',
+        wsprnet_call=profile.effective_wsprnet_call,
+        pskreporter_call=profile.effective_pskreporter_call,
+    )
+
+    if getattr(args, 'dry_run', False):
+        coord = load_coordination(COORDINATION_PATH)
+        coord.host = Host(call=profile.call, grid=profile.grid,
+                          lat=profile.lat, lon=profile.lon)
+        coord.station = station
+        heading('config render (dry-run)')
+        info(f'source: {SITE_PROFILE_PATH}')
+        print(render_env(coord), end='')
+        return 0
+
+    try:
+        write_host_identity(call=profile.call, grid=profile.grid,
+                            lat=profile.lat, lon=profile.lon,
+                            path=COORDINATION_PATH)
+        _patch_station_block(COORDINATION_PATH, station)
+    except PermissionError:
+        err(f'permission denied writing {COORDINATION_PATH}; re-run smd as root')
+        return 1
+    ok(f'updated {COORDINATION_PATH} ([host] + [station]) from {SITE_PROFILE_PATH.name}')
+
+    coord = load_coordination(COORDINATION_PATH)
+    try:
+        COORDINATION_ENV.parent.mkdir(parents=True, exist_ok=True)
+        COORDINATION_ENV.write_text(render_env(coord))
+    except PermissionError:
+        warn(f'wrote coordination.toml but could not refresh {COORDINATION_ENV} '
+             '(permission denied) — re-run as root')
+        return 0
+    ok(f'rendered {COORDINATION_ENV}')
+
+    print()
+    loc = profile.grid or f'{profile.lat},{profile.lon}'
+    info(f'operator: {profile.call} / {loc}')
+    if profile.psws_enabled:
+        info(f'PSWS: station {profile.psws_station_id} / instrument {profile.psws_instrument_id}')
+    info('clients pick up the new values on next service start or reload.')
+    return 0
+
+
+def _patch_station_block(path: Path, station: Station) -> None:
+    """Rewrite the [station] block of coordination.toml in place; other blocks
+    (including [host]) are preserved verbatim. Mirrors _patch_host_block."""
+    body = ['[station]']
+    if station.psws_id:
+        body.append(f'psws_id = "{station.psws_id}"')
+    if station.instrument_id:
+        body.append(f'instrument_id = "{station.instrument_id}"')
+    if station.wsprnet_call:
+        body.append(f'wsprnet_call = "{station.wsprnet_call}"')
+    if station.pskreporter_call:
+        body.append(f'pskreporter_call = "{station.pskreporter_call}"')
+    body.append('')
+
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('\n'.join(body) + '\n')
+        return
+
+    lines = path.read_text().splitlines()
+    out: list = []
+    in_block = False
+    found = False
+    for line in lines:
+        s = line.strip()
+        if s == '[station]':
+            in_block = True
+            found = True
+            out.extend(body)
+            continue
+        if in_block:
+            if s.startswith('['):
+                in_block = False
+                out.append(line)
+            continue
+        out.append(line)
+    if not found:
+        if out and out[-1].strip():
+            out.append('')
+        out.extend(body)
     path.write_text('\n'.join(out).rstrip() + '\n')

@@ -67,6 +67,7 @@ uses            = []
 requires        = ["hs-uploader"]                     # sibling pkg for uv editable install
 contract        = "0.8"
 start_priority  = 200                                 # parallel with decoder chain
+hardware_gated  = "magnetometer (RM3100 / Pololu USB-I2C)"  # Phase D: dormant when absent
 # No install_script: install via `smd install mag-recorder` (deploy.toml drives the steps).
 # No topology_alias: avoid the deprecated alias surface for a brand-new client.
 # The `mag-usb` C binary is bundled inside mag-recorder (bin/mag-usb +
@@ -152,6 +153,7 @@ uses            = []
 requires        = []
 install_script  = "/opt/git/sigmond/gpsdo-monitor/install.sh"
 start_priority  = 0                                   # local-radiod timing infra: up with radiod
+hardware_gated  = "GPSDO (Leo Bodnar, USB/HID)"       # Phase D: dormant when no USB GPSDO attached
 # Richer metadata is auto-discovered from the repo's own deploy.toml once cloned.
 
 [client.igmp-querier]
@@ -212,6 +214,11 @@ extra_paths = ["/etc/wsprdaemon"]
 # host runs radiod locally.  Other grants add their own [profile.<name>].
 # ---------------------------------------------------------------------------
 
+# `smd bringup` with no profile name brings up `dasi2`, the canonical DASI2
+# station (local radiod + GRAPE + WSPR + PSK + magnetometer).  Hardware-gated
+# components (gpsdo-monitor, mag-recorder) are skipped-with-a-warning when their
+# device is absent from the USB bus (the redesign makes them install-dormant
+# instead — docs/install-redesign.md §3).
 [profile.dasi2]
 description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetometer)"
 clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder"]

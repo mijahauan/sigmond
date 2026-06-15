@@ -1,4 +1,4 @@
-"""`smd ka9q-watch` — flag upstream ka9q-radio changes that could break clients.
+"""`smd watch ka9q` — flag upstream ka9q-radio changes that could break clients.
 
 Thin wrapper around ka9q-python's ``scripts/check_upstream_drift.py``:
 locates the ka9q-python and ka9q-radio source trees, runs the checker

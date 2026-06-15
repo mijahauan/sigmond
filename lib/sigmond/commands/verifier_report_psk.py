@@ -1,4 +1,4 @@
-"""`smd verifier report --target psk` — local-sink audit of the
+"""`smd admin verifier report --target psk` — local-sink audit of the
 FT8/FT4 spot forwarding queue.
 
 The forwarding path is:
@@ -378,25 +378,25 @@ def _detect_default_rx_call(conn: sqlite3.Connection) -> Optional[str]:
 # ── CLI entry point ─────────────────────────────────────────────────────────
 
 def cmd_verifier_report_psk(args) -> int:
-    """`smd verifier report --target psk` entry point."""
+    """`smd admin verifier report --target psk` entry point."""
     try:
         window = _parse_window(args.window)
     except ValueError as exc:
-        print(f"smd verifier report: {exc}", file=sys.stderr)
+        print(f"smd admin verifier report: {exc}", file=sys.stderr)
         return 2
 
     db_path = Path(args.db if hasattr(args, "db") and args.db
                    else DEFAULT_SINK_DB)
     if not db_path.exists():
         print(
-            f"smd verifier report: sink db not found at {db_path}",
+            f"smd admin verifier report: sink db not found at {db_path}",
             file=sys.stderr,
         )
         return 2
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
     except sqlite3.Error as exc:
-        print(f"smd verifier report: open sink db failed: {exc}",
+        print(f"smd admin verifier report: open sink db failed: {exc}",
               file=sys.stderr)
         return 2
 

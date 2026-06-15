@@ -1,4 +1,4 @@
-"""smd log — journal tailing, file-log tailing, and runtime log-level control.
+"""smd admin log — journal tailing, file-log tailing, and runtime log-level control.
 
 Implements the sigmond side of client contract §10 (log_paths) and §11
 (runtime log level via coordination.env + SIGHUP).

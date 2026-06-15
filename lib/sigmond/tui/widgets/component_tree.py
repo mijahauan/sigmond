@@ -47,6 +47,7 @@ class ComponentTree(Tree):
         # ordering is install \u2192 configure \u2192 enable; the screens here
         # follow that same arc top to bottom.
         installation = self.root.add("Installation", expand=True)
+        installation.add_leaf("\u2728 Guided bring-up",   data={"screen": "greenfield"})
         installation.add_leaf("\u2630 Topology",          data={"screen": "topology"})
         installation.add_leaf("\u2691 Software versions", data={"screen": "components"})
         installation.add_leaf("\u2795 Install",           data={"screen": "install"})
@@ -93,6 +94,8 @@ class ComponentTree(Tree):
         screen = data.get("screen")
         if screen == "overview":
             self.app.action_show_overview()
+        elif screen == "greenfield":
+            self.app.action_show_greenfield()
         elif screen == "topology":
             self.app.action_show_topology()
         elif screen == "components":

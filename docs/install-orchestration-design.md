@@ -108,7 +108,7 @@ Stage 3b mag-recorder  <-- INDEPENDENT track: no radiod, no wisdom, runs anytime
                                      -- checkpoint: mag validates --
 Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remote);
                  order: igmp-querier -> radiod -> hf-timestd -> wspr/psk;  mag-recorder independent
-                                     -- final: smd validate all green --
+                                     -- final: smd admin validate all green --
 ```
 
 ### Conditional branches
@@ -129,7 +129,7 @@ Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remot
 | Stage 1 | radiod configured; tuning applied; wisdom launched | **hard-stop** |
 | Stage 2 | hf-timestd recording GRAPE; timing endpoint advertised | advisory |
 | Stage 3a/b | each client passes its own `validate` / self-describe | advisory |
-| Stage 4 | `smd validate` board all green | advisory (report) |
+| Stage 4 | `smd admin validate` board all green | advisory (report) |
 
 ## 7. New components to build
 
@@ -191,15 +191,24 @@ Stage 4  START   radiod-bound services gated on wisdom(local)/reachability(remot
   the client's `inventory --json` self-describe; hf-timestd's setup-station.sh
   gained `--non-interactive`.  §14 commons env bag was already wired.  All four
   DASI2 clients now drive non-interactively.
-- **Phase D (planned): environment-aware preflight.** Extend the contract §3
-  self-describe so a client reports hardware readiness (`inventory --json`
-  `hardware_present`, or a `probe` verb — the client detects its own
-  hardware). `smd bringup` runs a preflight and **skips or flags** any
-  client whose hardware is absent (mag-recorder→RM3100, gpsdo-monitor→GPSDO,
-  radiod→RX888); profiles mark which components are hardware-gated; surface
-  in `smd validate` + the TUI. Until built, the operator decides (read the
-  environment and act — the sigma host has no magnetometer, so mag-recorder
-  was correctly NOT brought up).
+- **Phase D — environment-aware preflight (GENERALIZED to the §3 self-describe).**
+  A hardware-gated client reports its OWN readiness via the top-level
+  `hardware_present` boolean of `inventory --json` (CONTRACT §3 amendment, v0.8;
+  reference impl: `mag-recorder` device-path/simulator check). Sigmond consults
+  it through `sigmond.hardware.hardware_ready(client)` — a tri-state that
+  prefers the client self-describe and falls back to a per-client lsusb probe
+  only while a client hasn't yet emitted the field (and for upstream
+  `ka9q-radio`, which has no inventory CLI, so sigmond detects the RX888
+  itself). `smd bringup` preflight **skips** an absent-hardware client
+  (`_detect_magnetometer`/`_detect_local_sdr` now delegate to the shared probe)
+  and `smd admin validate`'s `rule_hardware_gated_core` marks an enabled-but-absent
+  core client **core-but-dormant** instead of letting it vanish. `None`
+  (not gated / unknown) is never treated as absent.
+  `hardware_present` now covers **mag-recorder** (→RM3100) and
+  **gpsdo-monitor** (→Leo Bodnar GPSDO; a minimal `inventory --json` on an
+  otherwise infra/v0.4 client). *Still to do:* surface the gated state in the
+  TUI; let profiles declare which components are hardware-gated rather than the
+  registry being keyed in code.
 
 ## 10. Validation status
 
@@ -219,7 +228,7 @@ and `--non-interactive` appending the flag to config steps.
 | `--non-interactive --dry-run` | every `configure` step tagged `(non-interactive)`; install/tune/start/checkpoint steps unchanged |
 | `--with-optional --dry-run` | `install ka9q-web` added to Stage 1 (no configure step — it has no `[contract.config]`) |
 
-**Other:** `smd validate` remains 11/0/0 after all Phase A–C changes.
+**Other:** `smd admin validate` remains 11/0/0 after all Phase A–C changes.
 hf-timestd's `setup-station.sh --non-interactive` was run for real against a
 temp `--config` path and produced a complete config with callsign / grid /
 location / status populated from the §14 env bag.

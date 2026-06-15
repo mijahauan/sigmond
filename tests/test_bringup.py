@@ -1,6 +1,8 @@
 """Unit tests for the bring-up plan builder (pure; no I/O)."""
 from sigmond.catalog import Profile
-from sigmond.bringup import build_plan, STAGE2, STAGE3A, STAGE3B
+from sigmond.bringup import (
+    build_plan, STAGE2, STAGE3A, STAGE3B, STAGE4, CLIENT_STAGGER_S,
+)
 
 
 def _dasi2():
@@ -46,10 +48,47 @@ def test_stage_assignment_timing_authority_and_independent():
     assert stage['configure psk-recorder'] == STAGE3A
 
 
-def test_single_hard_checkpoint_is_radiod_configured():
+def test_plan_provisions_hs_uploader_dir_before_start():
+    # Recorder units need /var/lib/hs-uploader (ReadWritePaths + ProtectSystem
+    # strict) to exist or they fail 226/NAMESPACE; bring-up must create it
+    # before any start.
     p = build_plan(_dasi2(), local_radiod=True)
-    hard = [s for s in p.steps if s.hard]
-    assert len(hard) == 1 and hard[0].check == 'radiod-configured'
+    prov = next((i for i, s in enumerate(p.steps)
+                 if '/var/lib/hs-uploader' in s.argv), None)
+    first_start = next((i for i, s in enumerate(p.steps)
+                        if s.kind == 'start'), None)
+    assert prov is not None, 'no hs-uploader provisioning step'
+    assert first_start is not None and prov < first_start
+
+
+def test_plan_runs_radiod_migrate_after_configs_before_start():
+    # A leftover legacy config that `config init` skipped is healed by a
+    # `radiod migrate` step that runs after all configs and before any start.
+    p = build_plan(_dasi2(), local_radiod=True)
+    mig = next((i for i, s in enumerate(p.steps)
+                if 'migrate' in s.label and 'migrate' in s.argv), None)
+    first_start = next((i for i, s in enumerate(p.steps)
+                        if s.kind == 'start'), None)
+    assert mig is not None, 'no radiod-migrate step in the plan'
+    assert first_start is not None and mig < first_start
+    assert p.steps[mig].argv[-4:] == ['admin', 'radiod', 'migrate', '--yes']
+
+
+def test_config_checkpoints_are_hard_but_final_validate_is_not():
+    # A failed client config must ABORT (not warn-and-continue, which left a
+    # silently-broken station — sigmond#14/#6).  radiod + every configured:<c>
+    # checkpoint is hard; only the final validate stays advisory (warmup warns
+    # are normal there).
+    p = build_plan(_dasi2(), local_radiod=True)
+    hard = {s.check for s in p.steps if s.hard}
+    assert 'radiod-configured' in hard
+    assert 'configured:hf-timestd' in hard
+    assert 'configured:wspr-recorder' in hard
+    assert 'configured:psk-recorder' in hard
+    assert 'configured:mag-recorder' in hard
+    # the final validate checkpoint is not hard
+    final = [s for s in p.steps if s.kind == 'checkpoint' and s.check == 'validate']
+    assert final and not final[0].hard
 
 
 def test_with_optional_toggles_ka9q_web():
@@ -65,20 +104,139 @@ def test_start_is_last_action_and_final_checkpoint_is_validate():
     assert any(s.kind == 'start' for s in p.steps)
 
 
-def test_non_interactive_appends_flag_to_config_steps():
+def test_non_interactive_flag_makes_every_config_step_non_interactive():
     p = build_plan(_dasi2(), local_radiod=True, non_interactive=True)
     cfg = [s for s in p.steps if s.kind == 'config']
     assert cfg and all('--non-interactive' in s.argv for s in cfg)
-    p2 = build_plan(_dasi2(), local_radiod=True, non_interactive=False)
-    assert all('--non-interactive' not in s.argv
-               for s in p2.steps if s.kind == 'config')
+
+
+def test_client_config_is_non_interactive_by_default_but_radiod_is_not():
+    # Default bring-up: client config interviews run --non-interactive (their
+    # own wizards can't run inside bring-up's nested terminal), but radiod —
+    # sigmond's own inline text wizard — stays interactive.
+    p = build_plan(_dasi2(), local_radiod=True, non_interactive=False)
+    cfg = {s.label: s for s in p.steps if s.kind == 'config'}
+    assert '--non-interactive' not in cfg['configure radiod'].argv
+    for client in ('configure hf-timestd', 'configure wspr-recorder',
+                   'configure psk-recorder', 'configure mag-recorder'):
+        assert '--non-interactive' in cfg[client].argv, client
+
+
+def test_every_install_is_preceded_by_a_topology_enable():
+    # Regression for the inert-station bug: bring-up must flip topology
+    # enabled=true for each component, else `smd status`/validate see nothing
+    # declared and Stage-4 start has nothing to start.
+    p = build_plan(_dasi2(), local_radiod=True)
+    enabled = {s.argv[-1] for s in p.steps if s.kind == 'enable'}
+    for s in p.steps:
+        if s.kind == 'install':
+            comp = s.argv[s.argv.index('--components') + 1]
+            assert comp in enabled, f'{comp} installed but never enabled'
+            # enable must come before its install
+            ei = next(i for i, st in enumerate(p.steps)
+                      if st.kind == 'enable' and st.argv[-1] == comp)
+            ii = next(i for i, st in enumerate(p.steps)
+                      if st.kind == 'install'
+                      and st.argv[st.argv.index('--components') + 1] == comp)
+            assert ei < ii, f'enable {comp} must precede its install'
+    # ka9q-radio + the data clients are all enabled
+    assert {'ka9q-radio', 'wspr-recorder', 'psk-recorder', 'hf-timestd'} <= enabled
+
+
+def test_reporter_creates_recorder_instances_and_starts_them_by_reporter():
+    p = build_plan(_dasi2(), local_radiod=True, reporter='AC0G/S')
+    labels = _labels(p)
+    for client in ('wspr-recorder', 'psk-recorder'):
+        # Stage 3a scaffolds the per-reporter instance...
+        assert any(s.argv[:4] == ['smd', 'admin', 'instance', 'add']
+                   and s.argv[-2:] == [client, 'AC0G/S'] for s in p.steps), client
+        # ...and Stage 4 starts it via `instance enable` (not a base-config start).
+        assert any(s.kind == 'start'
+                   and s.argv[:4] == ['smd', 'admin', 'instance', 'enable']
+                   and s.argv[-2:] == [client, 'AC0G/S'] for s in p.steps), client
+        assert f'start {client} (staggered)' not in labels, client
+
+
+def test_no_reporter_keeps_base_config_start():
+    p = build_plan(_dasi2(), local_radiod=True)   # reporter=None
+    assert 'start wspr-recorder (staggered)' in _labels(p)
+    assert not any('instance' in s.argv for s in p.steps)
 
 
 def test_skip_excludes_hardware_gated_client():
-    # Environment-aware: a client whose hardware is absent (e.g. mag-recorder
-    # with no magnetometer) is skipped, not scaffolded.
+    # `skip` still excludes a component from the plan entirely (used e.g. by
+    # base's detection-gating): mag-recorder is not scaffolded at all.
     p = build_plan(_dasi2(), local_radiod=True, skip=frozenset({'mag-recorder'}))
     assert 'install mag-recorder' not in _labels(p, 'install')
     assert 'configure mag-recorder' not in _labels(p, 'config')
     # the other clients are unaffected
     assert 'install wspr-recorder' in _labels(p, 'install')
+
+
+def test_dormant_keeps_component_but_softens_checkpoint():
+    # Dormant (hardware-absent) gated client stays in the plan — install +
+    # configure + enable — so it lights up when the hardware is later attached
+    # and `smd start` (which skips dormant components) runs again.  But its
+    # "configured" checkpoint is SOFT so a config step that can't complete
+    # without the device doesn't abort the bring-up (docs/install-redesign.md §3).
+    p = build_plan(_dasi2(), local_radiod=True,
+                   dormant=frozenset({'mag-recorder'}))
+    assert 'install mag-recorder' in _labels(p, 'install')
+    assert 'configure mag-recorder' in _labels(p, 'config')
+    ckpts = {s.label: s.hard for s in p.steps if s.kind == 'checkpoint'}
+    assert ckpts['checkpoint: mag-recorder configured'] is False
+    # a non-dormant client keeps its HARD configured checkpoint
+    assert ckpts['checkpoint: wspr-recorder configured'] is True
+
+
+def _stage4(plan):
+    return [s for s in plan.steps if s.stage == STAGE4]
+
+
+def test_stage4_streaming_gate_between_radiod_and_clients():
+    # Local radiod: the radiod stack starts, THEN a streaming gate, THEN the
+    # first radiod-bound client.  A client must never provision against a
+    # not-yet-streaming radiod.
+    s4 = _stage4(build_plan(_dasi2(), local_radiod=True))
+    kinds = [s.kind for s in s4]
+    assert kinds.count('wait-streaming') == 1
+    gate = next(i for i, s in enumerate(s4) if s.kind == 'wait-streaming')
+    radiod_start = next(i for i, s in enumerate(s4)
+                        if s.kind == 'start' and 'radiod' in s.label)
+    first_client = next(i for i, s in enumerate(s4) if '(staggered)' in s.label)
+    assert radiod_start < gate < first_client
+
+
+def test_stage4_radiod_bound_clients_are_staggered():
+    s4 = _stage4(build_plan(_dasi2(), local_radiod=True))
+    staggered = [s for s in s4 if '(staggered)' in s.label]
+    # hf-timestd, wspr, psk (mag is independent); hf-timestd first.
+    assert [s.argv[-1] for s in staggered] == [
+        'hf-timestd', 'wspr-recorder', 'psk-recorder']
+    assert all(s.settle_s == CLIENT_STAGGER_S for s in staggered)
+
+
+def test_stage4_independent_client_started_unstaggered_after_bound():
+    # mag-recorder present (not skipped): started on the independent track,
+    # not gated/staggered against radiod.
+    s4 = _stage4(build_plan(_dasi2(), local_radiod=True))
+    indep = [s for s in s4 if '(independent)' in s.label]
+    assert [s.argv[-1] for s in indep] == ['mag-recorder']
+    assert all(s.settle_s == 0 for s in indep)
+
+
+def test_stage4_remote_has_no_streaming_gate_but_still_staggers():
+    s4 = _stage4(build_plan(_dasi2(), local_radiod=False,
+                            remote_status_dns='x-status.local'))
+    assert not any(s.kind == 'wait-streaming' for s in s4)
+    assert not any('radiod' in s.label and s.kind == 'start' for s in s4)
+    staggered = [s for s in s4 if '(staggered)' in s.label]
+    assert staggered and all(s.settle_s == CLIENT_STAGGER_S for s in staggered)
+
+
+def test_stage4_final_sweep_start_then_validate():
+    s4 = _stage4(build_plan(_dasi2(), local_radiod=True))
+    # last two stage-4 steps: an argument-less `smd start` sweep, then validate.
+    assert s4[-1].kind == 'checkpoint' and s4[-1].check == 'validate'
+    sweep = s4[-2]
+    assert sweep.kind == 'start' and '--components' not in sweep.argv

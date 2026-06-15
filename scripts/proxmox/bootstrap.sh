@@ -389,10 +389,10 @@ ${BOLD}${GREEN}║  Sigmond Proxmox VM bootstrap COMPLETE                       
 ${BOLD}${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}
 
   Next steps:
-    sudo smd list --available           # see catalog
-    sudo smd install radiod             # install ka9q-radio
-    sudo smd install hf-timestd         # then any clients you want
-    sudo smd status                     # monitor
+    smd list --available           # see catalog
+    smd install radiod             # install ka9q-radio
+    smd install hf-timestd         # then any clients you want
+    smd status                     # monitor
 
   State file: $SIGMOND_STATE_FILE
   Host backups: ssh root@${PROXMOX_HOST:-<host>} ls /root/proxmox-passthrough-backup/

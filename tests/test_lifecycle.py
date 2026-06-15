@@ -258,7 +258,8 @@ class TestOrderUnits:
         assert ordered[0].component == 'radiod'
 
     def test_coordination_order(self):
-        """Clients should follow coordination.toml declaration order."""
+        """Within EQUAL start_priority, clients follow coordination.toml
+        declaration order (the secondary tiebreaker)."""
         units = [
             _unit('psk-recorder'),
             _unit('hf-timestd'),
@@ -272,9 +273,38 @@ class TestOrderUnits:
             mock.Mock(client_type='hf-timestd'),
             mock.Mock(client_type='psk-recorder'),
         ]
-        ordered = order_units(units, coordination=coord)
+        # Explicit equal priorities so coordination order is the sole
+        # determinant (the on-disk catalog gives hf-timestd a lower priority,
+        # which is covered by test_priority_overrides_coordination).
+        priorities = {'radiod': 0, 'wspr-recorder': 100,
+                      'hf-timestd': 100, 'psk-recorder': 100}
+        ordered = order_units(units, coordination=coord, priorities=priorities)
         names = [u.component for u in ordered]
         assert names == ['radiod', 'wspr-recorder', 'hf-timestd', 'psk-recorder']
+
+    def test_priority_overrides_coordination(self):
+        """start_priority is the PRIMARY key — a lower-priority component
+        starts before coordination-earlier ones (e.g. the hf-timestd timing
+        authority ahead of wspr/psk, which bringup Stage 4 relies on)."""
+        units = [
+            _unit('psk-recorder'),
+            _unit('wspr-recorder'),
+            _unit('hf-timestd'),
+            _unit('radiod', name=None),
+        ]
+        coord = mock.Mock()
+        coord.clients = [
+            mock.Mock(client_type='wspr-recorder'),
+            mock.Mock(client_type='psk-recorder'),
+            mock.Mock(client_type='hf-timestd'),
+        ]
+        priorities = {'radiod': 0, 'hf-timestd': 50,
+                      'wspr-recorder': 100, 'psk-recorder': 100}
+        ordered = order_units(units, coordination=coord, priorities=priorities)
+        names = [u.component for u in ordered]
+        # hf-timestd (50) jumps ahead of wspr/psk (100) despite being last in
+        # coordination order; wspr before psk by coordination tiebreak.
+        assert names == ['radiod', 'hf-timestd', 'wspr-recorder', 'psk-recorder']
 
     def test_no_radiod_kiwi_only(self):
         """Ordering works when radiod is absent (kiwi-only station)."""

@@ -463,14 +463,14 @@ def classify(interfaces: list, groups: list, queriers: list,
                        f'(downgrade implies a v2 querier has been seen)')
         return 'lan-capable', reasons, (
             'A querier appears to be present (kernel downgrade to IGMPv2). '
-            'Re-run `smd diag net` to confirm with a raw-socket listen.')
+            'Re-run `smd admin diag net` to confirm with a raw-socket listen.')
 
     if wired:
         if not listen_root:
             reasons.append('no querier seen in /proc/net/igmp state; '
                            'passive listen skipped (needs root)')
             return 'unknown', reasons, (
-                'Re-run `smd diag net --listen 130` to passively listen '
+                'Re-run `smd admin diag net --listen 130` to passively listen '
                 'for IGMP queries before deciding whether to install one.')
         reasons.append(f'listened {queriers and "" or "≥125s"} on wired iface, '
                        f'no IGMP general query observed')

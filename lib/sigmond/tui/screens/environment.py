@@ -5,7 +5,7 @@ Middle: observations from the last discovery pass
 Right:  per-declared-peer delta status + any unknown-extras
 
 Worker thread runs probes off the UI thread using the in-process
-`sigmond.discovery` modules (same code path as `smd environment probe`).
+`sigmond.discovery` modules (same code path as `smd admin environment probe`).
 """
 
 from __future__ import annotations

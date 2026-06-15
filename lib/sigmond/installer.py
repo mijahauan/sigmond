@@ -115,6 +115,39 @@ def git_head_ref(repo_dir: Path) -> str:
     return s or '?'
 
 
+def _checkout_ref(repo_dir: Path, ref: str) -> None:
+    """Check out ``ref``, deepening a shallow clone if the ref isn't reachable.
+
+    sigmond#13: install.sh pre-clones every catalog repo with ``--depth 1`` for
+    a fast switch-on later.  But a pinned ref older than that single commit —
+    e.g. ka9q-radio's ka9q-python-compat pin — isn't in the shallow history, so
+    a plain ``git fetch origin`` doesn't bring it and ``git checkout <pin>``
+    fails with "fatal: reference is not a tree" / "unable to read tree".  That
+    aborts the whole install; pre-fix it bricked the first greenfield bring-up.
+
+    Building the EXACT pin matters: ka9q-radio's wire-protocol headers are what
+    ka9q-web and ka9q-python adapt to, so we must never silently settle for the
+    shallow HEAD.  When the ref is missing we deepen (``fetch --unshallow``) and
+    only then check it out — or fail loudly if the pin genuinely doesn't exist.
+    """
+    reachable = _git(repo_dir, 'rev-parse', '--verify', '--quiet',
+                     f'{ref}^{{commit}}')
+    if reachable.returncode != 0:
+        shallow = _git(repo_dir, 'rev-parse', '--is-shallow-repository')
+        if shallow.stdout.strip() == 'true':
+            un = _git(repo_dir, 'fetch', '--unshallow', 'origin')
+            if un.returncode != 0:
+                raise RuntimeError(
+                    f"git fetch --unshallow failed in {repo_dir} (needed to "
+                    f"reach pinned ref {ref!r}): {un.stderr.strip()}"
+                )
+    r = _git(repo_dir, 'checkout', ref)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"git checkout {ref!r} failed in {repo_dir}: {r.stderr.strip()}"
+        )
+
+
 def clone_repo(
     entry: CatalogEntry,
     *,
@@ -140,11 +173,9 @@ def clone_repo(
                     raise RuntimeError(
                         f"git fetch failed in {repo_dir}: {r.stderr.strip()}"
                     )
-                r = _git(repo_dir, 'checkout', ref)
-                if r.returncode != 0:
-                    raise RuntimeError(
-                        f"git checkout {ref!r} failed in {repo_dir}: {r.stderr.strip()}"
-                    )
+                # Shallow-aware: deepen the clone if `ref` (e.g. ka9q-radio's
+                # compat pin) isn't in the --depth 1 history (sigmond#13).
+                _checkout_ref(repo_dir, ref)
             else:
                 # Fetch first, then reset to origin's default branch.
                 # git pull --ff-only fails when HEAD is detached (e.g. after
@@ -189,11 +220,9 @@ def clone_repo(
             f"git clone {entry.repo} failed: {r.stderr.strip()}"
         )
     if ref is not None:
-        r = _git(repo_dir, 'checkout', ref)
-        if r.returncode != 0:
-            raise RuntimeError(
-                f"git checkout {ref!r} failed after clone: {r.stderr.strip()}"
-            )
+        # A fresh clone here is full-depth, but route through the same helper so
+        # a future shallow clone path stays correct (sigmond#13).
+        _checkout_ref(repo_dir, ref)
     _apply_canonical_perms(repo_dir)
     return repo_dir
 

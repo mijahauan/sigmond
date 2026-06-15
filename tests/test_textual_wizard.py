@@ -236,8 +236,10 @@ class TextualConfigWizardScreenTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(callsign.value, "W1ABC")
                 grid = modal.query_one("#tw-fld-station-grid_square", Input)
                 self.assertEqual(grid.value, "FN42")
-                spool = modal.query_one("#tw-fld-paths-spool_dir", Input)
-                self.assertEqual(spool.value, "/var/lib/psk-recorder")
+                # paths.spool_dir is help.toml-hidden (install-canonical path),
+                # so the wizard intentionally does NOT render it.  keep_wav is
+                # an operator knob and still renders.
+                self.assertEqual(len(modal.query("#tw-fld-paths-spool_dir")), 0)
                 keep_wav = modal.query_one("#tw-fld-paths-keep_wav", Switch)
                 self.assertFalse(keep_wav.value)
                 frames = modal.query_one(

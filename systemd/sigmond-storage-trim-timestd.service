@@ -17,7 +17,7 @@ Group=root
 # rows keeps a useful recent window while bounding sink.db growth
 # (the hfdl/wspr trims run at 24h).  If a real consumer pipeline
 # starts draining the queue itself, stop this timer.
-ExecStart=/usr/local/bin/smd storage trim --target-db timestd --max-age 7d --yes
+ExecStart=/usr/local/bin/smd admin storage trim --target-db timestd --max-age 7d --yes
 
 StandardOutput=journal
 StandardError=journal

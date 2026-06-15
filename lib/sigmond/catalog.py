@@ -87,6 +87,13 @@ class CatalogEntry:
     # in the source TOML" — order_units then falls back to its baseline.
     # 0 = radiod (always first), 100 = default, 900 = uploaders (last).
     start_priority: Optional[int] = None
+    # Human label for the host-specific hardware this component needs to run
+    # (e.g. "magnetometer (RM3100 / Pololu USB-I2C)").  Set => the component is
+    # hardware-gated: sigmond reads its `inventory --json hardware_present` and,
+    # when the hardware is absent, marks it core-but-dormant (Phase D).  None =>
+    # not hardware-gated.  Declared here so the gated set lives in config, not
+    # code (harmonize._hardware_gated_registry).
+    hardware_gated: Optional[str] = None
 
     def is_installed(self) -> bool:
         """Best-effort check that this entry is installed on the local host.
@@ -183,6 +190,7 @@ def _entry_from_toml_block(name: str, cfg: dict) -> CatalogEntry:
         install_script=cfg.get('install_script') or None,
         topology_alias=cfg.get('topology_alias') or None,
         start_priority=int(raw_priority) if raw_priority is not None else None,
+        hardware_gated=cfg.get('hardware_gated') or None,
     )
 
 
@@ -206,6 +214,8 @@ def _entry_to_block(entry: CatalogEntry) -> dict:
         block['topology_alias'] = entry.topology_alias
     if entry.start_priority is not None:
         block['start_priority'] = entry.start_priority
+    if entry.hardware_gated is not None:
+        block['hardware_gated'] = entry.hardware_gated
     return block
 
 

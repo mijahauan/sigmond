@@ -49,8 +49,8 @@ Current sigmond clients:
 | `hfdl-recorder` | `dumphfdl` (+ libacars, liquid-dsp) | **both** (prebuilt + script) | ~15 min build, 3 upstream clones, 10+ apt deps |
 | `wspr-recorder` | `wsprd`, `jt9` | **both** (prebuilt + script) | Qt + boost + fftw, ~5 min build |
 | `mag-recorder` | `mag-usb` | **both** (prebuilt + script) | small build but likely RPi target (ARM); ship x86_64 prebuilt, build-fresh covers ARM |
-| `hf-timestd` | PHaRLAP | **external only** | closed-source, MCR-dependent, can't redistribute |
-| `hf-timestd` | pyLAP | **build-on-install (pinned)** | git clone built into the venv; pinned via `PYLAP_REF` in its `install.sh` |
+| `hf-timestd` | PHaRLAP | **external only** | closed-source (DST), can't redistribute — operator-staged via the client's `scripts/install-pharlap.sh` (or baked into the **controlled** DASI2 golden image as single-licensee internal use). GCC/gfortran-built static libs in 4.7.4 — no Intel Fortran, no MATLAB MCR. |
+| `hf-timestd` | pyLAP | **build-on-install (pinned)** | open fork (`mijahauan/PyLap`) built into the venv; pin (`PYLAP_REF`) lives in the client's `scripts/ensure-pylap.sh` — the single idempotent builder run by both `install.sh` and `deploy.toml` `[build].steps`, so clones self-heal raytracing after a venv rebuild. Stand-alone: paths derive from the script's own location, no sigmond required. |
 
 `iri2020` is a pip-installable git dep handled by `uv` — it doesn't fit
 the binary `.provenance` contract, but the same *pin the source* principle
@@ -76,19 +76,19 @@ provenance moves out of the (un-ownable) upstream repo and into sigmond:
 | Pin the source | `.provenance` `upstream.sha` committed in the client repo | a pinned commit SHA in sigmond (`_ONION_COMMIT`, ka9q-radio pin) — never a bare branch / HEAD |
 | Record provenance | `bin/<binary>.provenance` committed to git | written to `/var/lib/sigmond/build-manifest/<component>.toml` after the build |
 | Idempotent build | `scripts/build-<binary>.sh` | the `_install_*_native` / `_build_*` helpers (they sha-check before rebuilding) |
-| Verify on host | `install.sh` provenance check | surfaced in `smd diag` (cf. the `ka9q_python_compat` cross-repo pin rule) |
+| Verify on host | `install.sh` provenance check | surfaced in `smd admin diag` (cf. the `ka9q_python_compat` cross-repo pin rule) |
 
 ### Current compliance
 
 | Component | Native dep | Source | Pinned? | Provenance? | Gap to close |
 |---|---|---|---|---|---|
 | `ka9q-radio` | radiod + `fobos` driver | `ka9q/ka9q-radio` (fobos in-tree) | tracks upstream | no | `fobos` disabled by default; `libfobos` is proprietary/external, so it stays opt-in |
-| `ka9q-web` | `onion` | `davidmoreno/onion` | **yes** — `_ONION_COMMIT` pinned | **yes** — `build-manifest/ka9q-web.toml` | ✓ fully migrated (pin + manifest + `smd diag` drift check) |
+| `ka9q-web` | `onion` | `davidmoreno/onion` | **yes** — `_ONION_COMMIT` pinned | **yes** — `build-manifest/ka9q-web.toml` | ✓ fully migrated (pin + manifest + `smd admin diag` drift check) |
 
 `onion` was the first migration: it is pinned (`_ONION_COMMIT`) and
 `_build_ka9q_web_with_onion` writes
 `/var/lib/sigmond/build-manifest/ka9q-web.toml` after each build. The
-`smd diag` now compares each installed build manifest against the current
+`smd admin diag` now compares each installed build manifest against the current
 pins (`_diag_build_manifests` / `_expected_build_pins`) — the
 upstream-built analogue of `install.sh`'s provenance check — and warns
 with a rebuild hint on drift. The remaining work is applying the same

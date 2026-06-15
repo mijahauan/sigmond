@@ -190,16 +190,16 @@ smd --help
 
 ```bash
 # List all available components from the catalog
-sudo smd list --catalog
+smd list --catalog
 
 # Check service status (all disabled at this point — that's expected)
-sudo smd status
+smd status
 
 # Run diagnostics
-sudo smd diag
+smd admin diag
 ```
 
-Expected `smd diag` output on a fresh install (no components enabled yet):
+Expected `smd admin diag` output on a fresh install (no components enabled yet):
 
 ```
 ✓  network: wsprnet.org reachable
@@ -218,7 +218,7 @@ install them. All components are disabled by default.
 ### Option A — Interactive TUI (recommended)
 
 ```bash
-sudo smd tui
+smd tui
 ```
 
 Use the Install screen to browse and enable components visually.
@@ -226,16 +226,16 @@ Use the Install screen to browse and enable components visually.
 ### Option B — Install a specific component
 
 ```bash
-sudo smd install radiod
-sudo smd install wspr-recorder
-sudo smd install psk-recorder
-sudo smd install hf-timestd
+smd install radiod
+smd install wspr-recorder
+smd install psk-recorder
+smd install hf-timestd
 ```
 
 ### Option C — Install everything in the catalog
 
 ```bash
-sudo smd install
+smd install
 ```
 
 > **Note on first-run timing:** The first `smd install` run will spend
@@ -271,13 +271,13 @@ enabled = false        # set true if you want WSPR audio capture
 
 | Command | Description |
 |---|---|
-| `sudo smd start` | Start all enabled components |
-| `sudo smd stop` | Stop all enabled components |
-| `sudo smd restart` | Restart all enabled components |
-| `sudo smd status` | Show service health |
-| `sudo smd log <client>` | Follow logs for a client |
-| `sudo smd diag` | Run cross-component diagnostics |
-| `sudo smd validate` | Check cross-client harmonization rules |
+| `smd start` | Start all enabled components |
+| `smd stop` | Stop all enabled components |
+| `smd restart` | Restart all enabled components |
+| `smd status` | Show service health |
+| `smd admin log <client>` | Follow logs for a client |
+| `smd admin diag` | Run cross-component diagnostics |
+| `smd admin validate` | Check cross-client harmonization rules |
 | `smd list` | Show per-component status (git ref, upstream divergence, version policy) |
 | `smd component update [<name>]` | Pull latest code per topology version policy and reapply (was `smd list --update`; root) |
 | `smd list --catalog` | Show full component catalog (what could be installed) |

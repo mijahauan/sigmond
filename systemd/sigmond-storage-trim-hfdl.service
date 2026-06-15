@@ -18,7 +18,7 @@ Group=root
 # preserving the most-recent day for diagnostics and replay.
 # Other producers (timestd.events, codar.*, ...) are NOT touched —
 # operator runs separate trim units for those.
-ExecStart=/usr/local/bin/smd storage trim --target-db hfdl --max-age 24h --yes
+ExecStart=/usr/local/bin/smd admin storage trim --target-db hfdl --max-age 24h --yes
 
 StandardOutput=journal
 StandardError=journal

@@ -368,12 +368,12 @@ def _resolve_radiod_status(coord: Coordination,
             if c.instance != instance:
                 continue
             if c.radiod_id and c.radiod_id in coord.radiods:
-                return coord.radiods[c.radiod_id].status_dns or ""
+                return coord.radiods[c.radiod_id].effective_status_dns
             break
 
     if len(coord.radiods) == 1:
         only = next(iter(coord.radiods.values()))
-        return only.status_dns or ""
+        return only.effective_status_dns
 
     return ""
 

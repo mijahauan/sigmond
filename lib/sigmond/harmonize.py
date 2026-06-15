@@ -20,6 +20,8 @@ for the multi-radiod architecture in coordination.toml:
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -109,6 +111,35 @@ def rule_radiod_resolution(view: SystemView) -> RuleResult:
         )
     return RuleResult("radiod_resolution", "pass",
                       f"all {len(coord.clients)} client instance(s) resolve", [])
+
+
+# The install-rendered placeholder recorder configs ship for the radiod status;
+# `config init` replaces it.  A config that still carries it is unconfigured.
+_RADIOD_STATUS_PLACEHOLDER = "<configure-via-config-init>"
+
+
+def rule_radiod_status_configured(view: SystemView) -> RuleResult:
+    """A recorder whose radiod status is still the install-rendered
+    ``<configure-via-config-init>`` placeholder is UNCONFIGURED — it can't
+    resolve radiod and won't decode.  This used to pass silently (validate skips
+    an inactive instance), so a half-configured station read green; flag it so
+    that can't happen again.  Caught live on the first greenfield reinstall:
+    wspr-recorder came up with a placeholder radiod address."""
+    bad = []
+    affected = []
+    for cv in view.client_views.values():
+        for iv in cv.instances:
+            if iv.radiod_id and _RADIOD_STATUS_PLACEHOLDER in iv.radiod_id:
+                bad.append(f"{cv.client_type}@{iv.instance}")
+                affected.append(cv.client_type)
+    if bad:
+        return RuleResult(
+            "radiod_status_configured", "fail",
+            f"unconfigured radiod status (placeholder) in {', '.join(sorted(bad))}"
+            f" — run `smd config init <client> --reconfig`",
+            sorted(set(affected)))
+    return RuleResult("radiod_status_configured", "pass",
+                      "no placeholder radiod addresses", [])
 
 
 def rule_frequency_coverage(view: SystemView) -> RuleResult:
@@ -719,7 +750,7 @@ def rule_data_path_upstream(view: SystemView) -> RuleResult:
 def rule_timing_reference(view: SystemView) -> RuleResult:
     """Runtime health of the local GPS timing-reference chain
     (GPSDO -> gpsd -> chrony -> hf-timestd).  Observability only; remediation
-    lives in `smd timing reconcile`.  See docs/timing-chain-architecture.md.
+    lives in `smd admin timing reconcile`.  See docs/timing-chain-architecture.md.
     Skipped on hosts with no local gpsd (remote-radiod / no GPS)."""
     if not (shutil.which("gpsd") or Path("/usr/sbin/gpsd").exists()):
         return RuleResult("timing_reference", "pass",
@@ -740,7 +771,7 @@ def rule_timing_reference(view: SystemView) -> RuleResult:
     if fails:
         detail = "; ".join(f"{l.name}: {l.detail}" for l in fails)
         return RuleResult("timing_reference", "fail",
-                          f"{detail}.  Remediate: sudo smd timing reconcile",
+                          f"{detail}.  Remediate: smd admin timing reconcile",
                           [l.name for l in fails])
     if warns:
         return RuleResult("timing_reference", "warn",
@@ -815,8 +846,190 @@ def rule_wspr_decode_enabled(view: SystemView) -> RuleResult:
                       f"decode enabled on {len(active)} active instance(s)", [])
 
 
+from . import hardware
+
+
+def _hardware_ready(component: str):
+    """Tri-state hardware readiness — indirection so tests can monkeypatch."""
+    return hardware.hardware_ready(component)
+
+
+# Map of component -> human hardware label for hardware-gated core components.
+# DECLARED IN CONFIG, not code: each is the `hardware_gated` field of the
+# component's catalog entry (etc/catalog.toml [client.<name>]).  Readiness comes
+# from the client's own `inventory --json hardware_present` self-describe
+# (CONTRACT §3 / Phase D) via sigmond.hardware.  Cached per-process; tests
+# monkeypatch _hardware_gated_registry (and _hardware_ready / _unit_active) to
+# stay hermetic.
+_HW_GATED_CACHE: Optional[dict] = None
+
+
+def _hardware_gated_registry() -> dict:
+    """Load {component: hardware_label} from the catalog's `hardware_gated`
+    declarations.  Cached; empty on any load error (gating simply goes dark
+    rather than crashing a rule)."""
+    global _HW_GATED_CACHE
+    if _HW_GATED_CACHE is None:
+        reg: dict = {}
+        try:
+            from .catalog import load_catalog
+            for name, entry in load_catalog().items():
+                label = getattr(entry, "hardware_gated", None)
+                if label:
+                    reg[name] = label
+        except Exception:                              # noqa: BLE001
+            reg = {}
+        _HW_GATED_CACHE = reg
+    return _HW_GATED_CACHE
+
+
+def _unit_active(pattern: str) -> bool:
+    """True when at least one active service unit matches ``pattern``."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["systemctl", "list-units", "--type=service", "--state=active",
+             "--no-legend", "--plain", pattern],
+            capture_output=True, text=True, timeout=10).stdout
+    except Exception:                                  # noqa: BLE001
+        return False
+    return any(ln.strip() for ln in out.splitlines())
+
+
+def rule_hardware_gated_core(view: SystemView) -> RuleResult:
+    """Runtime: a hardware-gated core component (e.g. mag-recorder) that is
+    ENABLED in topology — i.e. expected on this host — but whose hardware is
+    absent is legitimately *dormant*, not broken.
+
+    Without this rule such a component simply vanishes from ``validate``: a
+    dasi2 host with no magnetometer reads as silently incomplete.  This rule
+    makes it visible as "core-but-gated (expected, dormant)" so the host reads
+    as complete-with-one-client-dormant.  When the hardware IS present but the
+    component isn't running, that's an actionable gap (warn).  Components not
+    enabled here (e.g. under the base/client profiles) are skipped."""
+    dormant: list = []
+    not_running: list = []
+    affected: list = []
+    for comp, hw_label in _hardware_gated_registry().items():
+        if not view.is_enabled(comp):
+            continue                       # not expected on this host
+        ready = _hardware_ready(comp)
+        if ready is None:
+            continue                       # readiness unknown — don't guess
+        if not ready:
+            dormant.append(f"{comp} (no {hw_label})")
+        elif not _unit_active(f"{comp}.service"):
+            not_running.append(f"{comp} ({hw_label} present)")
+            affected.append(comp)
+    if not_running:
+        return RuleResult(
+            "hardware_gated_core", "warn",
+            "hardware present but core component not running: "
+            + "; ".join(not_running)
+            + " — configure + start it (smd config init <name>; smd start)",
+            sorted(set(affected)))
+    if dormant:
+        return RuleResult(
+            "hardware_gated_core", "pass",
+            "core-but-gated (expected, dormant — hardware absent): "
+            + "; ".join(dormant), [])
+    return RuleResult("hardware_gated_core", "pass",
+                      "skipped (no hardware-gated core components enabled)", [])
+
+
+def dormant_reason(component: str, *, enabled: bool):
+    """For per-component status surfaces (TUI/CLI): the human hardware label
+    when ``component`` is an *enabled*, hardware-gated core component whose
+    hardware is absent — i.e. it should read as **dormant** rather than just
+    stopped/running.  Returns None otherwise (not gated, hardware present, not
+    enabled, or readiness unknown).  Shares rule_hardware_gated_core's source of
+    truth so the components table and ``smd validate`` never disagree."""
+    if not enabled:
+        return None
+    label = _hardware_gated_registry().get(component)
+    if label is None:
+        return None
+    return label if _hardware_ready(component) is False else None
+
+
+# ---------------------------------------------------------------------------
+# Delivered per-site secrets (read-only presence/validity check).
+#
+# Cross-ref: bin/smd `smd admin secrets` owns the authoritative installer and
+# validators for these same files; this rule is the validate-side check. Keep
+# the two format checks in sync. SSH-key secrets self-generate on-host and are
+# intentionally out of scope. See PROVISIONING-INPUTS.md §10.
+# ---------------------------------------------------------------------------
+_SECRET_EARTHDATA = Path('/etc/hf-timestd/earthdata-netrc')
+_SECRET_FRPC = Path('/etc/sigmond/frpc.toml')
+
+
+def _secret_earthdata_problem(path: Path) -> Optional[str]:
+    # Unreadable (0600, run as non-root) → can't validate; don't flag.
+    if not os.access(path, os.R_OK):
+        return None
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    if 'urs.earthdata.nasa.gov' not in text:
+        return "missing 'machine urs.earthdata.nasa.gov'"
+    if 'YOUR_' in text:
+        return 'contains placeholder values'
+    return None
+
+
+def _secret_frpc_problem(path: Path) -> Optional[str]:
+    if not os.access(path, os.R_OK):
+        return None
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    m = re.search(r'token\s*=\s*"([^"]*)"', text)
+    if not m or not m.group(1) or 'FROM_WD_ADMIN' in m.group(1) \
+            or m.group(1).startswith('<'):
+        return 'token is a placeholder/empty'
+    return None
+
+
+def rule_secrets(view: SystemView) -> RuleResult:
+    """Delivered per-site secrets present/valid where needed.
+
+    Earthdata is optional enrichment — its absence is a valid choice, so only a
+    present-but-broken file is flagged. RAC's frpc.toml is required when the rac
+    component is enabled; a placeholder token is flagged whenever the file
+    exists. Run as root for full content validation (0600 files).
+    """
+    problems = []
+    affected = []
+
+    if _SECRET_EARTHDATA.exists():
+        p = _secret_earthdata_problem(_SECRET_EARTHDATA)
+        if p:
+            problems.append(f'earthdata-netrc: {p}')
+            affected.append(str(_SECRET_EARTHDATA))
+
+    rac_on = view.is_enabled('rac')
+    if rac_on and not _SECRET_FRPC.exists():
+        problems.append('rac enabled but /etc/sigmond/frpc.toml is missing')
+        affected.append(str(_SECRET_FRPC))
+    elif _SECRET_FRPC.exists():
+        p = _secret_frpc_problem(_SECRET_FRPC)
+        if p:
+            problems.append(f'frpc.toml: {p}')
+            affected.append(str(_SECRET_FRPC))
+
+    if problems:
+        return RuleResult('secrets', 'warn', '; '.join(problems), affected)
+    return RuleResult('secrets', 'pass',
+                      'delivered secrets present/valid (SSH keys self-generate; '
+                      'optional secrets may be absent)', [])
+
+
 ALL_RULES = [
     rule_radiod_resolution,
+    rule_radiod_status_configured,
     rule_frequency_coverage,
     rule_cpu_isolation,
     rule_timing_chain,
@@ -834,6 +1047,8 @@ ALL_RUNTIME_RULES = [
     rule_kernel_rcvbuf_adequate,
     rule_timing_reference,
     rule_wspr_decode_enabled,
+    rule_hardware_gated_core,
+    rule_secrets,
 ]
 
 

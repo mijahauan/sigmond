@@ -8,7 +8,7 @@ Companion to [CLI-V2-SPEC.md](CLI-V2-SPEC.md) (CLI verb surface) and
 
 **Supersedes** [`tasks/plan-multi-rx888-sources.md`](../tasks/plan-multi-rx888-sources.md)
 Phase 3 onward (the "one wspr-recorder serves N sources" model).
-Phase 2 of that plan (the `smd sources` CLI namespace) is still
+Phase 2 of that plan (the `smd admin sources` CLI namespace) is still
 load-bearing and gets adapted to the per-instance model below; Phase 1
 (radiod control-plane discovery) is still relevant as planned. The
 remaining phases are absorbed into the implementation phases of *this*
@@ -137,7 +137,7 @@ declare them; no inheritance.
 ## 5. The per-instance config file — source of truth for instance state
 
 Owned and read by the client (each client repo's `configurator.py`
-schema). Sigmond writes the initial file via `smd instance add` (§6),
+schema). Sigmond writes the initial file via `smd admin instance add` (§6),
 then defers to the client's config-edit flow (whiptail wizard,
 in-TUI Textual wizard, or `$EDITOR`).
 
@@ -164,31 +164,31 @@ sdr      = "rx888-mk2"              # SDR model / serial / friendly name
 ```
 
 The `[instance]` block is the contract sigmond depends on; the rest is
-the client's. The `sources` list is what `smd sources apply` writes
+the client's. The `sources` list is what `smd admin sources apply` writes
 into the per-instance sources file (§4); the per-instance config holds
-the operator-curated copy as the source of truth, and `smd sources
+the operator-curated copy as the source of truth, and `smd admin sources
 apply` renders it into the runtime config the client actually reads.
 
 ---
 
-## 6. The `smd instance` CLI namespace
+## 6. The `smd admin instance` CLI namespace
 
 New namespace in `bin/smd` (per CLI-V2-SPEC.md style — namespaced,
 not bare verbs).
 
 ```
-smd instance list                                    # all instances across all clients
-smd instance list <client>                           # instances of one client
-smd instance show <client> <reporter-id>             # config + units + sources for one
-smd instance add <client> <reporter-id>              # create — see below for what it does
-smd instance remove <client> <reporter-id>           # remove — stop unit, optionally --purge files
-smd instance edit <client> <reporter-id>             # invoke the client's config-edit flow
-smd instance enable <client> <reporter-id>           # systemctl enable + start
-smd instance disable <client> <reporter-id>          # systemctl disable + stop
-smd instance migrate                                 # one-shot migration from radiod-keyed names
+smd admin instance list                                    # all instances across all clients
+smd admin instance list <client>                           # instances of one client
+smd admin instance show <client> <reporter-id>             # config + units + sources for one
+smd admin instance add <client> <reporter-id>              # create — see below for what it does
+smd admin instance remove <client> <reporter-id>           # remove — stop unit, optionally --purge files
+smd admin instance edit <client> <reporter-id>             # invoke the client's config-edit flow
+smd admin instance enable <client> <reporter-id>           # systemctl enable + start
+smd admin instance disable <client> <reporter-id>          # systemctl disable + stop
+smd admin instance migrate                                 # one-shot migration from radiod-keyed names
 ```
 
-**`smd instance add <client> <reporter-id>` does:**
+**`smd admin instance add <client> <reporter-id>` does:**
 1. Validate the reporter ID against the §3 regex
 2. Refuse if the instance already exists for that client
 3. Initialize `/etc/<client>/<reporter-id>.toml` (template from the
@@ -200,10 +200,10 @@ smd instance migrate                                 # one-shot migration from r
 6. Create `/var/lib/<client>/<reporter-id>/`,
    `/var/log/<client>/<reporter-id>/`, `/run/<client>/<reporter-id>/`
    with correct ownership
-7. **Does NOT** enable or start the unit — operator runs `smd instance
+7. **Does NOT** enable or start the unit — operator runs `smd admin instance
    enable` after picking sources and editing config
 
-**`smd instance migrate` does** (one-shot, idempotent, dry-run by default):
+**`smd admin instance migrate` does** (one-shot, idempotent, dry-run by default):
 1. Walk existing `<client>@<old>.service` units that are NOT
    already reporter-ID-named (heuristic: old name doesn't match §3
    regex constraints clearly, or is on a known migration list)
@@ -218,10 +218,10 @@ Existing top-level `smd config init <client>` / `smd config edit
 stay, but the canonical operator workflow becomes:
 
 ```
-smd instance add wspr-recorder AC0G-B1
-smd sources add wspr-recorder@AC0G-B1 radiod:my-rx888
-smd instance edit wspr-recorder AC0G-B1     # set antenna, sdr, processing knobs
-smd instance enable wspr-recorder AC0G-B1
+smd admin instance add wspr-recorder AC0G-B1
+smd admin sources add wspr-recorder@AC0G-B1 radiod:my-rx888
+smd admin instance edit wspr-recorder AC0G-B1     # set antenna, sdr, processing knobs
+smd admin instance enable wspr-recorder AC0G-B1
 ```
 
 ---
@@ -272,14 +272,14 @@ Affected screens (revisits of work shipped in this session's commits
 |---|---|
 | `activity` | Activity target stays (`smd watch <target>`), but selecting `psk`/`wspr`/`hfdl`/`codar` exposes a second-stage instance dropdown; passes `--instance <reporter-id>` to the watcher |
 | `verifier` | Verifier report's `--rx-call` becomes per-instance auto-filled; rehabilitate takes `<reporter-id>` instead of (or alongside) `<rx_call>` |
-| `logs` | Per-instance log target — `smd log <client>@<reporter-id>` follows that one unit's journal |
+| `logs` | Per-instance log target — `smd admin log <client>@<reporter-id>` follows that one unit's journal |
 | `lifecycle` | Per-instance start/stop/restart/reload buttons |
 | `sources` | Two-stage selector; per-instance source list (now plural) |
 | `client_config` | Two-stage selector — config init/edit operates on one instance |
 
 New screens needed:
 - **Instance** (under Installation): browse + add + remove instances
-  across all clients. Equivalent of `smd instance list/add/remove`.
+  across all clients. Equivalent of `smd admin instance list/add/remove`.
 
 ---
 
@@ -287,7 +287,7 @@ New screens needed:
 
 Existing single-instance deployments (the `wspr-recorder@my-rx888`
 shape on bee1 and similar) get migrated to reporter-keyed names via
-`smd instance migrate`. No permanent dual-form support; the
+`smd admin instance migrate`. No permanent dual-form support; the
 radiod-keyed instance names are deprecated as soon as the migration
 ships and removed one release after.
 
@@ -332,7 +332,7 @@ serialization — tolerable for WSPR (120 s cycles) but pushes FT8's
 15 s SLA; treat 6-8 reporters per host as a soft ceiling that warrants
 re-benchmarking before committing.
 
-**Phase 2 — `smd instance` CLI namespace.** Implements the seven
+**Phase 2 — `smd admin instance` CLI namespace.** Implements the seven
 verbs from §6 with the per-instance file-layout actions. Does NOT
 yet require client refactors — the sigmond side can create
 instances even when the client still loads from the
@@ -430,7 +430,7 @@ Three of the seven §8 deliverables shipped this round:
   screens/instance.py`.  DataTable listing of per-reporter
   instances; add (with --dry-run option) + remove + dry-run scan of
   legacy radiod-keyed deployments.  Full interactive migration
-  stays CLI-only (`sudo smd instance migrate --yes`) — the TUI
+  stays CLI-only (`smd admin instance migrate --yes`) — the TUI
   doesn't have a sensible interactive multi-prompt flow for that.
 - **Activity screen** — added a second-stage instance dropdown.
   Selecting a per-recorder target (wspr/psk/hfdl/codar) populates
@@ -463,14 +463,14 @@ commit, 2026-05-25):**
 - **Client config screen** — per-instance dropdown + "Edit per-
   instance" button.  Selecting a row populates the dropdown with
   the client's known instances (config + legacy radiod-keyed).
-  The button runs `smd instance edit <client> <reporter-id>` (the
+  The button runs `smd admin instance edit <client> <reporter-id>` (the
   CLI command suspends the TUI exactly like the other Edit
-  buttons).  Today's `smd instance edit` is a Phase-2 stub that
+  buttons).  Today's `smd admin instance edit` is a Phase-2 stub that
   points at `$EDITOR` — wiring is ready for when the per-client
   refactor lets it drive the client's config flow with the per-
   instance path injected.
 - **Sources screen** — added a hint section documenting the
-  per-instance CLI syntax (`smd sources add <client>@<reporter-id>
+  per-instance CLI syntax (`smd admin sources add <client>@<reporter-id>
   <kind>:<id>`) that the sources CLI will accept once **Phase 7**
   grows it.  Full per-instance filter UI is deferred to that
   phase; until then, sources are per-client.
@@ -507,7 +507,7 @@ PARTIAL (sigmond pending commit, 2026-05-25):**
   Operating-host DB migration plus verifier-side query updates.
 
 **Phase 8 — Migration tool. DONE (sigmond pending commit, 2026-05-25).**
-`smd instance migrate` per §6 — replaces the Phase-2 detect-only
+`smd admin instance migrate` per §6 — replaces the Phase-2 detect-only
 stub with a one-shot interactive migration.
 
 Detection (`detect_migration_candidates()` in `lib/sigmond/instance.py`)
@@ -558,7 +558,7 @@ deprecating the radiod-keyed pattern formally.
 
 Decisions the implementation phases can make without re-opening §1-9:
 
-1. **Operator-input UX for reporter ID at `smd instance add` time.**
+1. **Operator-input UX for reporter ID at `smd admin instance add` time.**
    Pure CLI prompt? A short modal in TUI's Instance screen? Both?
    Both, probably; default to CLI prompt.
 2. **Default reporter-ID suggestion.** Sigmond knows the host
@@ -574,7 +574,7 @@ Decisions the implementation phases can make without re-opening §1-9:
 4. **`smd start <client>` under multi-instance.** Today starts all
    units of a client. Should it become "start all enabled instances
    of this client"? Lean: yes, that's the natural read.
-5. **Per-instance log level via `smd log set-level`.** Today the
+5. **Per-instance log level via `smd admin log set-level`.** Today the
    `set-level` form takes `<client>` (or omits it for global). Add a
    `<client>@<reporter-id>` form for per-instance. Backward
    compatible — the `<client>` form means "all instances of this

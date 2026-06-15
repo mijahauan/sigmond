@@ -290,7 +290,7 @@ diverging keys).
 One-shot lint of every drop-in surface:
 
 ```bash
-smd diag drop-in your-client
+smd admin diag drop-in your-client
 ```
 
 Walks repo presence → `deploy.toml` → contract subcommands →
@@ -316,7 +316,7 @@ smd tui                                        # appears in Activity / Verifier
 If `smd config show` reports your client as `not installed` but
 `smd list` agrees it's installed, your `inventory --json` probably
 isn't exiting 0 on the operator's UID — re-read §4's operator-
-callable rule (`smd diag drop-in` catches this and points you at
+callable rule (`smd admin diag drop-in` catches this and points you at
 the fix).
 
 ---

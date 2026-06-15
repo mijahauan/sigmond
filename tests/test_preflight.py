@@ -165,7 +165,7 @@ class TestNoCache:
             preflight.check_requires("wspr-recorder",
                                       catalog_with_unmet_ka9q,
                                       yes=True)
-        assert "smd environment probe" in capsys.readouterr().err
+        assert "smd admin environment probe" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

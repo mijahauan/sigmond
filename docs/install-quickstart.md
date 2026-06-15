@@ -148,12 +148,12 @@ sudo userdel -r sigmond                      # only if no human user shares the 
 > the first move.
 
 ```bash
-sudo smd tui                          # interactive configurator
+smd tui                          # interactive configurator
 # or, headless:
-sudo smd install radiod
-sudo smd install wspr-recorder
+smd install radiod
+smd install wspr-recorder
 sudo vi /etc/sigmond/topology.toml    # set enabled = true
-sudo smd start
+smd start
 smd status
 ```
 

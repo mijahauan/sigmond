@@ -205,6 +205,36 @@ class InitWizardTests(unittest.TestCase):
             ]).read_text()
             self.assertIn('serial      = "0123456789ABCDEF"', rx_text)
 
+    def test_sole_sdr_id_is_bare_hostname(self):
+        """One SDR on the bus → the radiod id is the bare short hostname, so
+        the mDNS status name is `<hostname>-status.local` with no SDR-family
+        suffix (docs/install-redesign.md §4)."""
+        with tempfile.TemporaryDirectory() as d:
+            radio_dir = Path(d) / "radio"
+            coord_path = Path(d) / "coordination.toml"
+            sdrs = [_sdr("RX-888 Mk2", serial="0123456789ABCDEF",
+                         index=0, bus="003", device="005")]
+            with mock.patch.object(radiod_config, "_discover_sdrs",
+                                   return_value=sdrs), \
+                 mock.patch.object(radiod_config, "RADIOD_CONFIG_DIR",
+                                   radio_dir), \
+                 mock.patch.object(radiod_config, "COORDINATION_PATH",
+                                   coord_path), \
+                 mock.patch.object(radiod_config, "_suggest_iface",
+                                   return_value="eth0"), \
+                 mock.patch("socket.gethostname",
+                            return_value="dasi2-13.local"):
+                rc = radiod_config.cmd_radiod_init(_ns())
+
+            self.assertEqual(rc, 0)
+            written = [p.name for p in radio_dir.glob("radiod@*.conf")]
+            self.assertEqual(written, ["radiod@dasi2-13.conf"])
+            conf = (radio_dir / "radiod@dasi2-13.conf").read_text()
+            self.assertIn("status    = dasi2-13-status.local", conf)
+            coord = coord_path.read_text()
+            self.assertIn('[radiod."dasi2-13"]', coord)
+            self.assertIn('status_dns  = "dasi2-13-status.local"', coord)
+
     def test_no_sdrs_yields_actionable_error(self):
         with mock.patch.object(radiod_config, "_discover_sdrs",
                                return_value=[]):

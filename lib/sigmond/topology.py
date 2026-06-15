@@ -76,7 +76,7 @@ _DEFAULT_COMPONENTS = {
 }
 
 _DEFAULT_CLIENT_DIR = Path('/opt/git/sigmond')
-_DEFAULT_SMD_BIN    = Path('/usr/local/sbin/smd')
+_DEFAULT_SMD_BIN    = Path('/usr/local/bin/smd')
 
 
 def load_topology(path: Path = TOPOLOGY_PATH,

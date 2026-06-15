@@ -31,9 +31,9 @@
 #  11. Symlinks bin/smd into /usr/local/bin/smd (on every user's PATH)
 #
 # After this script completes, run:
-#   sudo smd install               — CLI: install all catalog components
-#   sudo smd install wspr-recorder — CLI: install one component
-#   sudo smd tui                   — TUI: browse and install components
+#   smd install               — CLI: install all catalog components
+#   smd install wspr-recorder — CLI: install one component
+#   smd tui                   — TUI: browse and install components
 #
 # Note: the sigmond group membership applies to sessions started AFTER
 # install.sh.  Open a new shell (or `newgrp sigmond`) before editing
@@ -409,7 +409,7 @@ ok "Python: $($PYTHON3 --version)"
 # world-readable so operators can `sqlite3 sink.db` read-only without joining
 # the group.  Matches lib/sigmond/storage_migrate.py SINK_DIR_MODE/SINK_GROUP
 # — without this match, the producer-side writer falls back to silent noop
-# and `smd storage migrate-to-sqlite` is the only thing that re-applies the
+# and `smd admin storage migrate-to-sqlite` is the only thing that re-applies the
 # perms (it shouldn't be load-bearing for a greenfield install).
 #
 # /var/log/sigmond stays group-only (2770 sigmond:sigmond) — no need to
@@ -464,8 +464,8 @@ if [[ ! -f /etc/sigmond/topology.toml ]]; then
     $SUDO tee /etc/sigmond/topology.toml >/dev/null <<'TOML'
 # /etc/sigmond/topology.toml — which components are enabled on this host.
 #
-# All components start disabled.  Use  sudo smd tui  (Install screen)
-# or  sudo smd install <name>  to enable and install them.
+# All components start disabled.  Use  smd tui  (Install screen)
+# or  smd install <name>  to enable and install them.
 
 [component.ka9q-radio]
 enabled = false
@@ -604,7 +604,7 @@ ok "sigmond-shm-precreate symlink installed"
 $SUDO systemctl daemon-reload
 # Enable just the unified trim timer.  ConditionPathExists=/var/lib/sigmond/sink.db
 # in the service unit keeps it inactive until a producer writes — and even
-# with sink.db pre-created, `smd storage trim --all --yes` is a no-op on an
+# with sink.db pre-created, `smd admin storage trim --all --yes` is a no-op on an
 # empty db.  Safe to enable on greenfield.
 # `enable --now` STARTS the timer immediately (not just at next boot).
 # Combined with the unit's OnActiveSec=10min, this guarantees a first
@@ -637,6 +637,36 @@ if [[ -L "$LEGACY_INSTALL_SMD" ]]; then
     $SUDO rm -f "$LEGACY_INSTALL_SMD"
 fi
 
+# ─── operator shell aliases ───────────────────────────────────────────────────
+# Ensure the invoking user's ~/.bash_aliases sources sigmond's curated alias
+# file (ll / lrt / cds / tm).  Sourcing — not copying — keeps the repo file the
+# single source of truth, so `git pull` updates the aliases with no per-host
+# re-sync.  Idempotent: guarded by a marker block, so re-running install.sh is a
+# no-op once present.
+_ensure_operator_aliases() {
+    local user="$1"
+    [[ -z "$user" || "$user" == "root" ]] && return 0
+    local home
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    [[ -z "$home" || ! -d "$home" ]] && return 0
+    local rc="$home/.bash_aliases"
+    if [[ -f "$rc" ]] && grep -q '>>> sigmond aliases >>>' "$rc"; then
+        ok "operator aliases already wired in $rc"
+        return 0
+    fi
+    info "Wiring sigmond aliases (ll/lrt/cds/tm) into $rc…"
+    {
+        echo '# >>> sigmond aliases >>>'
+        echo '# Curated sigmond shell aliases/functions (ll, lrt, cds, tm).'
+        echo "# Source of truth: $CANONICAL_REPO/etc/aliases.sh — edits there propagate on \`git pull\`."
+        echo "[ -r $CANONICAL_REPO/etc/aliases.sh ] && . $CANONICAL_REPO/etc/aliases.sh"
+        echo '# <<< sigmond aliases <<<'
+    } | $SUDO tee -a "$rc" >/dev/null
+    $SUDO chown "$user:$(id -gn "$user" 2>/dev/null || echo "$user")" "$rc"
+    ok "operator aliases wired (new shells pick them up; source ~/.bashrc for this one)"
+}
+_ensure_operator_aliases "$INVOKER"
+
 # ─── catalog prune ────────────────────────────────────────────────────────────
 # Trim /etc/sigmond/catalog.toml so it carries only entries that diverge
 # from the in-repo catalog.  On a fresh install (file doesn't exist) this
@@ -647,7 +677,7 @@ fi
 # operator file as-is.
 if [[ -f /etc/sigmond/catalog.toml ]]; then
     info "Pruning /etc/sigmond/catalog.toml against repo catalog…"
-    if $SUDO "$INSTALL_SMD" config catalog-prune; then
+    if $SUDO env SIGMOND_ALLOW_SUDO=1 "$INSTALL_SMD" config catalog-prune; then
         ok "catalog pruned"
     else
         warn "catalog prune failed (non-fatal — operator file left intact)"
@@ -735,7 +765,7 @@ echo -e "${BOLD}${GREEN}║   Sigmond is installed!  Next: open the TUI.        
 echo -e "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════╝${NC}"
 echo
 echo -e "  ${BOLD}Open the configuration workflow:${NC}"
-echo -e "    sudo smd tui"
+echo -e "    smd tui"
 echo
 echo -e "  Walk the Installation section top to bottom — that's the"
 echo -e "  greenfield workflow:"
@@ -753,7 +783,7 @@ echo -e "                            this host is running radiod)."
 echo -e "    7. ${BOLD}CPU frequency${NC}   — same — cap non-radiod cores to save power."
 echo
 echo -e "  ${BOLD}CLI shortcuts${NC} (power users):"
-echo -e "    sudo smd install                  install everything topology-enabled"
-echo -e "    sudo smd install <component>      install one"
-echo -e "    sudo smd list --catalog           browse the catalog"
+echo -e "    smd install                  install everything topology-enabled"
+echo -e "    smd install <component>      install one"
+echo -e "    smd list --catalog           browse the catalog"
 echo

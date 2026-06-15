@@ -22,7 +22,7 @@ Type=oneshot
 User=root
 Group=root
 EnvironmentFile=-/etc/default/sigmond-storage-trim
-ExecStart=/usr/local/bin/smd storage trim --all --yes
+ExecStart=/usr/local/bin/smd admin storage trim --all --yes
 
 StandardOutput=journal
 StandardError=journal

@@ -55,7 +55,7 @@ PASSIVE_SOURCES = ("mdns", "multicast", "gpsdo")
 
 # ---------------------------------------------------------------------------
 # Source -> probe module dispatch.  Single source of truth used by both the
-# CLI (`smd environment probe`) and the TUI Environment screen.
+# CLI (`smd admin environment probe`) and the TUI Environment screen.
 # ---------------------------------------------------------------------------
 
 def module_for_source(src: str):
@@ -322,7 +322,7 @@ def dict_to_obs(d: dict) -> Observation:
 
 
 # ---------------------------------------------------------------------------
-# Source selection helper for `smd environment probe --source=…`
+# Source selection helper for `smd admin environment probe --source=…`
 # ---------------------------------------------------------------------------
 
 def resolve_sources(env: Environment, selected: Optional[str]) -> list:

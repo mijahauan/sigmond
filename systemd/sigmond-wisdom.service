@@ -23,7 +23,7 @@ RemainAfterExit=no
 TimeoutStartSec=infinity
 # Stop services so FFTW benchmarks on an idle CPU; restart them after.
 ExecStartPre=-/usr/local/bin/smd stop
-ExecStart=/usr/local/bin/smd wisdom plan
+ExecStart=/usr/local/bin/smd admin wisdom plan
 ExecStartPost=-/usr/local/bin/smd start
 
 [Install]

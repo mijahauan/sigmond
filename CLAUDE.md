@@ -184,33 +184,33 @@ smd component list       Per-component status: lifecycle + git ref + upstream
 smd component update [<name>]       Pull and reconcile per topology version policy
                          (was `smd list --update`/`--apply`). Requires root.
 smd component list --catalog        Show catalog of known clients (was `--available`).
-smd log <client>         Follow journal, tail file logs
-smd log set-level [<client>] <lvl>  Set per-client (+ SIGHUP) or global default log
-                         level (was `smd log --level`).
+smd admin log <client>         Follow journal, tail file logs
+smd admin log set-level [<client>] <lvl>  Set per-client (+ SIGHUP) or global default log
+                         level (was `smd admin log --level`).
 smd status               Service health + client inventory enrichment
 smd config show|migrate  Inspect or migrate coordination config
 smd config init <c>      Invoke a client's first-run wizard (CONTRACT-v0.5 §14)
 smd config edit <c>      Invoke a client's edit flow, or $EDITOR fallback
 smd config init radiod   Sigmond-owned wizard: probe USB, render radiod@<id>.conf
                          per SDR, register in coordination.toml (CONTRACT-v0.5 §14.4)
-smd validate             Cross-client harmonization rules (read-only)
+smd admin validate             Cross-client harmonization rules (read-only)
 smd watch ka9q           Compare pinned ka9q-radio commit vs upstream and
                          flag changes that would break RTP delivery
                          (was `smd ka9q-watch`)
-smd diag                 Network + deps + client validation diagnostics
+smd admin diag                 Network + deps + client validation diagnostics
 smd tui                  Launch interactive TUI configurator
-smd environment list|probe|describe   Situational awareness of network peers
-smd storage migrate-to-sqlite   Remove a leftover legacy ClickHouse
+smd admin environment list|probe|describe   Situational awareness of network peers
+smd admin storage migrate-to-sqlite   Remove a leftover legacy ClickHouse
                          install once SQLite (the sole local sink) is in
                          use. Dry-run by default; --yes to execute.
                          Requires root.
-smd storage trim         TTL-based janitor for the local SQLite sink.
+smd admin storage trim         TTL-based janitor for the local SQLite sink.
                          `--all` applies per-target policies from env
                          (PSK_RETENTION_MIN=60 min); 30-min floor
                          enforced. One-shot mode: `--target-db psk
                          --max-age 2h`. Systemd timer
                          `sigmond-storage-trim-all.timer` (15 min).
-smd verifier report      Windowed audit of upload delivery. Default
+smd admin verifier report      Windowed audit of upload delivery. Default
                          `--target wspr` reads wsprnet_audit (per-spot
                          delivered/lost/in_flight/rejected/silent_drop
                          cohorts + cadence). `--target psk` audits the
@@ -228,7 +228,7 @@ construction time:
   if writable, else no-op (preserves standalone-safety).
 
 SQLite is the sole local sink. On a host carrying a leftover legacy
-ClickHouse install, use `smd storage migrate-to-sqlite` to clean it up.
+ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
 
 ## Architecture layers
 
@@ -249,7 +249,7 @@ ClickHouse install, use `smd storage migrate-to-sqlite` to clean it up.
    tailing, file-log tailing via `log_paths` from inventory, runtime log-level
    control via `coordination.env` + SIGHUP.
 
-5. **Status/diag enrichment** — `smd status` and `smd diag` query each
+5. **Status/diag enrichment** — `smd status` and `smd admin diag` query each
    installed client's `inventory --json` and `validate --json` to surface
    version, channels, frequencies, modes, and validation issues.
 
@@ -282,7 +282,7 @@ ClickHouse install, use `smd storage migrate-to-sqlite` to clean it up.
 12. **Environment discovery** (`lib/sigmond/commands/environment.py`,
     `lib/sigmond/discovery/`) — situational awareness of network peers:
     mDNS discovery of KIWISDRs and GPSDOs, IGMP multicast probing, NTP
-    client probing, HTTP discovery. Powers `smd environment` and TUI screens.
+    client probing, HTTP discovery. Powers `smd admin environment` and TUI screens.
 
 13. **ka9q-radio drift watcher** (`lib/sigmond/commands/ka9q_watch.py`) —
     thin wrapper around `ka9q-python/scripts/check_upstream_drift.py`.
@@ -394,7 +394,7 @@ destructive change.
 
 Runs automatically at the end of `install.sh` (after the smd
 symlink is in place) so each upgrade trims any drift.  Safe to
-re-run manually: `sudo smd config catalog-prune` (add `--dry-run`
+re-run manually: `smd config catalog-prune` (add `--dry-run`
 to preview).
 
 ### Where to edit which file
@@ -469,8 +469,8 @@ to drive fleet upgrades.
 
 ```bash
 # Canonical, restarts everything enabled:
-sudo smd component update       # pulls all repos per topology version policy
-sudo smd restart                # restarts every enabled component
+smd component update       # pulls all repos per topology version policy
+smd restart                # restarts every enabled component
 
 # Surgical (only what's stale; less disruption to already-fresh services):
 sudo -u sigmond git -C /opt/git/sigmond/<lib> pull --ff-only

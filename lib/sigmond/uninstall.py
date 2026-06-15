@@ -35,7 +35,7 @@ the destinations.  Component-owned dirs (/etc/radio, /var/lib/ka9q-radio,
 shared dirs (/usr/local/{bin,sbin}, /etc/systemd/system, udev/sysctl/...) are
 removed one by one so the shared dir itself is never touched.
 
-Plan-first ALWAYS.  ``smd uninstall`` prints the plan and stops; ``--yes``
+Plan-first ALWAYS.  ``smd admin uninstall`` prints the plan and stops; ``--yes``
 executes.  ``--dry-run`` is the explicit no-op form.  Refuses non-root.
 """
 
@@ -44,6 +44,7 @@ from __future__ import annotations
 import glob as globmod
 import os
 import pwd
+import re
 import shlex
 import shutil
 import subprocess
@@ -165,6 +166,7 @@ def _deploy_extras(name: str) -> dict:
     deploy = purge._read_deploy_toml(repo) if repo.exists() else None
     units: list = []
     link_dsts: list = []
+    declared_state: list = []
     if deploy is not None:
         sysd = deploy.get("systemd", {}) or {}
         units += list(sysd.get("units", []))
@@ -172,10 +174,23 @@ def _deploy_extras(name: str) -> dict:
         units += list(sysd.get("optional_units", []))
         for step in deploy.get("install", {}).get("steps", []):
             dst = step.get("dst")
-            if step.get("kind") == "link" and dst:
-                link_dsts.append(Path(dst))
+            if not dst:
+                continue
+            dp = Path(dst)
+            if step.get("kind") == "link":
+                link_dsts.append(dp)
+            elif dp.parent in (VAR_LIB, VAR_LOG, RUN, DEV_SHM):
+                # Data/log/runtime dirs the deploy.toml actually creates (mkdir/
+                # render/install steps) — e.g. hf-timestd's /var/lib/timestd,
+                # which the VAR_LIB/<name> convention below MISSES because the
+                # dir name (timestd) differs from the component name (hf-timestd).
+                # sigmond#11: full uninstall left /var/lib/timestd behind.
+                declared_state.append(dp)
     state_dirs = [d / name for d in (VAR_LIB, VAR_LOG, RUN, DEV_SHM)
                   if (d / name).exists()]
+    for dp in declared_state:
+        if dp.exists() and dp not in state_dirs:
+            state_dirs.append(dp)
     return {"units": units, "link_dsts": link_dsts, "state_dirs": state_dirs}
 
 
@@ -214,6 +229,31 @@ def _affinity_dropins() -> list:
         if dropin.exists():
             out.append(dropin)
     return out
+
+
+def _sweep_orphan_units() -> None:
+    """Clean up systemd debris left after unit files are deleted (sigmond#11).
+
+    Name-agnostic and safe: a ``*.wants/<unit>`` enable-symlink whose target
+    file we just removed is, by definition, an orphan we created — a broken
+    .wants symlink is inert but lingers in ``systemctl`` listings forever.
+    Delete those dead links (surviving software's still-valid symlinks resolve
+    fine and are left alone), then ``systemctl reset-failed`` so the removed
+    units stop showing up as not-found / failed.  Called after the unit files
+    are gone and the daemon has been reloaded."""
+    if SYSTEMD_SYSTEM.is_dir():
+        for wants in SYSTEMD_SYSTEM.glob("*.wants"):
+            if not wants.is_dir():
+                continue
+            try:
+                for link in wants.iterdir():
+                    # is_symlink() true + exists() false == dangling (target
+                    # removed).  Valid links resolve, so exists() stays true.
+                    if link.is_symlink() and not link.exists():
+                        link.unlink()
+            except OSError:
+                pass
+    subprocess.run(["systemctl", "reset-failed"], capture_output=True, check=False)
 
 
 def _grub_has_sigmond_tokens() -> bool:
@@ -568,6 +608,7 @@ def execute_uninstall(plan: UninstallPlan, *, dry_run: bool = False) -> int:
     for d in plan.ext_asset_dirs:
         _rmtree(d)
     subprocess.run(["systemctl", "daemon-reload"], capture_output=True, check=False)
+    _sweep_orphan_units()
 
     # systemctl stop can return before a daemon exits, and non-conformant units
     # (radiod@) may be missed — so make sure nothing survives unit removal,
@@ -623,6 +664,27 @@ def execute_uninstall(plan: UninstallPlan, *, dry_run: bool = False) -> int:
     return 0
 
 
+# GRUB cmdline assignments where sigmond's CPU-isolation tokens live, e.g.
+#   GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=0,1 rcu_nocbs=0,1"
+# Groups: (leading ws)(KEY)(quote char)(inner value)(trailing ws + optional #comment)
+_GRUB_CMDLINE_RE = re.compile(
+    r'^(\s*)(GRUB_CMDLINE_LINUX(?:_DEFAULT)?)\s*=\s*'
+    r'(["\'])(.*)\3(\s*(?:#.*)?)$'
+)
+
+
+def _strip_grub_tokens(inner: str) -> str:
+    """Drop sigmond's CPU-isolation tokens from a kernel cmdline VALUE (the text
+    already stripped of its surrounding quotes), keeping the remaining words in
+    order.  Operates on the unquoted inner content so the closing quote is never
+    captured into a token word — the bug behind sigmond#12, where splitting the
+    whole assignment let ``rcu_nocbs=0,1"`` (closing quote attached) be removed,
+    leaving an unterminated string that breaks ``sh -n`` / grub-mkconfig / apt."""
+    kept = [w for w in inner.split()
+            if not any(w == tok or w.startswith(tok + "=") for tok in GRUB_TOKENS)]
+    return " ".join(kept)
+
+
 def _revert_grub() -> None:
     try:
         lines = GRUB_FILE.read_text().splitlines()
@@ -632,20 +694,35 @@ def _revert_grub() -> None:
     changed = False
     out = []
     for line in lines:
-        new = line
-        for tok in GRUB_TOKENS:
-            words = [w for w in new.split()
-                     if not w.startswith(tok + "=") and not w.startswith('"' + tok + "=")]
-            rebuilt = " ".join(words)
-            if rebuilt != new:
-                new = rebuilt
+        m = _GRUB_CMDLINE_RE.match(line)
+        if m:
+            ws, key, quote, inner, tail = m.groups()
+            new_inner = _strip_grub_tokens(inner)
+            if new_inner != inner:
+                line = f"{ws}{key}={quote}{new_inner}{quote}{tail}"
                 changed = True
-        out.append(new)
-    if changed:
-        GRUB_FILE.write_text("\n".join(out) + "\n")
-        print(f"  reverted grub tokens in {GRUB_FILE}")
-        r = subprocess.run(["update-grub"], capture_output=True, text=True, check=False)
-        if r.returncode != 0:
-            subprocess.run(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"],
-                           capture_output=True, check=False)
-        print("  update-grub done (reboot to fully clear isolcpus)")
+        out.append(line)
+    if not changed:
+        return
+    new_text = "\n".join(out) + "\n"
+
+    # Safety net: never write a grub file that wouldn't parse.  A corrupt
+    # /etc/default/grub makes grub-mkconfig fail, which fails the kernel postrm
+    # hook, which fails EVERY subsequent apt transaction (sigmond#12).  Validate
+    # the rewrite with the same `sh -n` check bringup's preflight uses; if it
+    # somehow doesn't parse, leave the working file untouched and warn.
+    chk = subprocess.run(["sh", "-n"], input=new_text, text=True,
+                         capture_output=True, check=False)
+    if chk.returncode != 0:
+        detail = (chk.stderr.strip().splitlines() or ["parse failed"])[-1]
+        print(f"  warning: skipped grub revert — rewrite would not parse "
+              f"({detail}); left {GRUB_FILE} unchanged", file=sys.stderr)
+        return
+
+    GRUB_FILE.write_text(new_text)
+    print(f"  reverted grub tokens in {GRUB_FILE}")
+    r = subprocess.run(["update-grub"], capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        subprocess.run(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"],
+                       capture_output=True, check=False)
+    print("  update-grub done (reboot to fully clear isolcpus)")

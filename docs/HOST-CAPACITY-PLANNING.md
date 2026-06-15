@@ -114,7 +114,7 @@ machine on cache isolation is unaffordable.
   everything else into `other_cpus`. It does not consult
   `CacheIsland` data.
 * `AFFINITY_UNITS = {unit: 'radiod' | 'other'}` — two-bucket.
-* `smd diag cpu-affinity --apply` writes
+* `smd admin diag cpu-affinity --apply` writes
   `smd-cpu-affinity.conf` drop-ins per unit.
 
 What's missing for the general case:
@@ -151,7 +151,7 @@ externally)? The contract is more honest — costs change when
 clients change — but slower to bootstrap. The catalog can be filled
 in for known clients today and migrate to the contract later.
 
-A `smd diag capacity` view would tally declared costs per host,
+A `smd admin diag capacity` view would tally declared costs per host,
 compare against `gather_capabilities()`, and warn if the host is
 over-budget on any tier or topology assumption.
 

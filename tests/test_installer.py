@@ -211,3 +211,71 @@ class TestInstallClient:
                     cmd[0] == 'sudo' and str(script) in cmd
                     for cmd in invoked_cmds
                 )
+
+
+class TestCheckoutRefShallow:
+    """Regression for sigmond#13 — _checkout_ref must deepen a shallow clone to
+    reach a pinned ref that's older than the --depth 1 history (install.sh
+    pre-clones every catalog repo shallow; the ka9q-radio compat pin then isn't
+    present and `git checkout <pin>` fails with 'unable to read tree')."""
+
+    @staticmethod
+    def _git(repo, *args):
+        import subprocess
+        return subprocess.run(['git', '-C', str(repo), *args],
+                              capture_output=True, text=True)
+
+    def _make_upstream(self, path):
+        """A 2-commit upstream repo; return (old_sha, new_sha)."""
+        path.mkdir()
+        g = lambda *a: self._git(path, *a)
+        g('init', '-q', '-b', 'main')
+        g('config', 'user.email', 't@t'); g('config', 'user.name', 't')
+        (path / 'f').write_text('v1\n'); g('add', '.'); g('commit', '-qm', 'old')
+        old = g('rev-parse', 'HEAD').stdout.strip()
+        (path / 'f').write_text('v2\n'); g('add', '.'); g('commit', '-qm', 'new')
+        new = g('rev-parse', 'HEAD').stdout.strip()
+        return old, new
+
+    def test_deepens_shallow_clone_to_reach_pin(self, tmp_path):
+        from sigmond.installer import _checkout_ref
+        upstream = tmp_path / 'up'
+        old, new = self._make_upstream(upstream)
+
+        repo = tmp_path / 'clone'
+        # shallow depth-1 clone == what install.sh does; only `new` is present.
+        self._git(tmp_path, 'clone', '--quiet', '--depth', '1',
+                  f'file://{upstream}', str(repo))
+        assert self._git(repo, 'rev-parse',
+                         '--is-shallow-repository').stdout.strip() == 'true'
+        # the #13 precondition: the older pin is NOT reachable yet
+        assert self._git(repo, 'rev-parse', '--verify', '--quiet',
+                         f'{old}^{{commit}}').returncode != 0
+
+        # clone_repo fetches origin before delegating to _checkout_ref
+        self._git(repo, 'fetch', 'origin')
+        _checkout_ref(repo, old)
+
+        assert self._git(repo, 'rev-parse', 'HEAD').stdout.strip() == old
+        assert self._git(repo, 'rev-parse',
+                         '--is-shallow-repository').stdout.strip() == 'false'
+
+    def test_noop_on_full_clone_already_has_ref(self, tmp_path):
+        from sigmond.installer import _checkout_ref
+        upstream = tmp_path / 'up'
+        old, new = self._make_upstream(upstream)
+        repo = tmp_path / 'clone'
+        self._git(tmp_path, 'clone', '--quiet',
+                  f'file://{upstream}', str(repo))   # full clone
+        _checkout_ref(repo, old)                     # reachable -> plain checkout
+        assert self._git(repo, 'rev-parse', 'HEAD').stdout.strip() == old
+
+    def test_raises_on_genuinely_missing_ref(self, tmp_path):
+        import pytest
+        from sigmond.installer import _checkout_ref
+        upstream = tmp_path / 'up'
+        self._make_upstream(upstream)
+        repo = tmp_path / 'clone'
+        self._git(tmp_path, 'clone', '--quiet', f'file://{upstream}', str(repo))
+        with pytest.raises(RuntimeError):
+            _checkout_ref(repo, 'deadbeef' * 5)      # 40-char sha that doesn't exist

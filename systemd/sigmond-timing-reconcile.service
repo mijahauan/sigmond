@@ -7,4 +7,4 @@ After=chrony.service gpsd.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/smd timing reconcile
+ExecStart=/usr/local/bin/smd admin timing reconcile
