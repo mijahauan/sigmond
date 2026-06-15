@@ -12227,6 +12227,254 @@ def _add_ka9q_watch_args(p) -> None:
                    help='emit machine-readable JSON')
 
 
+# ════════════════════════════════════════════════════════════════════
+# smd notify — site fault producer
+#
+# Detects site-local faults (USB now; extensible) across the site's hosts
+# and writes fault records to a spool.  The wsprdaemon uploader folds any
+# pending records into the outbound tar as ``notify/<id>.json``; a
+# consumer on the wd processing nodes extracts + emails them (per-site
+# routing table + admin lives there).  Transmission/LAN faults are caught
+# centrally by upload-silence, not here — a broken path can't carry its
+# own alarm.  Config: /etc/sigmond/notify.toml (optional site email +
+# host list).  Spool: /var/lib/sigmond/notify/{outbox,state.json}.
+# ════════════════════════════════════════════════════════════════════
+_NOTIFY_DIR    = Path('/var/lib/sigmond/notify')
+_NOTIFY_OUTBOX = _NOTIFY_DIR / 'outbox'
+_NOTIFY_STATE  = _NOTIFY_DIR / 'state.json'
+_NOTIFY_CONF   = Path('/etc/sigmond/notify.toml')
+_NOTIFY_SCHEMA = 'sigmond-notify/1'
+
+
+def _notify_load_conf() -> dict:
+    conf = {'email': [], 'hosts': [], 'usb': True}
+    try:
+        import tomllib
+        if _NOTIFY_CONF.exists():
+            with open(_NOTIFY_CONF, 'rb') as f:
+                data = tomllib.load(f)
+            em = data.get('email')
+            if isinstance(em, str):
+                conf['email'] = [em]
+            elif isinstance(em, list):
+                conf['email'] = [str(x) for x in em]
+            hs = data.get('hosts')
+            if isinstance(hs, list):
+                conf['hosts'] = [str(x) for x in hs]
+            if 'usb' in data:
+                conf['usb'] = bool(data.get('usb'))
+    except Exception:  # noqa: BLE001 — config must never crash the run
+        pass
+    return conf
+
+
+def _notify_site_hosts(conf: dict) -> list:
+    """This host plus any remote radiod hosts (bee1/bee2…) and explicit
+    notify.toml overrides — the set of boxes whose kernel/log we scan."""
+    hosts = ['localhost']
+    for h in conf.get('hosts', []):
+        if h and h not in hosts:
+            hosts.append(h)
+    try:
+        import tomllib
+        import socket
+        coord = Path('/etc/sigmond/coordination.toml')
+        if coord.exists():
+            with open(coord, 'rb') as f:
+                data = tomllib.load(f)
+            short = socket.gethostname().split('.')[0]
+            local = {'localhost', '127.0.0.1', '::1', socket.gethostname(), short}
+            for _inst, cfg in (data.get('radiod') or {}).items():
+                h = str((cfg or {}).get('host', '')).strip()
+                if h and h not in local and h not in hosts:
+                    hosts.append(h)
+    except Exception:  # noqa: BLE001
+        pass
+    return hosts
+
+
+def _notify_load_state() -> dict:
+    try:
+        import json
+        if _NOTIFY_STATE.exists():
+            return json.loads(_NOTIFY_STATE.read_text())
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+def _notify_save_state(state: dict) -> None:
+    import json
+    _NOTIFY_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _NOTIFY_STATE.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(state, indent=2))
+    tmp.replace(_NOTIFY_STATE)
+
+
+def _notify_emit(record: dict) -> Path:
+    import json
+    _NOTIFY_OUTBOX.mkdir(parents=True, exist_ok=True)
+    fn = _NOTIFY_OUTBOX / f"{record['id']}.json"
+    tmp = fn.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(record, indent=2))
+    tmp.replace(fn)
+    return fn
+
+
+def _notify_make_record(conf, source_host, detector, severity, ts,
+                        summary, detail) -> dict:
+    from datetime import datetime, timezone
+    import socket
+    rid = _first_local_receiver_reporter_id() or '(unknown)'
+    iso = datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    eid = f"{rid.replace('/', '-')}.{detector}.{source_host}.{int(ts)}"
+    return {
+        'schema': _NOTIFY_SCHEMA,
+        'id': eid,
+        'ts': iso,
+        'event': 'raised',
+        'reporter_id': rid,
+        'site_host': socket.gethostname().split('.')[0],
+        'source_host': source_host,
+        'detector': detector,
+        'severity': severity,
+        'summary': summary,
+        'detail': (detail or '').strip()[:500],
+        'site_email': conf.get('email', []),
+    }
+
+
+def _notify_run_host(host: str, argv: list, timeout: int = 20):
+    """Run argv on host (local, or ssh for a peer); return (rc, stdout)."""
+    if host in ('localhost', '', None):
+        if os.geteuid() != 0 and shutil.which('sudo'):
+            cmd = ['sudo'] + argv
+        else:
+            cmd = argv
+    else:
+        cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
+               host, 'sudo ' + ' '.join(argv)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout, check=False)
+        return r.returncode, r.stdout
+    except Exception:  # noqa: BLE001
+        return 1, ''
+
+
+def _notify_detect_usb(host, state, conf, now_epoch) -> list:
+    """New kernel USB/xhci faults on ``host`` since the last cursor —
+    the root cause of RX888 sample loss."""
+    import re
+    key = f'usb:{host}'
+    hstate = state.get(key) or {}
+    since = float(hstate.get('cursor', now_epoch - 3600))  # first run: last hour
+    usb_re = re.compile(
+        r'reset (?:SuperSpeed|high-speed|full-speed)? ?USB device|'
+        r'over[- ]?current|USB disconnect|xhci.*(?:reset|halt|died)|'
+        r'cannot enable port|device descriptor read', re.I)
+    rc, out = _notify_run_host(
+        host, ['journalctl', '-k', '--since', f'@{int(since)}',
+               '-o', 'short-unix', '--no-hostname'])
+    records, last = [], since
+    if rc == 0 and out:
+        for line in out.splitlines():
+            if not usb_re.search(line):
+                continue
+            parts = line.split(None, 1)
+            try:
+                ts = float(parts[0])
+            except (ValueError, IndexError):
+                ts = now_epoch
+            if ts <= since:
+                continue
+            last = max(last, ts)
+            msg = parts[1] if len(parts) > 1 else line
+            records.append(_notify_make_record(
+                conf, host, 'usb', 'warning', ts,
+                f'USB fault on {host} (RX888 sample loss likely)', msg))
+    hstate['cursor'] = max(last, now_epoch)
+    state[key] = hstate
+    return records
+
+
+_NOTIFY_DETECTORS = (('usb', _notify_detect_usb),)
+
+
+def _notify_run(conf: dict) -> int:
+    import time as _t
+    now = _t.time()
+    state = _notify_load_state()
+    hosts = _notify_site_hosts(conf)
+    enabled = [d for d in _NOTIFY_DETECTORS if conf.get(d[0], True)]
+    total = 0
+    for host in hosts:
+        for name, fn in enabled:
+            try:
+                recs = fn(host, state, conf, now)
+            except Exception as e:  # noqa: BLE001
+                _err(f'notify {name}@{host}: {e}')
+                recs = []
+            for r in recs:
+                _notify_emit(r)
+                total += 1
+                _ok(f'{r["severity"]}: {r["summary"]} — {r["detail"][:80]}')
+    state['last_run'] = now
+    _notify_save_state(state)
+    if total == 0:
+        print(f'  notify: no new faults across {len(hosts)} host(s): '
+              f'{", ".join(hosts)}')
+    else:
+        print(f'  notify: queued {total} new fault record(s) in {_NOTIFY_OUTBOX}')
+    return 0
+
+
+def cmd_notify(args) -> int:
+    import json
+    import socket
+    sub = getattr(args, 'notify_command', None)
+    conf = _notify_load_conf()
+
+    if sub == 'test':
+        import time as _t
+        rec = _notify_make_record(
+            conf, 'localhost', 'test', 'info', _t.time(),
+            f'sigmond notify test from {socket.gethostname().split(".")[0]}',
+            'Synthetic test notification (smd notify test).')
+        if getattr(args, 'email', None):
+            rec['site_email'] = [args.email]
+        p = _notify_emit(rec)
+        print(f'  queued test record: {p}')
+        print(f'  delivery: {rec["site_email"] or "(wd routing table only)"}')
+        return 0
+
+    if sub in ('status', 'list'):
+        pending = sorted(_NOTIFY_OUTBOX.glob('*.json')) if _NOTIFY_OUTBOX.exists() else []
+        st = _notify_load_state()
+        print(f'  notify outbox: {len(pending)} pending record(s) in {_NOTIFY_OUTBOX}')
+        lr = st.get('last_run')
+        if lr:
+            from datetime import datetime, timezone
+            print('  last run: ' + datetime.fromtimestamp(
+                lr, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
+        print(f'  site reporter: {_first_local_receiver_reporter_id() or "(unknown)"}')
+        print(f'  site hosts: {", ".join(_notify_site_hosts(conf))}')
+        print(f'  site email: {conf.get("email") or "(none — relies on wd routing table)"}')
+        if sub == 'list':
+            for p in pending[:100]:
+                try:
+                    r = json.loads(p.read_text())
+                    print(f'    [{r.get("ts")}] {r.get("severity")} '
+                          f'{r.get("detector")}@{r.get("source_host")}: '
+                          f'{r.get("summary")}')
+                except Exception:  # noqa: BLE001
+                    pass
+        return 0
+
+    # default / 'run'
+    return _notify_run(conf)
+
+
 def main() -> int:
     # v2 canonical `smd log set-level [<client>] <level>` — pre-argparse
     # intercept because argparse can't cleanly mix a sub-verb with the
@@ -13244,6 +13492,21 @@ def main() -> int:
     )
     _add_radiod_watch_args(p_w_radiod)
 
+    # notify — site fault producer (queues fault reports into the upload tar)
+    p_notify = sub.add_parser(
+        'notify',
+        help='site fault notifier — detect local faults (USB, …) and queue '
+             'reports into the upload tar for central emailing on the wd nodes')
+    notify_sub = p_notify.add_subparsers(dest='notify_command')
+    notify_sub.add_parser(
+        'run', help='run detectors, queue new fault records (timer-invoked)')
+    pn_test = notify_sub.add_parser(
+        'test', help='queue a synthetic test notification')
+    pn_test.add_argument('--email', metavar='ADDR',
+                         help='deliver this test only to ADDR')
+    notify_sub.add_parser('status', help='show outbox + last run + config')
+    notify_sub.add_parser('list', help='list pending fault records')
+
     # config (Phase 1)
     p_config = sub.add_parser('config',
                               help='inspect or migrate sigmond coordination config')
@@ -13483,6 +13746,9 @@ def main() -> int:
     if args.command == 'mag-watch':
         _deprecated('mag-watch', 'watch mag')
         return cmd_mag_watch(args)
+
+    if args.command == 'notify':
+        return cmd_notify(args)
 
     if args.command == 'watch':
         target = getattr(args, 'watch_target', None)
