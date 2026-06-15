@@ -1,7 +1,14 @@
-# msk144-recorder — design / next-session plan
+# meteor-scatter — design / next-session plan
 
-**Status:** DESIGN ONLY — not yet implemented. Groundwork for the session that
-adds a meteor-scatter monitoring client.
+**Status:** PHASE 1 SHIPPED (2026-06-12) — repo scaffolded at
+`/opt/git/sigmond/meteor-scatter` from the psk-recorder skeleton, the
+FT8/FT4 dual-mode model collapsed to a single 15 s `msk144` mode, and the
+contract surface (`validate`/`inventory`/`version`, placeholder fail-fast)
+verified green. jt9 binaries bundled in `bin/decoders/`. Not yet in git, no
+venv built, not deployed. Phases 2-4 (jt9 decode wiring, wsprdaemon upload,
+install/tests/deploy) PENDING. Upload target chosen: **wsprdaemon.org** with
+shared reporter_id `AC0G=S` (operator, 2026-06-12). See the
+`sigmond-meteor-scatter-plan` memory for the detailed handoff.
 **Author intent (2026-06-12):** a new sigmond client that monitors meteor-scatter
 activity via WSJT-X's **MSK144** protocol on the **10 m and 6 m** bands, decodes
 heard "pings" with the **`jt9`** binary already used by the suite, and uploads
@@ -88,7 +95,7 @@ SIGTERM shutdown, `OnFailure=` on the unit.
 
 Mirror psk/wspr (both at contract v0.7): native TOML config (§1), radiod-id
 binding (§2), self-describe `inventory`/`validate`/`version --json` (§3),
-templated `msk144-recorder@<id>.service` `Type=notify` (§4), `deploy.toml`
+templated `meteor-scatter@<id>.service` `Type=notify` (§4), `deploy.toml`
 manifest (§5), ka9q-python with destination read from `ChannelInfo` (§6/§7),
 `RADIOD_<id>_CHAIN_DELAY_NS` (§8), `log_paths` + log-level env (§10/§11),
 validate hardening incl. SSRC uniqueness + the placeholder check (§12), control
@@ -97,17 +104,23 @@ sinks in inventory (§17), optional §18 timing-authority subscriber.
 
 ## 5. OPEN QUESTIONS — resolve before/early in the build session
 
-1. **6 m hardware path.** 50.260 MHz is **VHF**, above the RX888 mkII's
-   HF direct-sampling range (~32 MHz). 6 m needs the RX888's VHF tuner mode
-   (R820T/R828D path) in radiod, or a separate 6 m receiver/transverter. The
-   *client* is frequency-agnostic (it subscribes to whatever radiod advertises),
-   but confirm radiod on this station can actually provide a 50.260 MHz channel.
-   (10 m @ 28.130 MHz is fine for the RX888 HF path.)
-2. **`jt9` MSK144 invocation.** ✅ RESOLVED — `jt9 --msk144` confirmed in the
-   bundled `wspr-recorder/bin/decoders/jt9-*-v27` binary (see header). Remaining
-   sub-task: validate the exact flags (`-p 15`, `-f`, `--sub-mode`) and the
-   stdout/decodes-file output format against *real* MSK144 decodes during the
-   build session, and wire wspr's arch-resolution + `DecoderRunner` parsing.
+1. **6 m hardware path.** ✅ RESOLVED (2026-06-12) — sigma's radiod already
+   advertises 6 m: psk-recorder records FT8 @ 50.313 MHz and FT4 @ 50.318 MHz
+   on this station today, proving the RX888 path covers the 6 m band. MSK144's
+   50.260 MHz sits in that same band, so no extra hardware/tuner work is
+   needed. (10 m @ 28.130 MHz is the RX888 HF path.) radiod status name =
+   `sigma-rx888mk2-status.local`.
+2. **`jt9` MSK144 invocation + output.** ✅ RESOLVED (2026-06-12) — ran
+   `jt9 --msk144 -p 15 -f 1500 -a <workdir> <wav>` (cwd=workdir, touch
+   `plotspec`+`decdata`): exits 0, writes decode lines to **`decoded.txt`** in
+   the workdir, and prints a **`<DecodeFinished> <ndecodes> …`** sentinel to
+   stdout. So Phase 2's decode loop mirrors `wspr_recorder/decoder.py`'s
+   `decode_fst4w` but reads `decoded.txt` deltas (NOT stdout, NOT
+   `fst4_decodes.dat`). jt9 reports the AUDIO offset frequency; add the
+   channel dial freq for absolute RF. **Remaining sub-task:** validate the
+   exact `decoded.txt` column layout against a *real* MSK144 decode (expected
+   `HHMMSS snr dt freq & message`, `&` = MSK144 sync char) — no real ping WAV
+   is available pre-deploy, so confirm it live.
 3. **wsprdaemon.org MSK144 ingest.** wsprdaemon is WSPR/FST4W-centric; confirm
    with **Rob (wsprdaemon.org)** whether it accepts MSK144 meteor-scatter spots,
    and in what format (does `hs-uploader` need a new MSK144 transport, or does an
@@ -123,9 +136,9 @@ sinks in inventory (§17), optional §18 timing-authority subscriber.
 
 ## 6. Proposed repo
 
-`/opt/git/sigmond/msk144-recorder` (suggested name — protocol-specific, matching
-`wspr-recorder`/`psk-recorder`). Service user `msk144rec` (or per install.sh
-convention). Templated unit `msk144-recorder@<reporter-id>.service`. Reuse the
+`/opt/git/sigmond/meteor-scatter` (suggested name — protocol-specific, matching
+`wspr-recorder`/`psk-recorder`). Service user `meteorscat` (or per install.sh
+convention). Templated unit `meteor-scatter@<reporter-id>.service`. Reuse the
 sibling-editable `[tool.uv.sources]` pattern for `ka9q-python`, `callhash`,
 `hs-uploader`.
 
