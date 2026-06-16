@@ -129,6 +129,17 @@ requires        = ["ka9q-python", "ka9q-radio"]
 contract        = "0.8"
 install_script  = "/opt/git/sigmond/hf-gps-tec/scripts/install.sh"
 
+[client.meteor-scatter]
+kind            = "client"
+description     = "Meteor-scatter ping recorder/decoder (jt9 --msk144)"
+repo            = "https://github.com/mijahauan/meteor-scatter"
+uses            = ["ka9q-python"]
+requires        = ["ka9q-python", "ka9q-radio"]
+contract        = "0.7"
+install_script  = "/opt/git/sigmond/meteor-scatter/scripts/install.sh"
+# Previously surfaced only via discovery (its deploy.toml); pinned here so
+# the repo-default catalog lists it even when the checkout is absent.
+
 # ---------------------------------------------------------------------------
 # Servers & infrastructure (not contract-conformant decode clients)
 # ---------------------------------------------------------------------------
