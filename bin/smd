@@ -6042,7 +6042,7 @@ def _print_status_table(rows: list[dict]) -> None:
     print(
         f'  \033[1m{"NAME":<{W_NAME}}{"LIFECYCLE":<{W_LIFE}}'
         f'{"BRANCH":<{W_BRANCH}}{"VERDICT":<{W_VERDICT}}'
-        f'{"INDEX":<{W_INDEX}}{"BEHIND":<{W_BEHIND}}'
+        f'{"INDEX".rjust(W_INDEX - 1)} {"BEHIND".rjust(W_BEHIND - 1)} '
         f'{"HEAD DATE":<{W_DATE}}{"POLICY":<{W_POLICY}}\033[0m'
     )
     for r in rows:
@@ -6084,8 +6084,8 @@ def _print_status_table(rows: list[dict]) -> None:
             f'{life:<{W_LIFE}.{W_LIFE}}'
             f'{brcol}{br:<{W_BRANCH}.{W_BRANCH}}{brreset}'
             f'{vcol}{verdict:<{W_VERDICT}.{W_VERDICT}}{vreset}'
-            f'{index:<{W_INDEX}.{W_INDEX}}'
-            f'{bcol}{behind:<{W_BEHIND}.{W_BEHIND}}{breset}'
+            f'{index[:W_INDEX - 1].rjust(W_INDEX - 1)} '
+            f'{bcol}{behind[:W_BEHIND - 1].rjust(W_BEHIND - 1)}{breset} '
             f'{date:<{W_DATE}.{W_DATE}}'
             f'{policy:<{W_POLICY}.{W_POLICY}}'
         )
