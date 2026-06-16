@@ -417,7 +417,7 @@ def _config_from_shared(client: str, reporter_id: str, shared_body: str) -> str:
     )
 
 
-def _instance_env_defaults(client: str) -> "dict[str, str]":
+def _instance_env_defaults(client: str, reporter_id: str) -> "dict[str, str]":
     """Greenfield per-instance env defaults the client declares in its
     deploy.toml ``[contract.instance_env]`` table.
 
@@ -428,6 +428,14 @@ def _instance_env_defaults(client: str) -> "dict[str, str]":
     ``wd-decode@*`` chain, so decode must run in-process or no spots are
     ever produced.  Returns {} when the client declares none / has no
     deploy.toml.
+
+    Values may contain placeholders that sigmond substitutes per instance:
+      ``{reporter_id}``    → the path-safe storage form (e.g. ``AC0G=S``)
+      ``{reporter_call}``  → the display / on-air form (e.g. ``AC0G/S``)
+    This is how a client gets a correct on-air identity by construction:
+    wspr-recorder declares ``WD_RECEIVER_CALL = "{reporter_call}"`` so the
+    internal ``=`` storage form never leaks to wsprnet (the upload path
+    sends the receiver call verbatim — see display_reporter_id).
     """
     deploy = Path("/opt/git/sigmond") / client / "deploy.toml"
     try:
@@ -436,10 +444,17 @@ def _instance_env_defaults(client: str) -> "dict[str, str]":
     except (OSError, tomllib.TOMLDecodeError):
         return {}
     raw = (data.get("contract") or {}).get("instance_env") or {}
+    subs = {
+        "reporter_id": reporter_id,
+        "reporter_call": display_reporter_id(reporter_id),
+    }
     out: "dict[str, str]" = {}
     for k, v in raw.items():
         # TOML may type `1` / `true` as int/bool; env files are strings.
-        out[k] = ("1" if v else "0") if isinstance(v, bool) else str(v)
+        sval = ("1" if v else "0") if isinstance(v, bool) else str(v)
+        for token, repl in subs.items():
+            sval = sval.replace("{" + token + "}", repl)
+        out[k] = sval
     return out
 
 
@@ -450,7 +465,7 @@ def _env_stub(client: str, reporter_id: str) -> str:
         f"# Loaded by {client}@{reporter_id}.service via\n"
         f"#   EnvironmentFile=-/etc/{client}/env/{reporter_id}.env\n"
     )
-    defaults = _instance_env_defaults(client)
+    defaults = _instance_env_defaults(client, reporter_id)
     if defaults:
         body += (
             "# Seeded from the client's deploy.toml [contract.instance_env]\n"
