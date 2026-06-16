@@ -6057,11 +6057,13 @@ def _print_status_table(rows: list[dict]) -> None:
         behind_n = r['behind'] if r['repo_dir'] else 0
         b_exact  = r.get('behind_exact', True)
         if not r['repo_dir']:
-            behind = ''
+            behind = ''       # not a repo / not installed — column blank
         elif behind_n and not b_exact:
             behind = '?'      # behind, but exact count needs a fetch (ls-remote only)
         else:
-            behind = str(behind_n) if behind_n else ''
+            # '-' (not blank) when even with origin/main, so BEHIND is visibly
+            # its own column and "0 behind" reads unambiguously vs the INDEX col.
+            behind = str(behind_n) if behind_n else '-'
         bcol    = '\033[33m' if (r['repo_dir'] and behind_n) else ''
         breset  = '\033[0m' if bcol else ''
         date    = r['local_date']        if r['repo_dir'] else ''
@@ -6105,6 +6107,8 @@ def _print_status_table(rows: list[dict]) -> None:
     print(f'    {_B}VERDICT{_X}  {_G}up to date{_X}   '
           f'{_Y}behind main / unpushed{_X}   '
           f'{_R}dirty (uncommitted) / drift{_X}   {_K}ignored{_X}')
+    print(f'    {_B}BEHIND{_X}   {_G}-{_X} = even with origin/main;  '
+          f'{_Y}N{_X} = N commits behind;  {_Y}?{_X} = behind, run update to count')
 
 
 def _print_action_hint(rows: list[dict]) -> None:
