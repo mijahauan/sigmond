@@ -295,6 +295,46 @@ def _git_fetch_as_owner(repo_dir: Path) -> subprocess.CompletedProcess:
                           capture_output=True, text=True)
 
 
+def _git_behind_main_live(repo_dir: Path, branch: str) -> tuple[int, str]:
+    """How far HEAD trails the LIVE remote default branch, via `git ls-remote`.
+
+    ls-remote is READ-ONLY — it writes nothing to .git — so it works on repos
+    owned by keyless system users (timestd, ka9q-web) where a fetch can't write
+    FETCH_HEAD/objects and so silently leaves origin/* stale.  Runs as
+    $SUDO_USER so the human's key authenticates.  Returns (behind, status):
+      (N, 'exact')      — exact commit count (the remote tip is present locally
+                          so we can rev-list it; 0 = current / ahead).
+      (1, 'approx')     — HEAD differs from a remote tip whose commits aren't
+                          present locally: behind by an unknown amount (run
+                          `component update` to fetch and see how many).
+      (0, 'unreachable')— couldn't query the remote (offline / no key).
+    """
+    base = ['git', '-c', f'safe.directory={repo_dir}', '-C', str(repo_dir)]
+    ls = base + ['ls-remote', '--heads', 'origin', branch]
+    if os.geteuid() == 0:
+        su = os.environ.get('SUDO_USER') or ''
+        if su and su != 'root':
+            ls = ['sudo', '-u', su, '-H', '--'] + ls
+    r = subprocess.run(ls, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return 0, 'unreachable'
+    remote_sha = r.stdout.strip().split('\n')[0].split()[0]
+    head = subprocess.run(base + ['rev-parse', 'HEAD'],
+                          capture_output=True, text=True).stdout.strip()
+    if not remote_sha or not head or remote_sha == head:
+        return 0, 'exact'
+    have = subprocess.run(base + ['cat-file', '-e', remote_sha + '^{commit}'],
+                          capture_output=True).returncode == 0
+    if not have:
+        return 1, 'approx'   # remote has commits we don't — behind, count unknown
+    out = subprocess.run(base + ['rev-list', '--count', f'HEAD..{remote_sha}'],
+                         capture_output=True, text=True)
+    try:
+        return int(out.stdout.strip()), 'exact'
+    except ValueError:
+        return 0, 'exact'
+
+
 def _ok(msg):   print(f'  \033[32m✓\033[0m  {msg}')
 def _warn(msg): print(f'  \033[33m⚠\033[0m  {msg}')
 def _err(msg):  print(f'  \033[31m✗\033[0m  {msg}', file=sys.stderr)
@@ -5759,12 +5799,9 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
             })
             continue
 
+        fetch_ok = True
         if fetch:
-            fr = _git_fetch_as_owner(repo_dir)
-            if fr.returncode != 0:
-                last = (fr.stderr or '').strip().splitlines()
-                _warn(f"{name}: git fetch failed — BEHIND/divergence below may "
-                      f"be STALE ({last[-1] if last else 'see git'})")
+            fetch_ok = _git_fetch_as_owner(repo_dir).returncode == 0
 
         local, upstream, behind, ahead = _git_divergence(repo_dir)
         local_date  = _git_commit_date(repo_dir, 'HEAD')
@@ -5788,7 +5825,22 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
         branch = _git_current_branch(repo_dir)
         default_ref = _git_default_ref(repo_dir)            # e.g. 'origin/main'
         default_branch = default_ref.split('/', 1)[-1] if default_ref else ''
-        behind_main, _ahead_main = _git_behind_ahead(repo_dir, default_ref)
+        # BEHIND vs origin/main.  When the fetch worked, the local origin/main
+        # ref is fresh — count exactly.  When it FAILED (repo owned by a keyless
+        # system user, so rob can't write its .git), fall back to a read-only
+        # ls-remote so BEHIND is still LIVE instead of a stale 'up to date'.
+        behind_exact = True
+        if fetch and not fetch_ok:
+            behind_main, _bstat = _git_behind_main_live(
+                repo_dir, default_branch or 'main')
+            if _bstat == 'unreachable':
+                _warn(f"{name}: fetch failed and ls-remote unreachable — "
+                      f"BEHIND below may be STALE")
+                behind_main, _ah = _git_behind_ahead(repo_dir, default_ref)
+            else:
+                behind_exact = (_bstat == 'exact')
+        else:
+            behind_main, _ah = _git_behind_ahead(repo_dir, default_ref)
         on_feature = bool(default_branch) and branch != default_branch
 
         # Verdict ladder — first match wins.  Separate the materially-different
@@ -5807,8 +5859,9 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
         elif ahead > 0:
             verdict = f'{ahead} unpushed commit{"s" if ahead != 1 else ""}'
         elif behind_main > 0:
-            verdict = (f'{behind_main} commit'
-                       f'{"s" if behind_main != 1 else ""} behind main')
+            verdict = ('behind main (run update)' if not behind_exact
+                       else f'{behind_main} commit'
+                            f'{"s" if behind_main != 1 else ""} behind main')
         elif on_feature:
             verdict = f'on branch {branch}'
         else:
@@ -5827,6 +5880,7 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
             'upstream': upstream,
             'upstream_date': upstream_date,
             'behind': behind_main,
+            'behind_exact': behind_exact,
             'behind_upstream': behind,
             'ahead': ahead,
             'commit_index': commit_index,
@@ -5846,12 +5900,9 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
     if not components_filter or 'sigmond' in components_filter:
         sigmond_dir = Path(__file__).resolve().parent.parent
         if (sigmond_dir / '.git').exists():
+            s_fetch_ok = True
             if fetch:
-                fr = _git_fetch_as_owner(sigmond_dir)
-                if fr.returncode != 0:
-                    last = (fr.stderr or '').strip().splitlines()
-                    _warn(f"sigmond: git fetch failed — divergence below may "
-                          f"be STALE ({last[-1] if last else 'see git'})")
+                s_fetch_ok = _git_fetch_as_owner(sigmond_dir).returncode == 0
             s_local, s_upstream, s_behind, s_ahead = _git_divergence(sigmond_dir)
             s_up_date = ''
             if s_upstream:
@@ -5866,7 +5917,18 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
             s_branch = _git_current_branch(sigmond_dir)
             s_default_ref = _git_default_ref(sigmond_dir)
             s_default = s_default_ref.split('/', 1)[-1] if s_default_ref else ''
-            s_behind_main, _sa = _git_behind_ahead(sigmond_dir, s_default_ref)
+            s_behind_exact = True
+            if fetch and not s_fetch_ok:
+                s_behind_main, _sbstat = _git_behind_main_live(
+                    sigmond_dir, s_default or 'main')
+                if _sbstat == 'unreachable':
+                    _warn("sigmond: fetch failed and ls-remote unreachable — "
+                          "BEHIND may be STALE")
+                    s_behind_main, _sa = _git_behind_ahead(sigmond_dir, s_default_ref)
+                else:
+                    s_behind_exact = (_sbstat == 'exact')
+            else:
+                s_behind_main, _sa = _git_behind_ahead(sigmond_dir, s_default_ref)
             s_on_feature = bool(s_default) and s_branch != s_default
             if s_dirty and (s_reason or '').startswith('uncommitted'):
                 s_verdict = f'dirty: {s_reason}'
@@ -5874,8 +5936,9 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                 s_verdict = (f'{s_ahead} unpushed commit'
                              f'{"s" if s_ahead != 1 else ""}')
             elif s_behind_main > 0:
-                s_verdict = (f'{s_behind_main} commit'
-                             f'{"s" if s_behind_main != 1 else ""} behind main')
+                s_verdict = ('behind main (run update)' if not s_behind_exact
+                             else f'{s_behind_main} commit'
+                                  f'{"s" if s_behind_main != 1 else ""} behind main')
             elif s_on_feature:
                 s_verdict = f'on branch {s_branch}'
             else:
@@ -5893,6 +5956,7 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                 'upstream': s_upstream,
                 'upstream_date': s_up_date,
                 'behind': s_behind_main,
+                'behind_exact': s_behind_exact,
                 'behind_upstream': s_behind,
                 'ahead': s_ahead,
                 'commit_index': _git_commit_index(sigmond_dir, 'HEAD'),
@@ -5991,7 +6055,13 @@ def _print_status_table(rows: list[dict]) -> None:
         vreset  = '\033[0m' if vcol else ''
         index   = str(r['commit_index']) if r['repo_dir'] and r['commit_index'] else ''
         behind_n = r['behind'] if r['repo_dir'] else 0
-        behind  = str(behind_n) if r['repo_dir'] else ''
+        b_exact  = r.get('behind_exact', True)
+        if not r['repo_dir']:
+            behind = ''
+        elif behind_n and not b_exact:
+            behind = '?'      # behind, but exact count needs a fetch (ls-remote only)
+        else:
+            behind = str(behind_n) if behind_n else ''
         bcol    = '\033[33m' if (r['repo_dir'] and behind_n) else ''
         breset  = '\033[0m' if bcol else ''
         date    = r['local_date']        if r['repo_dir'] else ''
