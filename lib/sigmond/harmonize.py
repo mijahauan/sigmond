@@ -962,6 +962,19 @@ def dormant_reason(component: str, *, enabled: bool):
 # ---------------------------------------------------------------------------
 _SECRET_EARTHDATA = Path('/etc/hf-timestd/earthdata-netrc')
 _SECRET_FRPC = Path('/etc/sigmond/frpc.toml')
+# hs-uploader SFTP key (wspr -> wsprdaemon.org).  It SELF-GENERATES 0600 on
+# first upload, so absence is valid (like earthdata); we only flag a present
+# key with wrong perms.  The un-automatable step — enrolling its PUBLIC key
+# with wsprdaemon.org — is surfaced by the runbook and `smd config upload`.
+_SECRET_HS_UPLOADER_KEY = Path('/etc/hs-uploader/keys/id_ed25519')
+
+
+def _secret_key_perms_problem(path: Path) -> Optional[str]:
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        return None
+    return f'mode {oct(mode)} (must be 0600)' if mode != 0o600 else None
 
 
 def _secret_earthdata_problem(path: Path) -> Optional[str]:
@@ -1019,6 +1032,14 @@ def rule_secrets(view: SystemView) -> RuleResult:
         if p:
             problems.append(f'frpc.toml: {p}')
             affected.append(str(_SECRET_FRPC))
+
+    # hs-uploader SFTP key: only a present-but-wrong-perms key is a problem
+    # (it self-generates 0600; absence resolves on first upload run).
+    if _SECRET_HS_UPLOADER_KEY.exists():
+        p = _secret_key_perms_problem(_SECRET_HS_UPLOADER_KEY)
+        if p:
+            problems.append(f'hs-uploader key: {p}')
+            affected.append(str(_SECRET_HS_UPLOADER_KEY))
 
     if problems:
         return RuleResult('secrets', 'warn', '; '.join(problems), affected)
@@ -1098,11 +1119,7 @@ def _active_instances(client: str) -> list:
 # Intentionally tiny — the same in-code idiom as rule_wspr_decode_enabled's
 # WD_DECODE_VIA_DB.  No contract surface: identity is site-profile's, the
 # credential is `smd admin secrets`'.
-_UPLOAD_ENABLE = {
-    "wspr-recorder":  ("WSPR_USE_HS_UPLOADER", "wsprnet.org / wsprdaemon.org"),
-    "psk-recorder":   ("PSK_USE_HS_UPLOADER", "pskreporter.info"),
-    "meteor-scatter": ("METEOR_SCATTER_USE_HS_UPLOADER", "pskreporter.info"),
-}
+from .upload import UPLOAD_ENABLE as _UPLOAD_ENABLE
 
 
 def _client_installed(client: str) -> bool:
@@ -1126,7 +1143,7 @@ def rule_upload_enabled(view: SystemView) -> RuleResult:
             env = dict(coord)
             env.update(_resolve_instance_env(client, inst))
             if not _upload_truthy(env.get(flag)):
-                off.append(f"{client}@{inst} -> {dest}")
+                off.append(f"{client}@{inst} -> {' / '.join(dest)}")
     if not off:
         return RuleResult("upload_enabled", "pass",
                           "active recorder instances have upload enabled "

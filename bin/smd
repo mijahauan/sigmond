@@ -109,7 +109,7 @@ try:
     from sigmond.commands.validate    import cmd_validate
     from sigmond.commands.timing      import cmd_timing
     from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
-    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render
+    from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render, cmd_config_upload
     from sigmond.commands.client_config import cmd_config_init, cmd_config_edit_client
     from sigmond.commands.environment import (
         cmd_environment_list,
@@ -14755,6 +14755,17 @@ def main() -> int:
                    help='print what would be published, do not write')
 
     p = config_sub.add_parser(
+        'upload',
+        help="enable/disable a recorder instance's upstream upload (per-instance flag)")
+    p.add_argument('client',
+                   help='wspr-recorder | psk-recorder | meteor-scatter')
+    p.add_argument('instance', nargs='?',
+                   help='reporter id / instance, e.g. AC0G/S (omit for a status view)')
+    g = p.add_mutually_exclusive_group()
+    g.add_argument('--on', action='store_true', help='enable upload for the instance')
+    g.add_argument('--off', action='store_true', help='disable upload for the instance')
+
+    p = config_sub.add_parser(
         'catalog-prune',
         help='trim /etc/sigmond/catalog.toml down to only the entries '
              'that diverge from the in-repo catalog')
@@ -15147,6 +15158,13 @@ def main() -> int:
             if writing and _need_root('config render'):
                 return 1
             return cmd_config_render(args)
+        if sub_cmd == 'upload':
+            # Writing the per-instance env (--on/--off) needs root; the bare
+            # status view is read-only.
+            writing = getattr(args, 'on', False) or getattr(args, 'off', False)
+            if writing and _need_root('config upload'):
+                return 1
+            return cmd_config_upload(args)
         if sub_cmd == 'catalog-prune':
             return cmd_config_catalog_prune(args)
         if sub_cmd == 'migrate':

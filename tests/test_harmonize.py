@@ -6,6 +6,7 @@ real /etc state on the host.
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -942,3 +943,37 @@ class TestUploadEnabled(unittest.TestCase):
         self.assertEqual(r.severity, "warn")
         self.assertIn("wspr-recorder@b", r.message)
         self.assertNotIn("wspr-recorder@a", r.message)
+
+
+class TestSecretsHsUploaderKey(unittest.TestCase):
+    """rule_secrets: the hs-uploader SFTP key is flagged only when present
+    with wrong perms (it self-generates 0600; absence is valid)."""
+
+    def _run(self, hs_key_path):
+        import sigmond.harmonize as H
+        saved = (H._SECRET_EARTHDATA, H._SECRET_FRPC, H._SECRET_HS_UPLOADER_KEY)
+        try:
+            H._SECRET_EARTHDATA = Path("/nonexistent/earthdata")
+            H._SECRET_FRPC = Path("/nonexistent/frpc")
+            H._SECRET_HS_UPLOADER_KEY = hs_key_path
+            return H.rule_secrets(_make_view(Coordination()))
+        finally:
+            (H._SECRET_EARTHDATA, H._SECRET_FRPC,
+             H._SECRET_HS_UPLOADER_KEY) = saved
+
+    def test_absent_key_passes(self):
+        self.assertEqual(self._run(Path("/nonexistent/key")).severity, "pass")
+
+    def test_present_0600_passes(self):
+        import os
+        d = Path(tempfile.mkdtemp()); k = d / "id_ed25519"
+        k.write_text("x"); os.chmod(k, 0o600)
+        self.assertEqual(self._run(k).severity, "pass")
+
+    def test_present_wrong_perms_warns(self):
+        import os
+        d = Path(tempfile.mkdtemp()); k = d / "id_ed25519"
+        k.write_text("x"); os.chmod(k, 0o644)
+        r = self._run(k)
+        self.assertEqual(r.severity, "warn")
+        self.assertIn("hs-uploader key", r.message)

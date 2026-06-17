@@ -216,6 +216,29 @@ new instances seed their config from the shared `/etc/<client>/config.toml`.
 
 For which radiod channels/feeds a client subscribes to: `smd admin sources list|add|apply`.
 
+### Enable uploads (the decode→upload step)
+
+A recorder decodes to the local sink but does **not** ship upstream until you
+turn its per-instance upload flag on. One uniform command does it for every
+uploading client:
+
+```bash
+smd config upload wspr-recorder                     # status: which instances upload
+smd config upload wspr-recorder AC0G/SIGMA --on     # enable (wsprnet + wsprdaemon)
+smd config upload psk-recorder  AC0G/SIGMA --on     # enable (pskreporter)
+sudo systemctl restart 'wspr-recorder@AC0G/SIGMA'   # apply
+```
+
+This only flips the enable flag — **identity** comes from `smd config render`
+(site-profile), and **credentials** from `smd admin secrets`. `smd admin
+validate` (`rule_upload_enabled`) warns about any active recorder still
+decoding-but-not-uploading, so a forgotten instance can't stay silent.
+
+> **wsprdaemon.org / PSWS need a one-time enrollment.** The SFTP/SSH key
+> self-generates on the host, but its **public** key must be registered with
+> the service (wsprdaemon.org operators; the PSWS portal for GRAPE/mag) — this
+> is the only un-automatable step (Phase 9 for PSWS).
+
 ## Phase 8 — Start + verify
 
 ```bash

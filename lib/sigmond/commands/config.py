@@ -612,3 +612,59 @@ def _patch_station_block(path: Path, station: Station) -> None:
             out.append('')
         out.extend(body)
     path.write_text('\n'.join(out).rstrip() + '\n')
+
+
+# ---------------------------------------------------------------------------
+# smd config upload — flip a recorder instance's per-instance upload enable flag
+# ---------------------------------------------------------------------------
+
+def cmd_config_upload(args) -> int:
+    """Enable/disable a recorder instance's upstream upload.
+
+    This flips ONLY the per-instance enable flag (e.g. WSPR_USE_HS_UPLOADER)
+    in /etc/<client>/env/<instance>.env.  Identity is owned by
+    `smd config render` (site-profile) and credentials by `smd admin secrets`
+    — they are not touched here.  Pairs with harmonize's rule_upload_enabled.
+    """
+    from .. import upload
+    client = args.client
+    if client not in upload.UPLOAD_ENABLE:
+        err(f"{client} has no upstream upload path.")
+        info("upload-capable clients: "
+             + ", ".join(sorted(upload.UPLOAD_ENABLE)))
+        return 1
+    flag, dests = upload.UPLOAD_ENABLE[client]
+    instance = getattr(args, "instance", None)
+    on = getattr(args, "on", False)
+    off = getattr(args, "off", False)
+
+    # No --on/--off -> read-only status view across the per-instance envs.
+    if not (on or off):
+        env_dir = Path("/etc") / client / "env"
+        envs = sorted(env_dir.glob("*.env")) if env_dir.is_dir() else []
+        heading(f"{client} upload ({' / '.join(dests)})  —  flag {flag}")
+        if not envs:
+            info("no per-instance env files yet "
+                 "(run `smd admin instance add` first).")
+            return 0
+        for e in envs:
+            val = upload.read_flag(e, flag)
+            state = "ON " if upload.is_truthy(val) else "off"
+            print(f"    {state}  {e.stem}    "
+                  f"({flag}={val if val is not None else 'unset'})")
+        info(f"enable:  smd config upload {client} <instance> --on")
+        return 0
+
+    if not instance:
+        err("an instance is required to change the flag, e.g. "
+            f"`smd config upload {client} AC0G/S --on`")
+        return 1
+    path, flag, dests = upload.apply_enable(client, instance, on)
+    ok(f"{'enabled' if on else 'disabled'} upload for {client}@{instance}  "
+       f"({flag}={'1' if on else '0'})  ->  {', '.join(dests)}")
+    info(f"wrote {path}")
+    if on:
+        info("identity: `smd config render` (site-profile)  ·  "
+             "credentials: `smd admin secrets`")
+    info(f"restart to apply:  sudo systemctl restart '{client}@{instance}'")
+    return 0
