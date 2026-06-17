@@ -18,8 +18,8 @@ Configure (what should exist):
     (smd install / smd apply are kept as aliases for the software subverbs.)
 
 Observe (what is, read-only):
-    smd list        [--update | --catalog] [--components C1,C2]  per-component status table
-                    [--ref R] [--fetch] [--dry-run] [--json]
+    smd component list   [--catalog] [--components C1,C2] [--no-fetch] [--json]  per-component status table
+    smd component update [<name> | --components C] [--ref R] [--dry-run]         pull latest + reapply (sudo)
     smd status      [<component>]                                service health
     smd admin log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd admin diag        [net | cpu-affinity | cpu-freq]              diagnostics
@@ -3125,7 +3125,7 @@ def _install_single_client(args) -> int:
         if deploy_path is not None:
             entry = synthesize_catalog_entry(deploy_path)
         if entry is None:
-            _err(f"unknown client '{client}' — see: smd list --available")
+            _err(f"unknown client '{client}' — see: smd component list --catalog")
             return 1
 
     if not entry.install_script:
@@ -6121,7 +6121,7 @@ def _print_action_hint(rows: list[dict]) -> None:
         names = ', '.join(r['name'] for r in needs_apply)
         print()
         _info(f'{len(needs_apply)} component(s) have updates available: {names}')
-        _info('run: smd list --update  (preview: smd list --update --dry-run)')
+        _info('run: smd component update  (preview: smd component update --dry-run)')
 
 
 def _print_deprecated_hint() -> None:
@@ -6217,7 +6217,7 @@ def _apply_updates(args, rows: list[dict]) -> int:
     pinned refs are checked out, 'latest' (or absent) does ff-only pull.
     --ref overrides the policy.  Refuses to clobber dirty repos.
     """
-    if _need_root('list --update'):
+    if _need_root('component update'):
         return 1
 
     dry_run = getattr(args, 'dry_run', False)
@@ -6247,7 +6247,7 @@ def _apply_updates(args, rows: list[dict]) -> int:
             dirty, reason = _repo_is_dirty(sigmond_dir)
             if dirty:
                 _warn(f'sigmond: skipping pull — {reason}')
-                _warn('         commit, stash, or push before running smd list --update')
+                _warn('         commit, stash, or push before running smd component update')
             elif dry_run:
                 _info('sigmond: (dry-run) would pull and sync catalog')
             else:
@@ -6303,7 +6303,7 @@ def _apply_updates(args, rows: list[dict]) -> int:
         dirty, reason = _repo_is_dirty(repo_dir)
         if dirty:
             _warn(f'{name}: skipping pull — {reason}')
-            _warn(f'         commit, stash, or push in {repo_dir} before running smd list --update')
+            _warn(f'         commit, stash, or push in {repo_dir} before running smd component update')
             continue
 
         before = _git_head_ref(repo_dir) if not dry_run else '?'
@@ -6371,7 +6371,7 @@ def cmd_list(args) -> int:
     # `--update` requires root, and _need_root re-execvps the whole command
     # under sudo when invoked as a non-root user — so any output produced
     # before this check is duplicated by the re-exec.  Check first.
-    if getattr(args, 'update', False) and _need_root('list --update'):
+    if getattr(args, 'update', False) and _need_root('component update'):
         return 1
 
     # Fetch by default so divergence is LIVE; --no-fetch opts out for speed.
@@ -7068,7 +7068,7 @@ smdt()   { smd tui "$@"; }
 smdtui() { smd tui "$@"; }
 
 # Re-source the completion script in-place — use this after smd is updated
-# (`smd list --update`, a fresh `git pull` on the dev tree, etc.) so the
+# (`smd component update`, a fresh `git pull` on the dev tree, etc.) so the
 # current shell picks up newly-added subcommands / flags without having to
 # log out + back in.  Has to be a shell function rather than an alias
 # because `source <(...)` only takes effect when run in the caller's own
@@ -14112,30 +14112,9 @@ def main() -> int:
     p.add_argument('--via', choices=['auto', 'systemd', 'socket'], default='auto',
                    help='routing strategy for reload (default: auto)')
 
-    # list — unified status surface (was: smd list + smd update)
-    p = sub.add_parser('list',
-                       help='show component status (lifecycle + git + version policy); '
-                            '--update pulls and re-applies updates')
-    p.add_argument('--components', metavar='C1,C2',
-                   help='comma-separated subset of components')
-    p.add_argument('--catalog', action='store_true',
-                   help='show catalog of known clients (what could be installed)')
-    # --update is the canonical flag; --apply is kept as a hidden alias
-    # for muscle-memory and any tooling that hasn't migrated yet.
-    p.add_argument('--update', '--apply', dest='update', action='store_true',
-                   help='pull latest code per topology version policy and reapply '
-                        '(was: smd update / smd list --apply; requires root)')
-    p.add_argument('--fetch', action='store_true',
-                   help='run `git fetch` per repo before computing divergence '
-                        '(default: use cached upstream refs)')
-    p.add_argument('--ref', metavar='COMMIT_OR_BRANCH',
-                   help='with --update: force a specific git ref instead of '
-                        'using each component\'s topology version policy')
-    p.add_argument('--dry-run', action='store_true',
-                   help='with --update: preview what would be pulled without '
-                        'making changes')
-    p.add_argument('--json', action='store_true',
-                   help='emit machine-readable JSON')
+    # `smd list` (top-level verb) removed 2026-06-17 — superseded by
+    # `smd component list` (status) and `smd component update` (pull+reapply).
+    # cmd_list()/cmd_apply() remain; the `component` subcommands call them.
 
     # log
     p = admin_sub.add_parser('log', help='view logs or set log level for a client')
@@ -14923,7 +14902,6 @@ def main() -> int:
         'stop':    cmd_stop,
         'restart': cmd_restart,
         'reload':  cmd_reload,
-        'list':    cmd_list,
         'log':     cmd_log,
         'status':  cmd_status,
         'tui':     cmd_tui,
