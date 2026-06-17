@@ -1028,17 +1028,15 @@ def rule_secrets(view: SystemView) -> RuleResult:
 
 
 # ---------------------------------------------------------------------------
-# Upload-readiness (CONTRACT [[contract.upload]] — the decode->upload gap)
+# Upload-enable visibility (the decode->upload gap)
 #
-# Each uploading client DECLARES its per-site upload requirements in its
-# deploy.toml [[contract.upload]] blocks (enable flag, required identity/env,
-# credential file, registration URL).  This rule reads those declarations and
-# checks the LIVE per-installation state, so a client that is enabled but
-# missing its identity/credential is flagged LOUDLY instead of silently never
-# uploading.  Upload config is PER-INSTANCE for the radiod-keyed recorders
-# (wspr/psk/meteor: one env file per `<client>@<radiod_id>`), and per-HOST for
-# the singletons (mag-recorder, hf-timestd), which self-validate — so for
-# scope="host" we defer to the client's own preflight rather than re-checking.
+# Surfaces the otherwise-invisible "this instance decodes but never uploads"
+# state: a radiod-keyed recorder whose per-instance env doesn't set its upload
+# enable flag.  Mirrors rule_wspr_decode_enabled (checked per <client>@<inst>).
+# Deliberately narrow and deferential: per-installation IDENTITY is owned by
+# site-profile.toml / `smd config render` (coordination.env), and CREDENTIALS
+# by `smd admin secrets` (+ rule_secrets) — this rule re-checks NEITHER.  It
+# only reports the per-instance enable posture so onboarding isn't silent.
 # ---------------------------------------------------------------------------
 
 def _upload_truthy(v) -> bool:
@@ -1096,120 +1094,52 @@ def _active_instances(client: str) -> list:
     return names
 
 
-def _load_upload_decls() -> list:
-    """[(client, [block,...])] for every INSTALLED client whose deploy.toml
-    declares [[contract.upload]]."""
-    import tomllib
-    decls = []
-    base = Path("/opt/git/sigmond")
-    try:
-        deploys = sorted(base.glob("*/deploy.toml"))
-    except Exception:                                      # noqa: BLE001
-        return []
-    for deploy in deploys:
-        client = deploy.parent.name
-        if not Path(f"/etc/{client}").exists():
-            continue                                       # not installed on this host
-        try:
-            data = tomllib.loads(deploy.read_text())
-        except Exception:                                  # noqa: BLE001
-            continue
-        blocks = (data.get("contract") or {}).get("upload")
-        if not blocks:
-            continue
-        if isinstance(blocks, dict):
-            blocks = [blocks]
-        decls.append((client, blocks))
-    return decls
+# Per-client upload enable flag (env var) -> the destination(s) it gates.
+# Intentionally tiny — the same in-code idiom as rule_wspr_decode_enabled's
+# WD_DECODE_VIA_DB.  No contract surface: identity is site-profile's, the
+# credential is `smd admin secrets`'.
+_UPLOAD_ENABLE = {
+    "wspr-recorder":  ("WSPR_USE_HS_UPLOADER", "wsprnet.org / wsprdaemon.org"),
+    "psk-recorder":   ("PSK_USE_HS_UPLOADER", "pskreporter.info"),
+    "meteor-scatter": ("METEOR_SCATTER_USE_HS_UPLOADER", "pskreporter.info"),
+}
 
 
-def _assess_upload_readiness(decls, *, instances_for, env_for, coord, cred_check):
-    """Pure core (testable).  Returns (ready, off, not_ready, deferred):
-      ready     : ["client@inst -> dest", ...]            enabled + all reqs met
-      off       : ["client@inst -> dest", ...]            upload disabled (operator choice)
-      not_ready : [("client@inst -> dest", [missing], register_url), ...]
-      deferred  : [("client (host) -> dest", preflight_hint), ...]   scope=host
-    """
-    ready, off, not_ready, deferred = [], [], [], []
-    for client, blocks in decls:
-        for b in blocks:
-            dest = b.get("destination", "?")
-            if b.get("scope") == "host" or b.get("self_validated"):
-                deferred.append((f"{client} (host) -> {dest}",
-                                 b.get("preflight") or f"{client} validate"))
-                continue
-            flag = b.get("enable_flag")
-            requires = b.get("requires") or []
-            cred = b.get("credential")
-            cred_env = b.get("cred_env")
-            for inst in instances_for(client):
-                env = dict(coord)
-                env.update(env_for(client, inst))
-                label = f"{client}@{inst} -> {dest}"
-                if not (flag and _upload_truthy(env.get(flag))):
-                    off.append(label)
-                    continue
-                missing = [k for k in requires if not _upload_truthy(env.get(k))]
-                path = env.get(cred_env) if (cred_env and env.get(cred_env)) else cred
-                if path:
-                    exists, perms_ok = cred_check(path)
-                    if not exists:
-                        missing.append(f"key {path} (missing)")
-                    elif not perms_ok:
-                        missing.append(f"key {path} (must be mode 0600)")
-                if missing:
-                    not_ready.append((label, missing, b.get("register_url")))
-                else:
-                    ready.append(label)
-    return ready, off, not_ready, deferred
+def _client_installed(client: str) -> bool:
+    """Indirection so tests can monkeypatch installed-client detection."""
+    return Path(f"/etc/{client}").exists()
 
 
-def rule_upload_readiness(view: SystemView) -> RuleResult:
-    """Runtime: for every ENABLED upload path, confirm the per-installation
-    identity + credential are actually present, so a misconfigured client is
-    flagged instead of silently never uploading.  Reads each client's
-    [[contract.upload]] declaration; per-instance for radiod-keyed recorders,
-    deferred to the client's own preflight for host singletons."""
-    decls = _load_upload_decls()
-    if not decls:
-        return RuleResult("upload_readiness", "pass",
-                          "skipped (no installed client declares [[contract.upload]])", [])
+def rule_upload_enabled(view: SystemView) -> RuleResult:
+    """Runtime: flag any ACTIVE radiod-keyed recorder instance whose
+    per-instance env does not enable upload — it decodes to the local sink but
+    silently never ships.  Off MAY be intentional on a decode-only /
+    merge-feeder node, so this is a soft warn for visibility, not a hard fail.
+    Identity (site-profile) and credentials (`smd admin secrets`) are owned
+    elsewhere and intentionally not re-checked here."""
     coord = _read_env_file(Path("/etc/sigmond/coordination.env"))
-
-    def cred_check(path):
-        p = Path(path)
-        try:
-            if not p.exists():
-                return (False, False)
-            return (True, (p.stat().st_mode & 0o777) == 0o600)
-        except Exception:                                  # noqa: BLE001
-            return (False, False)
-
-    ready, off, not_ready, deferred = _assess_upload_readiness(
-        decls,
-        instances_for=_active_instances,
-        env_for=_resolve_instance_env,
-        coord=coord,
-        cred_check=cred_check,
-    )
-    if not_ready:
-        items = [f"{lbl}: missing {', '.join(miss)}" + (f" [register: {url}]" if url else "")
-                 for lbl, miss, url in not_ready]
-        affected = sorted({lbl.split("@")[0] for lbl, _, _ in not_ready})
-        return RuleResult(
-            "upload_readiness", "warn",
-            "upload ENABLED but NOT READY (will silently not upload): "
-            + "; ".join(items), affected)
-    parts = []
-    if ready:
-        parts.append(f"{len(ready)} ready ({', '.join(ready)})")
-    if off:
-        parts.append(f"{len(off)} off (enable per-instance to upload)")
-    if deferred:
-        parts.append("host path(s) — verify with: "
-                     + "; ".join(f"`{hint}`" for _, hint in deferred))
-    return RuleResult("upload_readiness", "pass",
-                      "; ".join(parts) or "no upload-capable instance active", [])
+    off = []
+    for client, (flag, dest) in _UPLOAD_ENABLE.items():
+        if not _client_installed(client):
+            continue
+        for inst in _active_instances(client):
+            env = dict(coord)
+            env.update(_resolve_instance_env(client, inst))
+            if not _upload_truthy(env.get(flag)):
+                off.append(f"{client}@{inst} -> {dest}")
+    if not off:
+        return RuleResult("upload_enabled", "pass",
+                          "active recorder instances have upload enabled "
+                          "(or none installed/active)", [])
+    return RuleResult(
+        "upload_enabled", "warn",
+        "decoding but NOT uploading (spots stay in the local sink): "
+        + "; ".join(off)
+        + ".  If this host should report, set the enable flag in "
+          "/etc/<client>/env/<id>.env (identity comes from `smd config "
+          "render`; credentials from `smd admin secrets`).  Ignore on a "
+          "decode-only / merge-feeder node.",
+        sorted({o.split("@")[0] for o in off}))
 
 
 ALL_RULES = [
@@ -1234,7 +1164,7 @@ ALL_RUNTIME_RULES = [
     rule_wspr_decode_enabled,
     rule_hardware_gated_core,
     rule_secrets,
-    rule_upload_readiness,
+    rule_upload_enabled,
 ]
 
 

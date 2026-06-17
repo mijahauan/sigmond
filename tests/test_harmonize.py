@@ -351,7 +351,7 @@ class TestRuleCpuIsolationRuntime(unittest.TestCase):
                 "rule_wspr_decode_enabled",
                 "rule_hardware_gated_core",
                 "rule_secrets",
-                "rule_upload_readiness",
+                "rule_upload_enabled",
             ],
         )
 
@@ -883,111 +883,62 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class TestUploadReadiness(unittest.TestCase):
-    """The [[contract.upload]] readiness assessor — pure core, hand-built
-    inputs (no host /etc or systemctl state).  Models the per-instance
-    (radiod-keyed) recorders and the host-singleton clients."""
+class TestUploadEnabled(unittest.TestCase):
+    """rule_upload_enabled: per-instance upload-enable visibility.  Monkeypatch
+    the host probes so it's hermetic (the same pattern the other runtime rules
+    use).  Identity/credentials are owned elsewhere and not checked here."""
 
-    def _assess(self, decls, *, instances, envs, coord=None, creds=None):
-        creds = creds or {}
-        return harmonize._assess_upload_readiness(
-            decls,
-            instances_for=lambda c: instances.get(c, []),
-            env_for=lambda c, i: envs.get((c, i), {}),
-            coord=coord or {},
-            # cred present+0600 unless listed otherwise in `creds`
-            cred_check=lambda p: creds.get(p, (True, True)),
-        )
+    def _run(self, *, installed, instances, envs, coord=None):
+        import sigmond.harmonize as H
+        saved = (H._client_installed, H._active_instances,
+                 H._resolve_instance_env, H._read_env_file)
+        try:
+            H._client_installed = lambda c: c in installed
+            H._active_instances = lambda c: instances.get(c, [])
+            H._resolve_instance_env = lambda c, i: envs.get((c, i), {})
+            H._read_env_file = lambda p: (coord or {})
+            return H.rule_upload_enabled(None)
+        finally:
+            (H._client_installed, H._active_instances,
+             H._resolve_instance_env, H._read_env_file) = saved
 
-    def test_instance_enabled_and_ready(self):
-        decls = [("wspr-recorder", [{
-            "destination": "wsprnet.org", "scope": "instance",
-            "enable_flag": "WSPR_USE_HS_UPLOADER",
-            "requires": ["WD_RECEIVER_CALL", "WD_RECEIVER_GRID"],
-        }])]
-        ready, off, not_ready, _ = self._assess(
-            decls,
+    def test_all_enabled_passes(self):
+        r = self._run(
+            installed={"wspr-recorder"},
             instances={"wspr-recorder": ["AC0G\\x3dS"]},
-            envs={("wspr-recorder", "AC0G\\x3dS"): {
-                "WSPR_USE_HS_UPLOADER": "1",
-                "WD_RECEIVER_CALL": "AC0G/S", "WD_RECEIVER_GRID": "EM38ww"}},
-        )
-        self.assertEqual(ready, ["wspr-recorder@AC0G\\x3dS -> wsprnet.org"])
-        self.assertEqual(not_ready, [])
+            envs={("wspr-recorder", "AC0G\\x3dS"): {"WSPR_USE_HS_UPLOADER": "1"}})
+        self.assertEqual(r.severity, "pass")
 
-    def test_instance_off_is_not_a_failure(self):
-        decls = [("psk-recorder", [{
-            "destination": "pskreporter.info", "scope": "instance",
-            "enable_flag": "PSK_USE_HS_UPLOADER", "requires": []}])]
-        ready, off, not_ready, _ = self._assess(
-            decls, instances={"psk-recorder": ["AC0G\\x3dS"]},
-            envs={("psk-recorder", "AC0G\\x3dS"): {}})  # no flag -> off
-        self.assertEqual(off, ["psk-recorder@AC0G\\x3dS -> pskreporter.info"])
-        self.assertEqual(not_ready, [])
-        self.assertEqual(ready, [])
+    def test_off_instance_warns_with_remediation(self):
+        r = self._run(
+            installed={"wspr-recorder"},
+            instances={"wspr-recorder": ["AC0G\\x3dS"]},
+            envs={("wspr-recorder", "AC0G\\x3dS"): {}})  # flag unset
+        self.assertEqual(r.severity, "warn")
+        self.assertIn("wspr-recorder@AC0G\\x3dS", r.message)
+        self.assertIn("smd config render", r.message)      # identity deferral
+        self.assertIn("smd admin secrets", r.message)       # credential deferral
+        self.assertEqual(r.affected, ["wspr-recorder"])
 
-    def test_enabled_but_missing_identity_and_key(self):
-        decls = [("wspr-recorder", [{
-            "destination": "wsprdaemon.org", "scope": "instance",
-            "enable_flag": "WSPR_USE_HS_UPLOADER",
-            "requires": ["WD_RECEIVER_CALL", "WD_SFTP_SERVERS"],
-            "credential": "/etc/hs-uploader/keys/id_ed25519",
-            "register_url": "https://wsprdaemon.org"}])]
-        _, _, not_ready, _ = self._assess(
-            decls, instances={"wspr-recorder": ["bee1"]},
-            envs={("wspr-recorder", "bee1"): {"WSPR_USE_HS_UPLOADER": "1",
-                                              "WD_RECEIVER_CALL": "AC0G/1"}},
-            creds={"/etc/hs-uploader/keys/id_ed25519": (False, False)})
-        self.assertEqual(len(not_ready), 1)
-        label, missing, url = not_ready[0]
-        self.assertEqual(label, "wspr-recorder@bee1 -> wsprdaemon.org")
-        self.assertIn("WD_SFTP_SERVERS", missing)
-        self.assertTrue(any("key" in m and "missing" in m for m in missing))
-        self.assertNotIn("WD_RECEIVER_CALL", missing)  # this one was present
-        self.assertEqual(url, "https://wsprdaemon.org")
+    def test_coordination_env_flag_counts(self):
+        # The enable flag may live in coordination.env, not the instance env.
+        r = self._run(
+            installed={"psk-recorder"},
+            instances={"psk-recorder": ["x"]},
+            envs={("psk-recorder", "x"): {}},
+            coord={"PSK_USE_HS_UPLOADER": "1"})
+        self.assertEqual(r.severity, "pass")
 
-    def test_key_wrong_perms_flagged(self):
-        decls = [("wspr-recorder", [{
-            "destination": "wsprdaemon.org", "scope": "instance",
-            "enable_flag": "F", "requires": [],
-            "credential": "/k"}])]
-        _, _, not_ready, _ = self._assess(
-            decls, instances={"wspr-recorder": ["x"]},
-            envs={("wspr-recorder", "x"): {"F": "1"}},
-            creds={"/k": (True, False)})  # exists but wrong perms
-        self.assertIn("0600", not_ready[0][1][0])
+    def test_not_installed_is_skipped(self):
+        r = self._run(installed=set(), instances={}, envs={})
+        self.assertEqual(r.severity, "pass")
 
-    def test_identity_satisfied_from_coordination_env(self):
-        # A required key set in coordination.env (not the instance env) counts.
-        decls = [("wspr-recorder", [{
-            "destination": "wsprnet.org", "scope": "instance",
-            "enable_flag": "F", "requires": ["STATION_GRID"]}])]
-        ready, _, not_ready, _ = self._assess(
-            decls, instances={"wspr-recorder": ["x"]},
-            envs={("wspr-recorder", "x"): {"F": "1"}},
-            coord={"STATION_GRID": "EM38ww"})
-        self.assertEqual(not_ready, [])
-        self.assertEqual(len(ready), 1)
-
-    def test_host_scope_is_deferred_not_failed(self):
-        decls = [("hf-timestd", [{
-            "destination": "PSWS", "scope": "host",
-            "preflight": "hf-timestd grape test-upload"}])]
-        ready, off, not_ready, deferred = self._assess(
-            decls, instances={}, envs={})
-        self.assertEqual(not_ready, [])
-        self.assertEqual(len(deferred), 1)
-        self.assertEqual(deferred[0][1], "hf-timestd grape test-upload")
-
-    def test_per_instance_mixed_states(self):
-        # Two instances of the same client: one ready, one enabled-but-missing.
-        decls = [("wspr-recorder", [{
-            "destination": "wsprnet.org", "scope": "instance",
-            "enable_flag": "F", "requires": ["G"]}])]
-        ready, off, not_ready, _ = self._assess(
-            decls, instances={"wspr-recorder": ["a", "b"]},
-            envs={("wspr-recorder", "a"): {"F": "1", "G": "x"},
-                  ("wspr-recorder", "b"): {"F": "1"}})  # b missing G
-        self.assertEqual(ready, ["wspr-recorder@a -> wsprnet.org"])
-        self.assertEqual(len(not_ready), 1)
-        self.assertEqual(not_ready[0][0], "wspr-recorder@b -> wsprnet.org")
+    def test_mixed_instances_lists_only_the_off_one(self):
+        r = self._run(
+            installed={"wspr-recorder"},
+            instances={"wspr-recorder": ["a", "b"]},
+            envs={("wspr-recorder", "a"): {"WSPR_USE_HS_UPLOADER": "1"},
+                  ("wspr-recorder", "b"): {}})
+        self.assertEqual(r.severity, "warn")
+        self.assertIn("wspr-recorder@b", r.message)
+        self.assertNotIn("wspr-recorder@a", r.message)
