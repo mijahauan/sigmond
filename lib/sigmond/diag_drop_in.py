@@ -186,7 +186,7 @@ def _check_inventory_operator_callable(client: str, binary: str) -> Check:
             f"{client} inventory --json (operator-callable)", "fail",
             f"exit {res['exit']}: {res['stderr'].strip()[:200]}",
             "inventory MUST exit 0 even on degraded paths "
-            "(see hf-gps-tec _degraded_inventory_payload)",
+            "(see hf-tec _degraded_inventory_payload)",
         )
     if res["payload"] is None:
         return Check(f"{client} inventory --json (operator-callable)",

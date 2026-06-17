@@ -187,7 +187,7 @@ def _expand_template(
     units: list[UnitRef] = []
 
     # Discover configured instances from env files.
-    # /etc/<component>/ for service-user-owned components (e.g. hf-gps-tec)
+    # /etc/<component>/ for service-user-owned components (e.g. hf-tec)
     # is mode 0750; an unprivileged operator running `smd tui` can't even
     # stat its children.  Python 3.12+ (and Debian's backport in 3.11.2)
     # re-raises PermissionError from Path.exists() instead of swallowing

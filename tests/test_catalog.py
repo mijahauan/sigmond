@@ -32,7 +32,7 @@ class TestLoadCatalog:
         expected = {
             'ka9q-radio', 'ka9q-web',
             'wspr-recorder', 'psk-recorder', 'hf-timestd',
-            'hfdl-recorder', 'codar-sounder', 'hf-gps-tec',
+            'hfdl-recorder', 'codar-sounder', 'hf-tec',
             'mag-recorder', 'hs-uploader', 'callhash',
             'gpsdo-monitor', 'igmp-querier', 'ka9q-update',
         }

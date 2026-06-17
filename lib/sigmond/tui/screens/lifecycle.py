@@ -169,7 +169,7 @@ def _gather() -> _LifecycleData:
     fold into rows:
 
     - Components whose unit refs are all templated (one per instance —
-      psk/wspr/hfdl/codar/hf-gps-tec recorder pattern) → one row per
+      psk/wspr/hfdl/codar/hf-tec recorder pattern) → one row per
       instance.  Action verb goes to `systemctl <verb> <unit>` direct.
 
     - Components with concrete or mixed unit refs (hf-timestd's many

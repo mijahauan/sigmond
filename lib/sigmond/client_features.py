@@ -13,7 +13,7 @@ client repo — defeating the "drop-in" promise.
 A client now declares its UI hooks in its own ``deploy.toml``:
 
     [client_features.watch]
-    verb         = "hf-gps-tec"   # `smd watch <verb>` — default: client name
+    verb         = "hf-tec"   # `smd watch <verb>` — default: client name
     description  = "PRN-beacon detection records (per freq/window)"
     verbose      = true           # CLI accepts `-v` / `--verbose`
     per_instance = true           # CLI accepts `--instance REPORTER_ID`
@@ -69,7 +69,7 @@ REPO_ROOT = Path("/opt/git/sigmond")
 class WatchFeature:
     """One client's `smd watch` surface, as declared in its deploy.toml."""
 
-    client: str          # catalog name (e.g. "hf-gps-tec")
+    client: str          # catalog name (e.g. "hf-tec")
     verb: str            # `smd watch <verb>` — usually == client
     description: str
     verbose: bool        # CLI accepts -v / --verbose

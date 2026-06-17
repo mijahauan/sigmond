@@ -28,7 +28,7 @@ rather than through radiod.
   RTP↔UTC offset and tier that the other RF clients label against),
   `wspr-recorder`, `psk-recorder`, `mag-recorder`.
 - **Additional clients:** `codar-sounder`, `hfdl-recorder`,
-  `hf-gps-tec`, `meteor-scatter`.
+  `hf-tec`, `meteor-scatter`.
 
 Decoded spots / products land in a **shared SQLite sink**
 (`/var/lib/sigmond/sink.db`) and are shipped upstream by `hs-uploader`
@@ -115,7 +115,7 @@ smd list --catalog
     ·  mag-recorder           RM3100 magnetometer recorder + PSWS uploader
     ·  codar-sounder          Opportunistic ionospheric sounder (CODAR chirps)
     ·  hfdl-recorder          HFDL recorder (one dumphfdl subprocess per band)
-    ·  hf-gps-tec             HF PRN-beacon recorder for ionospheric TEC
+    ·  hf-tec                 HF PRN-beacon recorder for ionospheric TEC
     ·  meteor-scatter         Meteor-scatter ping decoder (jt9 --msk144)
 
   Infrastructure (3)
@@ -160,7 +160,7 @@ for your station:
 | mag-recorder | `/etc/mag-recorder/mag-recorder-config.toml` |
 | codar-sounder | `/etc/codar-sounder/codar-sounder-config.toml` |
 | hfdl-recorder | `/etc/hfdl-recorder/hfdl-recorder-config.toml` |
-| hf-gps-tec | `/etc/hf-gps-tec/hf-gps-tec-config.toml` |
+| hf-tec | `/etc/hf-tec/hf-tec-config.toml` |
 | meteor-scatter | `/etc/meteor-scatter/meteor-scatter-config.toml` |
 
 Sigmond's own coordination config lives at `/etc/sigmond/topology.toml`.
@@ -371,7 +371,7 @@ station to other HF science.
 |--------|-------------|------|
 | **codar-sounder** | Opportunistic ionospheric sounder using CODAR chirp transmissions | [mijahauan/codar-sounder](https://github.com/mijahauan/codar-sounder) |
 | **hfdl-recorder** | HFDL (High Frequency Data Link) recorder — one `dumphfdl` subprocess per band (→ airframes.io) | [mijahauan/hfdl-recorder](https://github.com/mijahauan/hfdl-recorder) |
-| **hf-gps-tec** | HF PRN-coded beacon recorder for ionospheric specification (TEC) | [mijahauan/hf-gps-tec](https://github.com/mijahauan/hf-gps-tec) |
+| **hf-tec** | HF PRN-coded beacon recorder for ionospheric specification (TEC) | [mijahauan/hf-tec](https://github.com/mijahauan/hf-tec) |
 | **meteor-scatter** | Meteor-scatter ping decoder (`jt9 --msk144`) → local sink + hs-uploader | [mijahauan/meteor-scatter](https://github.com/mijahauan/meteor-scatter) |
 
 ### Infrastructure components

@@ -67,12 +67,12 @@ def _smd_binary() -> str:
 
 
 # Clients that accept per-instance config files (matches
-# sigmond.instance._TEMPLATED_RECORDER_CLIENTS plus hf-gps-tec and
+# sigmond.instance._TEMPLATED_RECORDER_CLIENTS plus hf-tec and
 # mag-recorder, which are singletons today but plumb reporter_id
 # through their per-instance config schema).
 _INSTANCE_CAPABLE_CLIENTS = (
     "codar-sounder",
-    "hf-gps-tec",
+    "hf-tec",
     "hfdl-recorder",
     "mag-recorder",
     "psk-recorder",

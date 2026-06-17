@@ -66,9 +66,9 @@ class ParseWatchFeatureTests(unittest.TestCase):
                 "watch": {"description": "x"},
             },
         }
-        f = _parse_watch_feature("hf-gps-tec", deploy)
+        f = _parse_watch_feature("hf-tec", deploy)
         self.assertIsNotNone(f)
-        self.assertEqual(f.verb, "hf-gps-tec")
+        self.assertEqual(f.verb, "hf-tec")
 
     def test_verbose_and_per_instance_default_to_false(self):
         deploy = {

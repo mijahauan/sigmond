@@ -85,7 +85,7 @@ Not a static client list. The flow:
    - Leo Bodnar GPSDO present → gpsdo-monitor.
    - magnetometer present → mag-recorder.
 3. **Let the operator pick the additional clients** they want (wspr-recorder,
-   psk-recorder, hf-timestd, hfdl-recorder, codar-sounder, hf-gps-tec).
+   psk-recorder, hf-timestd, hfdl-recorder, codar-sounder, hf-tec).
 4. Configure → enable → start the chosen set.
 
 ### client — remote-radiod decode clients
@@ -215,7 +215,7 @@ FFT wisdom. SDR inventory is Advanced, NOT folded into Configure.
 _(Not started. Re-confirm the direction before building — see the ⚠️ banner.)_
 - base: detect → install matching foundation (rx888→ka9q-radio+ka9q-web+
   igmp-querier; gpsdo→gpsdo-monitor; mag→mag-recorder) → client picker
-  (wspr/psk/grape/hfdl/codar/hf-gps-tec) → configure/enable/start.
+  (wspr/psk/grape/hfdl/codar/hf-tec) → configure/enable/start.
 - client: remote radiod status DNS → client picker → configure/enable/start.
 - TUI-only guided assistants that COMPOSE existing screens (Topology-enable,
   Install, Configuration, Lifecycle); replace the static `[profile.base]` /

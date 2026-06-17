@@ -120,14 +120,14 @@ start_priority  = 200                                 # parallel with decoder ch
 # Lifecycle + coordination passthrough are auto-discovered from the repo's
 # own deploy.toml [client] block once cloned.
 
-[client.hf-gps-tec]
+[client.hf-tec]
 kind            = "client"
 description     = "HF PRN-coded beacon recorder for ionospheric specification"
-repo            = "https://github.com/mijahauan/hf-gps-tec"
+repo            = "https://github.com/mijahauan/hf-tec"
 uses            = ["ka9q-python"]
 requires        = ["ka9q-python", "ka9q-radio"]
 contract        = "0.8"
-install_script  = "/opt/git/sigmond/hf-gps-tec/scripts/install.sh"
+install_script  = "/opt/git/sigmond/hf-tec/scripts/install.sh"
 
 [client.meteor-scatter]
 kind            = "client"
@@ -246,4 +246,4 @@ optional           = ["gpsdo-monitor"]
 description        = "Decode-only station — clients against a REMOTE radiod (no local ka9q-radio/web)"
 clients            = ["hf-timestd", "wspr-recorder", "psk-recorder"]
 local_radiod_infra = []
-optional           = ["mag-recorder", "codar-sounder", "hfdl-recorder", "hf-gps-tec"]
+optional           = ["mag-recorder", "codar-sounder", "hfdl-recorder", "hf-tec"]

@@ -196,7 +196,7 @@ class Instance:
 def _safe_exists(path: Path) -> bool:
     """Path.exists() that swallows PermissionError.
 
-    `/etc/<client>/` for service-user-owned components (hf-gps-tec,
+    `/etc/<client>/` for service-user-owned components (hf-tec,
     mag-recorder, hf-timestd, …) is mode 0750; an unprivileged
     operator running `smd tui` can't stat its children.  Python 3.12+
     (and Debian's 3.11.2 backport) re-raises PermissionError from
@@ -266,7 +266,7 @@ def list_instances(catalog_clients: Optional[list[str]] = None) -> list[Instance
     yet, handled by `smd admin instance migrate`.
 
     Operator-callable: when /etc/<client>/ is service-user-owned
-    (mode 0750 — hf-gps-tec, mag-recorder, hf-timestd, …) the glob
+    (mode 0750 — hf-tec, mag-recorder, hf-timestd, …) the glob
     silently returns nothing for an unprivileged caller.  In that
     case we fall back to a systemctl unit enumeration so the operator
     still sees their instances in `smd tui` Configuration without

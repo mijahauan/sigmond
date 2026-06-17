@@ -161,7 +161,7 @@ _NO_HARDWARE_DEP: set[str] = {
     "wspr-recorder",
     "hfdl-recorder",
     "codar-sounder",
-    "hf-gps-tec",
+    "hf-tec",
     "hf-timestd",
     # Libraries and infra: no hardware to detect.
     "ka9q-python",

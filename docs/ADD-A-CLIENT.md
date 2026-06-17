@@ -152,7 +152,7 @@ operator.  Service-user-owned config files (mode 0640) are normal;
 your `inventory` handler must catch `PermissionError` and
 `FileNotFoundError` and print a contract-shaped degraded payload with
 the failure as a `fail`-severity `issues` entry.  See
-`hf-gps-tec/src/hf_gps_tec/cli.py` `_degraded_inventory_payload` for
+`hf-tec/src/hf_tec/cli.py` `_degraded_inventory_payload` for
 the canonical implementation.
 
 **Wizard subcommands (§14)** — required for the `smd config init|edit`
@@ -242,7 +242,7 @@ See the five committed parsers under
 `/opt/git/sigmond/{psk,wspr,hfdl}-recorder/{src,}/<pkg>/sigmond_tui.py`,
 `/opt/git/sigmond/codar-sounder/src/codar_sounder/sigmond_tui.py`,
 `/opt/git/sigmond/hf-timestd/src/hf_timestd/sigmond_tui.py`,
-`/opt/git/sigmond/hf-gps-tec/src/hf_gps_tec/sigmond_tui.py` for
+`/opt/git/sigmond/hf-tec/src/hf_tec/sigmond_tui.py` for
 working examples covering the full range of config shapes
 (multi-radiod, band-name lookup table, per-transmitter array,
 per-channel-group hierarchy, singleton config).
@@ -400,5 +400,5 @@ principle and why it matters.
 |-----------------|-----------------------------------------------------------------------|
 | `psk-recorder`  | a clean greenfield client; both `[client_features]` blocks present    |
 | `hf-timestd`    | a singleton (one-per-host) client with `[client_features.verifier]`   |
-| `hf-gps-tec`    | a per-instance client; canonical degraded-inventory implementation    |
+| `hf-tec`    | a per-instance client; canonical degraded-inventory implementation    |
 | `mag-recorder`  | a non-radiod data-source client (§16)                                 |

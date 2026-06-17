@@ -24,7 +24,7 @@ Observe (what is, read-only):
     smd admin log         [--files | --level LEVEL] [<client>]         tail journal or file logs
     smd admin diag        [net | cpu-affinity | cpu-freq]              diagnostics
     smd admin environment list | probe | describe                      discover network peers
-    smd watch       <wspr|psk|hfdl|codar|hf-gps-tec|mag|ka9q|radiod|uploads|verifier> [args...] unified service watcher
+    smd watch       <wspr|psk|hfdl|codar|hf-tec|mag|ka9q|radiod|uploads|verifier> [args...] unified service watcher
     smd admin sources     list | add | remove | apply                  per-client SDR source selection
 
 Operate (run things now, may need sudo):
@@ -6797,7 +6797,7 @@ _smd_complete() {
                     COMPREPLY=($(compgen -W "list install update add remove enable disable help" -- "$cur"))
                     ;;
                 watch)
-                    COMPREPLY=($(compgen -W "wspr psk hfdl codar hf-gps-tec mag ka9q radiod uploads verifier" -- "$cur"))
+                    COMPREPLY=($(compgen -W "wspr psk hfdl codar hf-tec mag ka9q radiod uploads verifier" -- "$cur"))
                     ;;
                 admin)
                     COMPREPLY=($(compgen -W "$admin_cmds" -- "$cur"))
@@ -6814,7 +6814,7 @@ _smd_complete() {
                         wspr)
                             COMPREPLY=($(compgen -W "-v --verbose --instance --backlog --rejected -r" -- "$cur"))
                             ;;
-                        psk|hfdl|codar|mag|hf-gps-tec)
+                        psk|hfdl|codar|mag|hf-tec)
                             COMPREPLY=($(compgen -W "-v --verbose --instance" -- "$cur"))
                             ;;
                         ka9q)
@@ -11132,11 +11132,11 @@ def cmd_codar_watch(args) -> int:
 
 
 # ---------------------------------------------------------------------------
-# hf-gps-tec watch — PRN-beacon detection records
+# hf-tec watch — PRN-beacon detection records
 # ---------------------------------------------------------------------------
 
 
-def _format_hf_gps_tec_codeless_record(rec: dict) -> str:
+def _format_hf_tec_codeless_record(rec: dict) -> str:
     """Render one codeless-mode JSONL record as a single line.
 
     Codeless records have no transmitter identity (the 100-ms
@@ -11163,7 +11163,7 @@ def _format_hf_gps_tec_codeless_record(rec: dict) -> str:
             f'band={bp:+6.1f} dB')
 
 
-def _format_hf_gps_tec_locked_record(rec: dict) -> str:
+def _format_hf_tec_locked_record(rec: dict) -> str:
     """Render one locked-mode JSONL record as a single line.
 
     Locked records carry a per-Tx pseudorange (km) — the
@@ -11189,12 +11189,12 @@ def _format_hf_gps_tec_locked_record(rec: dict) -> str:
             f'amp={amp:+5.1f} dB  SNR={snr:+5.1f} dB')
 
 
-def cmd_hf_gps_tec_watch(args) -> int:
-    """Live tail of hf-gps-tec PRN-beacon detection records.
+def cmd_hf_tec_watch(args) -> int:
+    """Live tail of hf-tec PRN-beacon detection records.
 
-    hf-gps-tec writes one JSONL record per (frequency, integration
+    hf-tec writes one JSONL record per (frequency, integration
     window) to
-    ``/var/lib/hf-gps-tec/<instance>/{codeless,locked}/YYYY/MM/DD.jsonl``.
+    ``/var/lib/hf-tec/<instance>/{codeless,locked}/YYYY/MM/DD.jsonl``.
     The codeless and locked streams have different schemas; this
     watcher tails whichever subdirectory(s) the daemon is currently
     producing and formats each record on its own line as it lands.
@@ -11211,7 +11211,7 @@ def cmd_hf_gps_tec_watch(args) -> int:
             r = subprocess.run(
                 ['systemctl', 'list-units', '--no-legend', '--no-pager',
                  '--type=service', '--state=active',
-                 'hf-gps-tec@*.service'],
+                 'hf-tec@*.service'],
                 capture_output=True, text=True, check=False,
             )
         except FileNotFoundError:
@@ -11219,11 +11219,11 @@ def cmd_hf_gps_tec_watch(args) -> int:
             return 1
         lines = [l for l in r.stdout.splitlines() if l.strip()]
         if not lines:
-            data_root = Path('/var/lib/hf-gps-tec')
+            data_root = Path('/var/lib/hf-tec')
             if not data_root.is_dir():
-                _err('no active hf-gps-tec@* service and no '
-                     f'{data_root} directory — is hf-gps-tec '
-                     'installed? (smd status hf-gps-tec)')
+                _err('no active hf-tec@* service and no '
+                     f'{data_root} directory — is hf-tec '
+                     'installed? (smd status hf-tec)')
                 return 1
             candidates = sorted(
                 (p for p in data_root.iterdir() if p.is_dir()),
@@ -11234,7 +11234,7 @@ def cmd_hf_gps_tec_watch(args) -> int:
                      'recorded yet?')
                 return 1
             instance = candidates[0].name
-            _warn(f'hf-gps-tec@{instance} not active — tailing '
+            _warn(f'hf-tec@{instance} not active — tailing '
                   f'data dir anyway (records will only update once '
                   f'the service starts)')
         else:
@@ -11245,7 +11245,7 @@ def cmd_hf_gps_tec_watch(args) -> int:
                 _err(f'unexpected unit name: {unit}')
                 return 1
 
-    data_dir = Path(f'/var/lib/hf-gps-tec/{instance}')
+    data_dir = Path(f'/var/lib/hf-tec/{instance}')
     if not data_dir.is_dir():
         _err(f'no data directory at {data_dir} — wrong instance?')
         return 1
@@ -11357,10 +11357,10 @@ def cmd_hf_gps_tec_watch(args) -> int:
                     except _json.JSONDecodeError:
                         continue
                     if mode == 'codeless':
-                        print(f'  {_format_hf_gps_tec_codeless_record(rec)}',
+                        print(f'  {_format_hf_tec_codeless_record(rec)}',
                               flush=True)
                     else:
-                        print(f'  {_format_hf_gps_tec_locked_record(rec)}',
+                        print(f'  {_format_hf_tec_locked_record(rec)}',
                               flush=True)
                     if verbose:
                         print(f'    {raw}', flush=True)
@@ -12788,13 +12788,13 @@ def _add_codar_watch_args(p) -> None:
                         'most-recently-modified data dir if no service)')
 
 
-def _add_hf_gps_tec_watch_args(p) -> None:
-    """Argument spec for `smd watch hf-gps-tec`."""
+def _add_hf_tec_watch_args(p) -> None:
+    """Argument spec for `smd watch hf-tec`."""
     p.add_argument('-v', '--verbose', action='store_true',
                    help='dump the full record JSON under each formatted line')
     p.add_argument('--instance', metavar='REPORTER_ID', default=None,
                    help='reporter ID (= systemd @<instance> suffix, e.g. '
-                        'AC0G-B1).  Default: first active hf-gps-tec@*, '
+                        'AC0G-B1).  Default: first active hf-tec@*, '
                         'or most-recently-modified data dir if no service.')
 
 
@@ -14678,12 +14678,12 @@ def main() -> int:
     )
     _add_codar_watch_args(p_w_codar)
 
-    p_w_hfgpstec = watch_sub.add_parser(
-        'hf-gps-tec',
-        help='live tail of hf-gps-tec PRN-beacon detection records '
+    p_w_hftec = watch_sub.add_parser(
+        'hf-tec',
+        help='live tail of hf-tec PRN-beacon detection records '
              '(one line per (frequency, integration window))',
     )
-    _add_hf_gps_tec_watch_args(p_w_hfgpstec)
+    _add_hf_tec_watch_args(p_w_hftec)
 
     p_w_mag = watch_sub.add_parser(
         'mag',
@@ -15018,8 +15018,8 @@ def main() -> int:
             return cmd_hfdl_watch(args)
         if target == 'codar':
             return cmd_codar_watch(args)
-        if target == 'hf-gps-tec':
-            return cmd_hf_gps_tec_watch(args)
+        if target == 'hf-tec':
+            return cmd_hf_tec_watch(args)
         if target == 'mag':
             return cmd_mag_watch(args)
         if target == 'radiod':

@@ -35,7 +35,7 @@ diagnostic / maintenance verbs. Sub-groups indented.
 | `status` | | `cmd_status` | no |
 | `stop` | | `cmd_stop` | yes |
 | `tui` | | `cmd_tui` | n/a |
-| `watch` | `wspr / psk / hfdl / codar / hf-gps-tec / mag / ka9q / radiod / uploads / verifier` | dispatches into the matching `cmd_*_watch` | no |
+| `watch` | `wspr / psk / hfdl / codar / hf-tec / mag / ka9q / radiod / uploads / verifier` | dispatches into the matching `cmd_*_watch` | no |
 
 ### `admin` umbrella (`smd admin <subverb>`)
 
