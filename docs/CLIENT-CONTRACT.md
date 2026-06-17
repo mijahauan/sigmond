@@ -2620,3 +2620,64 @@ already prefers the per-instance file when present, and the
 systemd template already passes `--instance %i`; once the unit
 is renamed and the per-instance config exists, the daemon picks
 it up on next start.
+
+## §20 — Upload-readiness declaration (`[[contract.upload]]`) (v0.8)
+
+A client that ships data to an external service (wsprnet.org,
+wsprdaemon.org, pskreporter.info, PSWS, …) MUST declare each upload
+path in its `deploy.toml` so sigmond can tell an operator whether an
+*enabled* upload is actually ready — turning a silently-non-uploading
+client into a loud `smd admin validate` warning.
+
+The declaration is the *definition of what needs configuring per site*;
+the actual values live per-installation (per-instance env for the
+radiod-keyed recorders, or the host config for singletons). Sigmond's
+`rule_upload_readiness` reads these blocks and checks live state.
+
+```toml
+# One block per (client, destination).  A client may declare several.
+[[contract.upload]]
+destination  = "wsprdaemon.org"        # human label for the report
+scope        = "instance"              # "instance" (per-radiod env) | "host" (singleton)
+enable_flag  = "WSPR_USE_HS_UPLOADER"  # env var; the path is OFF unless this is truthy
+requires     = ["WD_RECEIVER_CALL",    # env vars that MUST be set when enabled.
+                "WD_RECEIVER_GRID",    # Looked up in the per-instance env file AND
+                "WD_SFTP_SERVERS",     # /etc/sigmond/coordination.env.
+                "WD_SFTP_USER",
+                "WD_UPLOAD_WSPRDAEMON_DIR"]
+credential   = "/etc/hs-uploader/keys/id_ed25519"   # optional: key file that must exist + be 0600 when enabled
+cred_env     = "HS_UPLOADER_SSH_KEY_FILE"            # optional: env var that overrides the default key path
+register_url = "wsprdaemon.org (SFTP account + enrolled key)"   # where the operator obtains the account/key
+```
+
+For a **host singleton** (mag-recorder, hf-timestd) whose upload config
+lives in its own TOML and is checked by its own `validate`/preflight,
+declare `scope = "host"` and defer:
+
+```toml
+[[contract.upload]]
+destination    = "PSWS (pswsnetwork.eng.ua.edu)"
+scope          = "host"
+self_validated = true                       # sigmond does NOT re-check; it points at the preflight
+preflight      = "hf-timestd grape test-upload"
+register_url   = "pswsnetwork.eng.ua.edu (station_id + SSH public key enrolled on the portal)"
+```
+
+**Scope semantics.** `scope = "instance"` is checked **per radiod-keyed
+instance** — each `/etc/<client>/env/<radiod_id>.env` may enable a
+different destination with its own reporter identity and credentials, so
+readiness is reported per `<client>@<instance> -> <destination>`.
+`scope = "host"` is checked once per host.
+
+**What `rule_upload_readiness` reports.**
+- `OFF` — `enable_flag` unset/`0`: not a failure (a decode-only node is a
+  valid posture); reported so the operator can see it.
+- `READY` — enabled and every `requires` key set and the `credential`
+  present with mode `0600`.
+- `NOT READY` (→ `warn`) — enabled but missing a required key or the
+  credential; the message names what's missing and the `register_url`.
+- host paths are listed with their `preflight` to run.
+
+This is the machine-readable contract behind the decode→upload pathway;
+future `smd config upload <client>` go-live flows and the upload
+onboarding runbook read the same blocks.

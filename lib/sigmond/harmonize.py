@@ -1027,6 +1027,191 @@ def rule_secrets(view: SystemView) -> RuleResult:
                       'optional secrets may be absent)', [])
 
 
+# ---------------------------------------------------------------------------
+# Upload-readiness (CONTRACT [[contract.upload]] — the decode->upload gap)
+#
+# Each uploading client DECLARES its per-site upload requirements in its
+# deploy.toml [[contract.upload]] blocks (enable flag, required identity/env,
+# credential file, registration URL).  This rule reads those declarations and
+# checks the LIVE per-installation state, so a client that is enabled but
+# missing its identity/credential is flagged LOUDLY instead of silently never
+# uploading.  Upload config is PER-INSTANCE for the radiod-keyed recorders
+# (wspr/psk/meteor: one env file per `<client>@<radiod_id>`), and per-HOST for
+# the singletons (mag-recorder, hf-timestd), which self-validate — so for
+# scope="host" we defer to the client's own preflight rather than re-checking.
+# ---------------------------------------------------------------------------
+
+def _upload_truthy(v) -> bool:
+    return v is not None and str(v).strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _read_env_file(path: Path) -> dict:
+    out: dict = {}
+    try:
+        for line in Path(path).read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception:                                      # noqa: BLE001
+        pass
+    return out
+
+
+def _resolve_instance_env(client: str, inst: str) -> dict:
+    """Per-instance env for `<client>@<inst>`.  Handles systemd's escaped
+    instance form (e.g. AC0G\\x3dS) vs the env-file name (AC0G=S.env)."""
+    env_dir = Path(f"/etc/{client}/env")
+    forms = {inst}
+    if "\\x" in inst:
+        try:
+            forms.add(inst.encode().decode("unicode_escape"))
+        except Exception:                                  # noqa: BLE001
+            pass
+    for name in forms:
+        f = env_dir / f"{name}.env"
+        if f.exists():
+            return _read_env_file(f)
+    return {}
+
+
+def _active_instances(client: str) -> list:
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["systemctl", "list-units", "--type=service", "--state=active",
+             "--no-legend", "--plain", f"{client}@*.service"],
+            capture_output=True, text=True, timeout=10).stdout
+    except Exception:                                      # noqa: BLE001
+        return []
+    names = []
+    for ln in out.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        u = ln.split()[0]
+        if u.startswith(f"{client}@") and u.endswith(".service"):
+            names.append(u[len(f"{client}@"):-len(".service")])
+    return names
+
+
+def _load_upload_decls() -> list:
+    """[(client, [block,...])] for every INSTALLED client whose deploy.toml
+    declares [[contract.upload]]."""
+    import tomllib
+    decls = []
+    base = Path("/opt/git/sigmond")
+    try:
+        deploys = sorted(base.glob("*/deploy.toml"))
+    except Exception:                                      # noqa: BLE001
+        return []
+    for deploy in deploys:
+        client = deploy.parent.name
+        if not Path(f"/etc/{client}").exists():
+            continue                                       # not installed on this host
+        try:
+            data = tomllib.loads(deploy.read_text())
+        except Exception:                                  # noqa: BLE001
+            continue
+        blocks = (data.get("contract") or {}).get("upload")
+        if not blocks:
+            continue
+        if isinstance(blocks, dict):
+            blocks = [blocks]
+        decls.append((client, blocks))
+    return decls
+
+
+def _assess_upload_readiness(decls, *, instances_for, env_for, coord, cred_check):
+    """Pure core (testable).  Returns (ready, off, not_ready, deferred):
+      ready     : ["client@inst -> dest", ...]            enabled + all reqs met
+      off       : ["client@inst -> dest", ...]            upload disabled (operator choice)
+      not_ready : [("client@inst -> dest", [missing], register_url), ...]
+      deferred  : [("client (host) -> dest", preflight_hint), ...]   scope=host
+    """
+    ready, off, not_ready, deferred = [], [], [], []
+    for client, blocks in decls:
+        for b in blocks:
+            dest = b.get("destination", "?")
+            if b.get("scope") == "host" or b.get("self_validated"):
+                deferred.append((f"{client} (host) -> {dest}",
+                                 b.get("preflight") or f"{client} validate"))
+                continue
+            flag = b.get("enable_flag")
+            requires = b.get("requires") or []
+            cred = b.get("credential")
+            cred_env = b.get("cred_env")
+            for inst in instances_for(client):
+                env = dict(coord)
+                env.update(env_for(client, inst))
+                label = f"{client}@{inst} -> {dest}"
+                if not (flag and _upload_truthy(env.get(flag))):
+                    off.append(label)
+                    continue
+                missing = [k for k in requires if not _upload_truthy(env.get(k))]
+                path = env.get(cred_env) if (cred_env and env.get(cred_env)) else cred
+                if path:
+                    exists, perms_ok = cred_check(path)
+                    if not exists:
+                        missing.append(f"key {path} (missing)")
+                    elif not perms_ok:
+                        missing.append(f"key {path} (must be mode 0600)")
+                if missing:
+                    not_ready.append((label, missing, b.get("register_url")))
+                else:
+                    ready.append(label)
+    return ready, off, not_ready, deferred
+
+
+def rule_upload_readiness(view: SystemView) -> RuleResult:
+    """Runtime: for every ENABLED upload path, confirm the per-installation
+    identity + credential are actually present, so a misconfigured client is
+    flagged instead of silently never uploading.  Reads each client's
+    [[contract.upload]] declaration; per-instance for radiod-keyed recorders,
+    deferred to the client's own preflight for host singletons."""
+    decls = _load_upload_decls()
+    if not decls:
+        return RuleResult("upload_readiness", "pass",
+                          "skipped (no installed client declares [[contract.upload]])", [])
+    coord = _read_env_file(Path("/etc/sigmond/coordination.env"))
+
+    def cred_check(path):
+        p = Path(path)
+        try:
+            if not p.exists():
+                return (False, False)
+            return (True, (p.stat().st_mode & 0o777) == 0o600)
+        except Exception:                                  # noqa: BLE001
+            return (False, False)
+
+    ready, off, not_ready, deferred = _assess_upload_readiness(
+        decls,
+        instances_for=_active_instances,
+        env_for=_resolve_instance_env,
+        coord=coord,
+        cred_check=cred_check,
+    )
+    if not_ready:
+        items = [f"{lbl}: missing {', '.join(miss)}" + (f" [register: {url}]" if url else "")
+                 for lbl, miss, url in not_ready]
+        affected = sorted({lbl.split("@")[0] for lbl, _, _ in not_ready})
+        return RuleResult(
+            "upload_readiness", "warn",
+            "upload ENABLED but NOT READY (will silently not upload): "
+            + "; ".join(items), affected)
+    parts = []
+    if ready:
+        parts.append(f"{len(ready)} ready ({', '.join(ready)})")
+    if off:
+        parts.append(f"{len(off)} off (enable per-instance to upload)")
+    if deferred:
+        parts.append("host path(s) — verify with: "
+                     + "; ".join(f"`{hint}`" for _, hint in deferred))
+    return RuleResult("upload_readiness", "pass",
+                      "; ".join(parts) or "no upload-capable instance active", [])
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_radiod_status_configured,
@@ -1049,6 +1234,7 @@ ALL_RUNTIME_RULES = [
     rule_wspr_decode_enabled,
     rule_hardware_gated_core,
     rule_secrets,
+    rule_upload_readiness,
 ]
 
 
