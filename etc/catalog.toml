@@ -66,9 +66,14 @@ repo            = "https://github.com/mijahauan/mag-recorder"
 uses            = []
 requires        = ["hs-uploader"]                     # sibling pkg for uv editable install
 contract        = "0.8"
+install_script  = "/opt/git/sigmond/mag-recorder/install.sh"  # root install.sh (builds mag-usb, udev, venv)
 start_priority  = 200                                 # parallel with decoder chain
 hardware_gated  = "magnetometer (RM3100 / Pololu USB-I2C)"  # Phase D: dormant when absent
-# No install_script: install via `smd install mag-recorder` (deploy.toml drives the steps).
+# install.sh does the install (mag-usb C binary, /dev/ttyMAG0 udev rule, venv);
+# deploy.toml [systemd] drives lifecycle/units — same split as every other client.
+# Without install_script the cmd_install classifier bucketed this client-kind
+# entry as "unknown" and skipped it, so `smd install`/`smd bringup dasi2` never
+# actually installed mag-recorder.
 # No topology_alias: avoid the deprecated alias surface for a brand-new client.
 # The `mag-usb` C binary is bundled inside mag-recorder (bin/mag-usb +
 # scripts/build-mag-usb.sh) per sigmond/docs/native-binaries.md — same
