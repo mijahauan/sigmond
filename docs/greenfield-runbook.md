@@ -260,7 +260,14 @@ Spot-check data is actually flowing:
 sudo find /dev/shm/wspr-recorder -name '*.wav' | wc -l     # WSPR WAVs in flight
 sudo find /var/lib/timestd/raw_buffer -maxdepth 2 -type d  # hf-timestd Digital RF
 systemctl list-timers 'grape-*' 'timestd-*'                # hf-timestd timers active
+smd watch gpsdo --once                                     # GPSDO locked? 3D fix + PLL + PPS (disciplines the rx888)
 ```
+
+`smd watch gpsdo` reads the per-device reports gpsdo-monitor writes to
+`/run/gpsdo/*.json` (drop `--once` for a live, `watch(1)`-style refresh). A
+healthy dasi2 GPSDO shows `PLL yes`, `FIX 3D`, and `PPS yes`. If it instead
+says *"gpsdo-monitor is running but has not written a device report yet"*
+with a GPSDO plugged in, see the udev row in Troubleshooting below.
 
 ## Phase 9 — PSWS upload key (only if uploading to PSWS)
 
@@ -303,6 +310,7 @@ them if they recur.
 | client `226/NAMESPACE` on first start | a `StateDirectory`/`ReadWritePaths` path missing (e.g. `/var/lib/hs-uploader`) | the client's `deploy.toml` mkdir step creates it; re-run install |
 | `uv` editable reinstall -> EACCES on `__pycache__` | venv built root-owned, removing as non-root | reinstall as root, then `chmod -R a+rX` the venv |
 | governor back to `powersave` after reboot | `smd-cpu-governor.service` not installed | `smd apply` (or `smd admin diag cpu-affinity --apply`) installs + enables it |
+| `smd watch gpsdo` empty, but GPSDO is on the bus and gpsdo-monitor is running (`OSError: open failed` in its journal) | GPSDO was attached **before** gpsdo-monitor installed its `99-gpsdo.rules` udev rule, so the USB device node kept `root:root` perms (the libusb HID backend needs group `gpsdo` rw on `/dev/bus/usb/*`) | re-apply the rule to the already-attached device (no replug): `sudo udevadm control --reload-rules && sudo udevadm trigger --action=add --attr-match=idVendor=1dd2`, then `sudo systemctl restart gpsdo-monitor`. Persistent thereafter (rule fires on future replug/reboot). |
 
 ---
 

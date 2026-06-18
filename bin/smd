@@ -11979,13 +11979,22 @@ def cmd_gpsdo_watch(args) -> int:
         out = [f'{BOLD}GPSDO live{RST}  {DIM}gpsdo-monitor → /run/gpsdo/*.json'
                f'   {now}{RST}']
         if not reports:
+            YEL = '\033[33m'
             if _service_active():
-                out.append(f'  {DIM}gpsdo-monitor running, no schema-v1 reports '
-                           f'yet…{RST}')
+                # Service is up but no <serial>.json — usually a probe/HID
+                # open failure (e.g. a GPSDO attached BEFORE install, so the
+                # udev rule never fired on its USB node).  Point at the fix.
+                out.append(f'  {YEL}gpsdo-monitor is running but has not written '
+                           f'a device report yet.{RST}')
+                out.append(f'  {DIM}check probe errors:  journalctl -u '
+                           f'gpsdo-monitor -n 30{RST}')
+                out.append(f'  {DIM}attached before install? re-apply udev perms: '
+                           f'sudo udevadm control --reload-rules && sudo '
+                           f'udevadm trigger{RST}')
             else:
-                out.append(f'  {DIM}no GPSDO reports — gpsdo-monitor not '
+                out.append(f'  {YEL}no GPSDO reports — gpsdo-monitor is not '
                            f'installed/running here.{RST}')
-                out.append(f'  {DIM}install: smd install --components '
+                out.append(f'  {DIM}install:  smd install --components '
                            f'gpsdo-monitor   (or smd bringup dasi2){RST}')
             return '\n'.join(out)
         hdr = (f'  {"SERIAL":<14}{"MODEL":<16}{"A":<4}{"PLL":<6}{"FIX":<8}'
