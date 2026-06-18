@@ -168,7 +168,6 @@ _NO_HARDWARE_DEP: set[str] = {
     "callhash",
     "hs-uploader",
     "igmp-querier",
-    "ka9q-update",
     "onion",
 }
 

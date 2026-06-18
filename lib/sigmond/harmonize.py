@@ -671,7 +671,7 @@ def rule_ka9q_python_compat(view: SystemView) -> RuleResult:
 
     remediation = (
         "If ka9q-radio is the source of truth: rerun "
-        "`ka9q-update/install-ka9q.sh` (it pins ka9q-radio to "
+        "`smd install` (sigmond's in-tree builder checks out ka9q-radio at "
         f"ka9q-python's expected commit {expected[:12]}). "
         "If ka9q-python should advance: run "
         "`python scripts/sync_types.py --apply` in ka9q-python against "

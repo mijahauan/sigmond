@@ -185,17 +185,6 @@ requires        = []
 install_script  = "/opt/git/sigmond/rac/install.sh"
 start_priority  = 0                                   # admin access: up early so a broken install is reachable
 
-[client.ka9q-update]
-kind            = "infra"
-description     = "Standalone ka9q-radio / ka9q-web install + update utility"
-repo            = "https://github.com/mijahauan/ka9q-update"
-uses            = []
-requires        = []
-# No install_script: sigmond now owns the radiod/ka9q-web build recipe in-tree
-# (_install_radiod_native / _build_ka9q_web_with_onion) and no longer delegates
-# to ka9q-update's install-ka9q.sh.  Cataloged so the standalone updater is
-# cloned + tracked; run install-ka9q.sh by hand if you want it directly.
-
 # ---------------------------------------------------------------------------
 # Deprecations
 #
@@ -205,6 +194,11 @@ requires        = []
 # still exists, and `smd remove <name>` becomes a full purge for these
 # names (stop+disable units, rm repo, venv, /etc/<name>/).
 # ---------------------------------------------------------------------------
+
+[deprecated.ka9q-update]
+removed_in  = "f2ed76c"
+reason      = "Radiod/ka9q-web build+update is now owned in-tree by smd (smd install / _install_radiod_native + smd component update); the standalone updater is redundant."
+replaced_by = ["sigmond"]
 
 [deprecated.wsprdaemon-client]
 removed_in  = "0eb8914"
