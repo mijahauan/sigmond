@@ -22,12 +22,48 @@ class TestUploadEnable(unittest.TestCase):
         self.assertEqual(upload.storage_instance("my-rx888"), "my-rx888")
 
     def test_apply_enable_creates_and_sets_flag(self):
-        path, flag, dests = upload.apply_enable(
+        path, flag, dests, delivery = upload.apply_enable(
             "wspr-recorder", "AC0G/S", True, base=str(self.base))
         self.assertEqual(flag, "WSPR_USE_HS_UPLOADER")
         self.assertEqual(path, self._env("wspr-recorder", "AC0G=S"))
         self.assertIn("WSPR_USE_HS_UPLOADER=1", path.read_text())
         self.assertIn("wsprdaemon.org", dests)
+        self.assertIsNone(delivery)  # wspr has no delivery-pipeline knob
+
+    def test_psk_enable_sets_direct_pipeline(self):
+        # Enabling psk must ALSO set the direct pipeline — the boolean alone
+        # leaves the default server-merge path, which delivers nothing on a
+        # standalone node.
+        path, _, _, delivery = upload.apply_enable(
+            "psk-recorder", "AC0G/S", True, base=str(self.base))
+        body = path.read_text()
+        self.assertIn("PSK_USE_HS_UPLOADER=1", body)
+        self.assertIn("PSK_DELIVERY_PIPELINES=direct", body)
+        self.assertEqual(delivery, ("PSK_DELIVERY_PIPELINES", "direct"))
+
+    def test_psk_enable_via_server_merge(self):
+        path, _, _, delivery = upload.apply_enable(
+            "psk-recorder", "AC0G/S", True, base=str(self.base),
+            delivery="server-merge")
+        self.assertIn("PSK_DELIVERY_PIPELINES=server-merge", path.read_text())
+        self.assertEqual(delivery, ("PSK_DELIVERY_PIPELINES", "server-merge"))
+
+    def test_psk_invalid_via_raises(self):
+        with self.assertRaises(ValueError):
+            upload.apply_enable("psk-recorder", "AC0G/S", True,
+                                base=str(self.base), delivery="bogus")
+
+    def test_via_on_client_without_knob_raises(self):
+        with self.assertRaises(ValueError):
+            upload.apply_enable("wspr-recorder", "AC0G/S", True,
+                                base=str(self.base), delivery="direct")
+
+    def test_disable_leaves_pipeline_untouched(self):
+        upload.apply_enable("psk-recorder", "AC0G/S", True, base=str(self.base))
+        upload.apply_enable("psk-recorder", "AC0G/S", False, base=str(self.base))
+        body = self._env("psk-recorder", "AC0G=S").read_text()
+        self.assertIn("PSK_USE_HS_UPLOADER=0", body)
+        self.assertIn("PSK_DELIVERY_PIPELINES=direct", body)  # not reverted
 
     def test_apply_preserves_other_keys(self):
         env = self._env("wspr-recorder", "AC0G=S")
@@ -56,7 +92,7 @@ class TestUploadEnable(unittest.TestCase):
         env = self._env("wspr-recorder", "AC0G=S")
         env.parent.mkdir(parents=True)
         env.write_text("WSPR_USE_HS_UPLOADER=0\n")
-        path, _, _ = upload.apply_enable(
+        path, _, _, _ = upload.apply_enable(
             "wspr-recorder", "AC0G/S", True, base=str(self.base))
         self.assertEqual(path, env)
         self.assertIn("WSPR_USE_HS_UPLOADER=1", env.read_text())
@@ -91,10 +127,10 @@ class TestConfigUploadCommand(unittest.TestCase):
         from sigmond import upload
         calls = []
         orig = upload.apply_enable
-        upload.apply_enable = (lambda c, i, on, base="/etc":
+        upload.apply_enable = (lambda c, i, on, base="/etc", delivery=None:
                                (calls.append((c, i, on))
                                 or (Path("/x.env"), "WSPR_USE_HS_UPLOADER",
-                                    ["wsprnet.org"])))
+                                    ["wsprnet.org"], None)))
         try:
             rc = C.cmd_config_upload(
                 self._args(client="wspr-recorder", instance="AC0G/S", on=True))

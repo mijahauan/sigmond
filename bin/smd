@@ -14764,6 +14764,10 @@ def main() -> int:
     g = p.add_mutually_exclusive_group()
     g.add_argument('--on', action='store_true', help='enable upload for the instance')
     g.add_argument('--off', action='store_true', help='disable upload for the instance')
+    p.add_argument('--via', choices=['direct', 'server-merge', 'server-raw'],
+                   help='psk-recorder delivery pipeline when enabling '
+                        '(default: direct = POST straight to pskreporter.info; '
+                        'server-merge feeds a wsprdaemon server in a merge fleet)')
 
     p = config_sub.add_parser(
         'catalog-prune',

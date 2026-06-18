@@ -634,9 +634,11 @@ def cmd_config_upload(args) -> int:
              + ", ".join(sorted(upload.UPLOAD_ENABLE)))
         return 1
     flag, dests = upload.UPLOAD_ENABLE[client]
+    delivery_knob = upload.DELIVERY_ON_ENABLE.get(client)  # (key, default, choices) or None
     instance = getattr(args, "instance", None)
     on = getattr(args, "on", False)
     off = getattr(args, "off", False)
+    via = getattr(args, "via", None)
 
     # No --on/--off -> read-only status view across the per-instance envs.
     if not (on or off):
@@ -650,8 +652,13 @@ def cmd_config_upload(args) -> int:
         for e in envs:
             val = upload.read_flag(e, flag)
             state = "ON " if upload.is_truthy(val) else "off"
+            extra = ""
+            if delivery_knob:
+                dkey = delivery_knob[0]
+                dval = upload.read_flag(e, dkey)
+                extra = f"  [{dkey}={dval if dval is not None else 'unset (default server-merge)'}]"
             print(f"    {state}  {e.stem}    "
-                  f"({flag}={val if val is not None else 'unset'})")
+                  f"({flag}={val if val is not None else 'unset'}){extra}")
         info(f"enable:  smd config upload {client} <instance> --on")
         return 0
 
@@ -659,9 +666,21 @@ def cmd_config_upload(args) -> int:
         err("an instance is required to change the flag, e.g. "
             f"`smd config upload {client} AC0G/S --on`")
         return 1
-    path, flag, dests = upload.apply_enable(client, instance, on)
+    try:
+        path, flag, dests, delivery_set = upload.apply_enable(
+            client, instance, on, delivery=via)
+    except ValueError as e:
+        err(str(e))
+        if delivery_knob:
+            info(f"valid --via choices: {', '.join(delivery_knob[2])}")
+        return 1
     ok(f"{'enabled' if on else 'disabled'} upload for {client}@{instance}  "
        f"({flag}={'1' if on else '0'})  ->  {', '.join(dests)}")
+    if delivery_set:
+        dkey, dval = delivery_set
+        info(f"delivery: {dkey}={dval}"
+             + ("  (standalone direct-to-pskreporter)" if dval == "direct"
+                else "  (via wsprdaemon server)"))
     info(f"wrote {path}")
     if on:
         info("identity: `smd config render` (site-profile)  ·  "

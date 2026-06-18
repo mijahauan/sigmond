@@ -225,14 +225,21 @@ uploading client:
 ```bash
 smd config upload wspr-recorder                     # status: which instances upload
 smd config upload wspr-recorder AC0G/SIGMA --on     # enable (wsprnet + wsprdaemon)
-smd config upload psk-recorder  AC0G/SIGMA --on     # enable (pskreporter)
+smd config upload psk-recorder  AC0G/SIGMA --on     # enable (pskreporter, direct)
 sudo systemctl restart 'wspr-recorder@AC0G/SIGMA'   # apply
 ```
 
-This only flips the enable flag — **identity** comes from `smd config render`
+This flips the enable flag — **identity** comes from `smd config render`
 (site-profile), and **credentials** from `smd admin secrets`. `smd admin
 validate` (`rule_upload_enabled`) warns about any active recorder still
 decoding-but-not-uploading, so a forgotten instance can't stay silent.
+
+> **psk-recorder delivery pipeline.** Enabling psk-recorder also sets
+> `PSK_DELIVERY_PIPELINES=direct` — the node POSTs straight to pskreporter.info,
+> which needs no account/key. The recorder's bare default (`server-merge`) would
+> instead route every spot through a wsprdaemon server, so on a standalone node
+> it ships nothing. Only override on a merge-fleet receiver that feeds a
+> wsprdaemon server: `smd config upload psk-recorder AC0G/SIGMA --on --via server-merge`.
 
 > **wsprdaemon.org / PSWS need a one-time enrollment.** The SFTP/SSH key
 > self-generates on the host, but its **public** key must be registered with

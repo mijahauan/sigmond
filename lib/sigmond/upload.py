@@ -22,6 +22,21 @@ UPLOAD_ENABLE: dict[str, Tuple[str, List[str]]] = {
     "meteor-scatter": ("METEOR_SCATTER_USE_HS_UPLOADER", ["pskreporter.info"]),
 }
 
+# Clients whose upload needs a delivery-pipeline selection, not just the
+# boolean enable flag.  psk-recorder's default pipeline is ``server-merge``,
+# which ships every row to a wsprdaemon server that forwards to
+# pskreporter.info on the node's behalf — so on a standalone node (no
+# wsprdaemon-server SFTP) the boolean alone delivers nothing.  ``direct`` is
+# the standalone-correct lever: the client POSTs straight to pskreporter.info.
+# Enabling sets the default; merge-fleet nodes override (`--via server-merge`).
+# meteor-scatter is direct-only by design (the knob was removed), and
+# wspr-recorder's wsprnet path needs no pipeline selection — so neither
+# appears here.  client -> (env var, default pipeline, valid choices).
+DELIVERY_ON_ENABLE: dict[str, Tuple[str, str, List[str]]] = {
+    "psk-recorder": ("PSK_DELIVERY_PIPELINES", "direct",
+                     ["direct", "server-merge", "server-raw"]),
+}
+
 
 def storage_instance(instance: str) -> str:
     """The per-instance env filename stem for a reporter/instance id.
@@ -79,17 +94,40 @@ def _chown_to_env_dir_owner(path: Path) -> None:
         pass
 
 
-def apply_enable(client: str, instance: str, on: bool, base: str = "/etc"):
+def apply_enable(client: str, instance: str, on: bool, base: str = "/etc",
+                 delivery: "str | None" = None):
     """Flip the upload enable flag for one instance.  Returns
-    (env_path, flag, destinations).  Raises KeyError for an unknown
-    client (one with no upstream upload path)."""
+    (env_path, flag, destinations, delivery_set) where delivery_set is
+    ``(env_key, value)`` if a delivery pipeline was also written, else None.
+
+    When enabling a client that needs a delivery-pipeline selection (see
+    DELIVERY_ON_ENABLE), the pipeline is set to ``delivery`` or the client's
+    standalone-correct default — so the boolean flag alone never leaves the
+    node routing to an unreachable path.  Disabling leaves the pipeline
+    untouched.  Raises KeyError for an unknown client, ValueError for an
+    invalid ``delivery`` choice."""
     if client not in UPLOAD_ENABLE:
         raise KeyError(client)
     flag, dests = UPLOAD_ENABLE[client]
     path = env_path_for(client, instance, base=base)
     set_env_flag(path, flag, "1" if on else "0")
+    delivery_set = None
+    if on and client in DELIVERY_ON_ENABLE:
+        dkey, ddefault, dchoices = DELIVERY_ON_ENABLE[client]
+        val = delivery or ddefault
+        if val not in dchoices:
+            raise ValueError(
+                f"{dkey} must be one of {', '.join(dchoices)}; got {val!r}")
+        set_env_flag(path, dkey, val)
+        delivery_set = (dkey, val)
+    elif delivery is not None:
+        # --via passed for a client with no pipeline knob (or while disabling).
+        raise ValueError(
+            f"{client} has no delivery-pipeline selection"
+            if client not in DELIVERY_ON_ENABLE else
+            "delivery pipeline only applies when enabling (--on)")
     _chown_to_env_dir_owner(path)
-    return path, flag, dests
+    return path, flag, dests, delivery_set
 
 
 def is_truthy(v) -> bool:
