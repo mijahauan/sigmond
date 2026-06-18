@@ -196,7 +196,7 @@ start_priority  = 0                                   # admin access: up early s
 # ---------------------------------------------------------------------------
 
 [deprecated.ka9q-update]
-removed_in  = "f2ed76c"
+removed_in  = "6a44d78"
 reason      = "Radiod/ka9q-web build+update is now owned in-tree by smd (smd install / _install_radiod_native + smd component update); the standalone updater is redundant."
 replaced_by = ["sigmond"]
 
