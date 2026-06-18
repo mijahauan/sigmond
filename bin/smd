@@ -5763,18 +5763,20 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
                 lifecycle_color = '\033[32m'
             else:
                 lifecycle_label = 'binary, missing'
-        elif kind == 'server' and not getattr(entry, 'topology_alias', None):
-            # A server-kind component with NO topology_alias (e.g. ka9q-web)
-            # runs as a single <name>.service that isn't in the topology, so
-            # compute_state can't map it and falls back to a misleading
-            # 'configured'.  Read the unit state directly.
+        elif kind in ('server', 'infra') and not getattr(entry, 'topology_alias', None):
+            # A server- or infra-kind component with NO topology_alias (e.g.
+            # ka9q-web, gpsdo-monitor, igmp-querier) runs as a single
+            # <name>.service that isn't in the topology, so compute_state
+            # can't map it and falls back to a misleading 'configured' /
+            # 'downloaded' even while the unit is enabled+running.  Read the
+            # unit state directly.
             #
-            # server-kind components WITH an alias (e.g. ka9q-radio, whose
-            # alias 'radiod' maps to the templated radiod@<instance>.service)
-            # ARE resolvable via the topology, so they must fall through to
-            # compute_state below — hardcoding <name>.service here would look
-            # for a nonexistent 'ka9q-radio.service' and wrongly report
-            # 'configured' even while radiod is running.
+            # Components WITH an alias (e.g. ka9q-radio, whose alias 'radiod'
+            # maps to the templated radiod@<instance>.service) ARE resolvable
+            # via the topology, so they must fall through to compute_state
+            # below — hardcoding <name>.service here would look for a
+            # nonexistent 'ka9q-radio.service' and wrongly report 'configured'
+            # even while radiod is running.
             unit = f'{entry.name}.service'
             active  = _run(['systemctl', 'is-active', '--quiet', unit],
                            sudo=False).returncode == 0
