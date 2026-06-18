@@ -1034,8 +1034,16 @@ def rule_secrets(view: SystemView) -> RuleResult:
             affected.append(str(_SECRET_FRPC))
 
     # hs-uploader SFTP key: only a present-but-wrong-perms key is a problem
-    # (it self-generates 0600; absence resolves on first upload run).
-    if _SECRET_HS_UPLOADER_KEY.exists():
+    # (it self-generates 0600; absence resolves on first upload run).  The key
+    # lives under a 0700 service-user dir, so a non-root caller (e.g. `smd
+    # admin validate` run by the operator) gets EACCES on .exists()/stat — that
+    # is not a fault, and must not crash the whole validate.  If we can't stat
+    # it we can't check its perms either, so skip the check cleanly.
+    try:
+        _key_present = _SECRET_HS_UPLOADER_KEY.exists()
+    except OSError:
+        _key_present = False
+    if _key_present:
         p = _secret_key_perms_problem(_SECRET_HS_UPLOADER_KEY)
         if p:
             problems.append(f'hs-uploader key: {p}')
