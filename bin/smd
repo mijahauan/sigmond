@@ -5778,6 +5778,16 @@ def _component_statuses(args, *, fetch: bool) -> list[dict]:
             # nonexistent 'ka9q-radio.service' and wrongly report 'configured'
             # even while radiod is running.
             unit = f'{entry.name}.service'
+            # rac's DEPLOYED unit is the frpc tunnel wd-rac.service (managed by
+            # `smd admin rac`), not rac.service (the newer sigmond-rac
+            # packaging).  Prefer wd-rac.service when it's present so a running
+            # tunnel reads 'running' instead of a misleading 'configured'.
+            # (The VERDICT column still reflects whether the sigmond-rac repo
+            # is cloned — a separate git-state axis.)
+            if entry.name == 'rac' and 'wd-rac.service' in _run(
+                    ['systemctl', 'list-unit-files', 'wd-rac.service'],
+                    sudo=False).stdout:
+                unit = 'wd-rac.service'
             active  = _run(['systemctl', 'is-active', '--quiet', unit],
                            sudo=False).returncode == 0
             enabled = _run(['systemctl', 'is-enabled', '--quiet', unit],
@@ -6021,7 +6031,10 @@ def _print_status_table(rows: list[dict]) -> None:
         if lc.startswith('available') or 'not installed' in lc:
             return 6
         return 5
-    rows = sorted(rows, key=lambda r: (_lc_rank(r), r.get('name', '')))
+    # rac sorts to the very bottom of the list — it's admin-access infra, not
+    # a decode component, and the operator wants the rac line last.
+    rows = sorted(rows, key=lambda r: (1 if r.get('name') == 'rac' else 0,
+                                       _lc_rank(r), r.get('name', '')))
 
     # Fixed-width tabular layout — one line per component.  Columns are
     # sized so the common cases (enabled/stopped, up to date, latest) fit
@@ -6137,6 +6150,39 @@ def _print_status_table(rows: list[dict]) -> None:
           f'{_R}dirty (uncommitted) / drift{_X}   {_K}ignored{_X}')
     print(f'    {_B}BEHIND{_X}   {_G}-{_X} = even with origin/main;  '
           f'{_Y}N{_X} = N commits behind;  {_Y}?{_X} = behind, run update to count')
+
+
+def _print_upload_readiness() -> None:
+    """Surface per-path upload-credential readiness BELOW the component table.
+
+    A recorder writes to the local sink regardless of upload credentials, so a
+    missing credential is 'upload information missing' on a specific upload
+    PATH — not a fault in the (green, happily-recording) recorder.  Attribute
+    it to the path + the upload destination, never to the recorder's run-state.
+    """
+    try:
+        from sigmond.upload_creds import upload_paths_status
+        paths = upload_paths_status()
+    except Exception:
+        return
+    if not paths:
+        return
+    _G, _Y, _K, _B, _X = ('\033[32m', '\033[33m', '\033[90m',
+                          '\033[1m', '\033[0m')
+    missing = [p for p in paths if p.needs_creds and not p.ready]
+    ready = [p for p in paths if p.ready]
+    print()
+    if not missing:
+        names = ', '.join(p.path for p in paths)
+        print(f'  {_B}upload readiness{_X}  {_G}✓ all upload paths have '
+              f'credentials{_X}  {_K}({names}){_X}')
+        return
+    print(f'  {_B}upload readiness{_X} — missing items block ONLY uploading; '
+          f'the recorder still records locally:')
+    for p in missing:
+        print(f'    {_Y}⚠{_X}  {p.path} — {_Y}missing {p.missing}{_X}')
+    if ready:
+        print(f'    {_G}✓{_X}  ready: {", ".join(p.path for p in ready)}')
 
 
 def _print_action_hint(rows: list[dict]) -> None:
@@ -6412,6 +6458,7 @@ def cmd_list(args) -> int:
         return _emit_status_json(rows)
 
     _print_status_table(rows)
+    _print_upload_readiness()
 
     if not getattr(args, 'update', False):
         _print_action_hint(rows)

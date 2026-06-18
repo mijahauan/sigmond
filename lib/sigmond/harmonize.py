@@ -1159,6 +1159,37 @@ def rule_upload_enabled(view: SystemView) -> RuleResult:
         sorted({o.split("@")[0] for o in off}))
 
 
+def rule_upload_credentials(view: SystemView) -> RuleResult:
+    """Runtime: per upload PATH, check whether the credentials / identity
+    needed to upload are present.  A recorder writes to the local sink
+    regardless of upload creds, so a missing credential is 'upload information
+    missing' on a specific path — a soft warn (nothing is broken; the data
+    just isn't shipping yet), attributed to the upload path, NOT to the
+    (running, happily-recording) recorder daemon.  Distinct from
+    rule_upload_enabled, which checks the enable *flag*, not credential
+    readiness.  Single source of truth: sigmond.upload_creds."""
+    try:
+        from .upload_creds import upload_paths_status
+        paths = upload_paths_status()
+    except Exception as exc:                       # noqa: BLE001
+        return RuleResult("upload_credentials", "pass",
+                          f"skipped (upload-cred check unavailable: {exc})", [])
+    missing = [p for p in paths if p.needs_creds and not p.ready]
+    if not missing:
+        return RuleResult(
+            "upload_credentials", "pass",
+            "all upload paths that need credentials have them "
+            "(or no uploading components installed)", [])
+    detail = "; ".join(f"{p.path}: missing {p.missing}" for p in missing)
+    return RuleResult(
+        "upload_credentials", "warn",
+        "upload information missing — these paths can't ship until configured "
+        "(the recorders still record to the local sink): " + detail
+        + ".  Provision the station id / SFTP key when available "
+          "(e.g. `smd config edit <recorder>`; hf-timestd: PSWS key setup).",
+        sorted({p.recorder for p in missing}))
+
+
 ALL_RULES = [
     rule_radiod_resolution,
     rule_radiod_status_configured,
@@ -1182,6 +1213,7 @@ ALL_RUNTIME_RULES = [
     rule_hardware_gated_core,
     rule_secrets,
     rule_upload_enabled,
+    rule_upload_credentials,
 ]
 
 
