@@ -3015,6 +3015,41 @@ def cmd_bringup(args) -> int:
             _info(f'  settling {st.settle_s}s before the next client...')
             time.sleep(st.settle_s)
 
+    # PSWS upload setup — walk the operator through any PSWS recorder in this
+    # profile that isn't finished.  NON-BLOCKING: the station is already up;
+    # PSWS upload is optional and completable anytime.  On a dasi2 host the
+    # operator keeps getting reminded (smd status / smd component) until done.
+    try:
+        from sigmond import psws
+        _psws_recs = {c for c in prof.clients if psws.is_psws_recorder(c)}
+        _todo = [(rec, st) for rec, st in psws.installed_unconfigured()
+                 if rec in _psws_recs]
+    except Exception:
+        _todo = []
+    if _todo:
+        import sys as _sys
+        print()
+        _heading('PSWS upload setup')
+        _info('these record locally now, but need PSWS credentials to UPLOAD:')
+        for _rec, _st in _todo:
+            _info(f'  {_rec}: {", ".join(_st.issues)}')
+        if _sys.stdin.isatty() and not getattr(args, 'non_interactive', False):
+            for _rec, _ in _todo:
+                try:
+                    _ans = input(f'  configure PSWS for {_rec} now? [Y/n] ')
+                except EOFError:
+                    _ans = 'n'
+                if _ans.strip().lower() in ('', 'y', 'yes'):
+                    try:
+                        psws.cmd_edit(_rec)   # failures here never abort bringup
+                    except Exception as _exc:           # noqa: BLE001
+                        _warn(f'PSWS setup for {_rec} did not complete: {_exc}')
+        else:
+            _info('  finish anytime:  '
+                  + ';   '.join(f'smd config {r} edit' for r, _ in _todo))
+        _info('  (you will be reminded in `smd status` / `smd component` '
+              'until this is done)')
+
     print()
     _ok(f"bringup '{prof.name}' complete")
     _info('verify anytime with: smd admin validate')
@@ -5386,6 +5421,21 @@ def cmd_status(args) -> int:
                 _ok('plan applied, no contention, no foreign drop-ins')
 
     _netdiag_status_line()
+
+    # PSWS upload reminder — installed-but-unfinished recorders record locally
+    # but won't upload.  Surfaced here (and in `smd component`) so a dasi2 host
+    # is continually reminded until `smd config <recorder> edit` is run.
+    try:
+        from sigmond import psws
+        _psws_todo = psws.installed_unconfigured()
+    except Exception:
+        _psws_todo = []
+    if _psws_todo:
+        _heading('PSWS upload not finished')
+        for _rec, _st in _psws_todo:
+            _warn(f'{_rec}: {", ".join(_st.issues)}')
+            _info(f'       finish:  smd config {_rec} edit   '
+                  f'(records locally regardless)')
 
     print()
     return 1 if any_bad else 0

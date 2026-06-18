@@ -272,6 +272,31 @@ def _pubkey(key_path: str) -> str:
 # ---------------------------------------------------------------------------
 # CLI entry points — `smd config <recorder> {status|validate|edit}`
 # ---------------------------------------------------------------------------
+def installed_unconfigured() -> list:
+    """PSWS recorders that are installed (config present) but not finished —
+    the set a dasi2 host still needs to complete."""
+    out = []
+    for rec in RECORDERS:
+        st = read_state(rec)
+        if st.config_exists and not st.configured:
+            out.append((rec, st))
+    return out
+
+
+def print_motd_banner() -> None:
+    """Login-time nag (for /etc/update-motd.d): if any installed PSWS recorder
+    is unfinished, remind the operator — loudly but briefly.  No network."""
+    recs = installed_unconfigured()
+    if not recs:
+        return
+    print(f"\n{_Y}⚠  Sigmond: PSWS upload is not finished{_X} — these record "
+          f"locally but will NOT upload until configured:")
+    for rec, st in recs:
+        print(f"     {_B}{rec}{_X}: {', '.join(st.issues)}")
+        print(f"       {_K}→ finish it:{_X} smd config {rec} edit")
+    print()
+
+
 def cmd_status(recorder: str) -> int:
     st = read_state(recorder)
     print(f"{_B}PSWS upload — {recorder}{_X}")
