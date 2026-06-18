@@ -11561,8 +11561,25 @@ def cmd_psk_watch(args) -> int:
             _err('no /var/log/psk-recorder/*-ft8.log found '
                  '— is psk-recorder running?')
             return 1
+        # Only show receivers whose log is being ACTIVELY written.  A live psk
+        # receiver appends per-slot lines every ~15 s cycle; a retired instance
+        # (e.g. a bee1/bee2 source disabled with `systemctl disable`) leaves its
+        # log behind on disk, and globbing *-ft8.log would keep listing it as a
+        # phantom receiver forever.  A log idle past this window belongs to a
+        # stopped instance.  Fall back to the freshest candidate if NONE are
+        # fresh (e.g. the recorder just started), so the watch is never empty.
+        import time as _time
+        _now = _time.time()
+        _FRESH_SEC = 300
+        def _mtime(p):
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0
+        active = [p for p in ft8_candidates if (_now - _mtime(p)) <= _FRESH_SEC] \
+            or ft8_candidates[:1]
         receivers = []
-        for f8 in ft8_candidates:
+        for f8 in active:
             # Strip the `-ft8` suffix to get the radiod_id stem; the FT4
             # log may not exist if no FT4 freqs are configured (fine).
             rid = f8.stem[: -len('-ft8')]
