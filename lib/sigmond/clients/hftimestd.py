@@ -70,7 +70,13 @@ class HfTimestdAdapter(ClientAdapter):
             contract.name = self.name
             contract.binary = binary
             view = contract.read_view()
-            if view.installed:
+            # A permission-denied parse is NOT a real fault — it just means the
+            # contract binary ran as the operator and couldn't read the 0640
+            # service-user config.  Fall through to _read_direct, which reads it
+            # via sudo -n.  (Without this, `smd config show` shows a spurious
+            # "failed to parse: Permission denied".)
+            _perm = any("Permission denied" in iss for iss in view.issues)
+            if view.installed and not _perm:
                 return view
             # If the binary lacks an `inventory` subcommand (older
             # hf-timestd) we fall through to the direct file read.
@@ -79,7 +85,8 @@ class HfTimestdAdapter(ClientAdapter):
                 last_view = view
                 break    # don't keep probing other binaries — they're
                          # the same code, would fail the same way
-            last_view = view
+            if not _perm:
+                last_view = view
 
         if last_view is not None and last_view.installed:
             return last_view
@@ -92,10 +99,31 @@ class HfTimestdAdapter(ClientAdapter):
             return view
 
         import tomllib
+        # timestd-config.toml is 0640 timestd:timestd, but `smd config show`
+        # runs as the operator — a direct read hits EACCES.  Fall back to
+        # passwordless `sudo -n cat` (no-op when already root) so we report the
+        # real config instead of a spurious "failed to parse: Permission denied".
         try:
-            with open(self.config_path, 'rb') as f:
-                raw = tomllib.load(f)
-        except (OSError, Exception) as exc:
+            text = self.config_path.read_text()
+        except PermissionError:
+            import os
+            import subprocess
+            sudo = [] if os.geteuid() == 0 else ['sudo', '-n']
+            r = subprocess.run([*sudo, 'cat', str(self.config_path)],
+                               capture_output=True, text=True, check=False)
+            if r.returncode != 0:
+                view.installed = True
+                view.issues.append(
+                    f"cannot read {self.config_path} (permission denied; "
+                    f"run `smd config show` as root to inspect it)")
+                return view
+            text = r.stdout
+        except OSError as exc:
+            view.issues.append(f"failed to read {self.config_path}: {exc}")
+            return view
+        try:
+            raw = tomllib.loads(text)
+        except Exception as exc:
             view.issues.append(f"failed to parse {self.config_path}: {exc}")
             return view
 
