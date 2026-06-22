@@ -1,6 +1,6 @@
 # Sigmond
 
-**Dr. SigMonD** (Signal Monitor Daemon) is the installer, lifecycle manager,
+**SigMonD** (Signal Monitor Daemon) is the installer, lifecycle manager,
 and coordinator for the [HamSCI](https://hamsci.org/) SDR observation suite.
 
 Sigmond manages a family of independent clients that share the DASI2
@@ -40,20 +40,6 @@ lifecycle, CPU-pinning, and the shared sink.
 > The diagram source is [`docs/architecture.svg`](docs/architecture.svg)
 > (editable vector, drops straight into slides); a raster copy is at
 > [`docs/architecture.png`](docs/architecture.png).
-
-```
-          .---.
-         / o o \     "Zo... ven did your
-         \ ._. /      signals first start
-          |||||       to propagate?"
-         /|||||\
-        / ||||| \
-       '  |||||  '
-          (  )
-       ~~smoke~~
-
-     Dr. SigMonD — Signal Monitor Daemon
-```
 
 ## What you need
 
@@ -99,29 +85,31 @@ sources as yourself, sets up `/opt/git/sigmond/sigmond/venv`, and symlinks `smd`
 ### 2. See what's available
 
 ```bash
-smd list --catalog
+smd component list --catalog
 ```
 
 ```
-━━━ catalog — available ━━━
+━━━ catalog — known clients ━━━
 
-  Servers (1)
-    ·  radiod                 ka9q-radio SDR daemon
+  Servers (2)
+    ✓  ka9q-radio             ka9q-radio SDR daemon — receives and multicasts RF channels
+    ✓  ka9q-web               Web interface for ka9q-radio (radiod status UI)
 
   Clients (8)
-    ·  hf-timestd             HF time-standard analyzer (WWV/WWVH/CHU/BPM)
-    ·  wspr-recorder          WSPR/FST4W audio recorder (period-aligned WAVs)
-    ·  psk-recorder           FT4/FT8 spot recorder for PSKReporter
-    ·  mag-recorder           RM3100 magnetometer recorder + PSWS uploader
-    ·  codar-sounder          Opportunistic ionospheric sounder (CODAR chirps)
-    ·  hfdl-recorder          HFDL recorder (one dumphfdl subprocess per band)
-    ·  hf-tec                 HF PRN-beacon recorder for ionospheric TEC
-    ·  meteor-scatter         Meteor-scatter ping decoder (jt9 --msk144)
+    ✓  codar-sounder          Opportunistic ionospheric sounder using CODAR chirp transmissions
+    ✓  hf-tec                 HF PRN-coded beacon recorder for ionospheric specification
+    ✓  hf-timestd             HF time-standard analyzer (WWV/WWVH/CHU/BPM)
+    ✓  hfdl-recorder          HFDL (High Frequency Data Link) recorder — one dumphfdl subprocess per band
+    ✓  mag-recorder           RM3100 magnetometer recorder + PSWS uploader
+    ✓  meteor-scatter         Meteor-scatter ping recorder/decoder (jt9 --msk144)
+    ✓  psk-recorder           FT4/FT8 spot recorder for PSKReporter
+    ✓  wspr-recorder          WSPR/FST4W audio recorder (period-aligned WAVs)
 
-  Infrastructure (3)
-    ·  igmp-querier           IGMPv2 querier daemon for multicast LANs
-    ·  rac                    Remote Access Channel (frpc reverse tunnel)
-    ·  gpsdo-monitor          Leo Bodnar GPSDO health monitor + mDNS
+  Infra (4)
+    ✓  gpsdo-monitor          Leo Bodnar GPSDO health monitor + mDNS advertiser
+    ✓  igmp-querier           Robust IGMP querier for radiod multicast on home switches
+    ✓  ka9q-update            Standalone ka9q-radio / ka9q-web install + update utility
+    ✓  rac                    Remote Access Channel (frpc reverse tunnel)
 ```
 
 > **Setting up a new host end to end?** See the
@@ -207,10 +195,11 @@ sudo smd start
 ```
 
 This starts all enabled components in the topology.  To start a single
-component:
+component (the component name is now a positional argument; an optional
+second positional selects a single instance):
 
 ```bash
-sudo smd start --components psk-recorder
+sudo smd start psk-recorder
 ```
 
 ### 6. Check health
@@ -225,30 +214,57 @@ and any issues.
 
 ## Command reference
 
+`smd`'s verbs are grouped the same way `smd --help` and the TUI present
+them. Run `smd <verb> --help` (or `smd admin <verb> --help`) for the full
+options on any verb.
+
+**Lifecycle** — operate on running services. Without a component name they
+act on all enabled components; a positional component (and optional
+instance) narrows the scope.
+
 | Command | Description |
 |---------|-------------|
-| `smd install [<client>]` | Install a client from the catalog, or run full-suite install |
-| `smd tui` | Launch the interactive TUI configurator |
-| `smd start [--components X]` | Start managed services |
-| `smd stop [--components X]` | Stop managed services |
-| `smd restart [--components X]` | Restart with reset-failed |
-| `smd reload [--components X]` | Reload via SIGHUP or restart |
-| `smd status [--components X]` | Service health + client inventory |
-| `smd list` | Per-component status: lifecycle + git ref + upstream divergence + version policy |
-| `smd component update [<name>]` | Pull and reapply per topology version policy (was `smd list --update` / `--apply`; root) |
-| `smd list --catalog` | Catalog of known clients (what could be installed) |
-| `smd log <client>` | Follow systemd journal for a client |
-| `smd log <client> --files` | Tail the client's file logs |
-| `smd log set-level <client> DEBUG` | Set per-client log level + SIGHUP (no restart) |
-| `smd log set-level WARNING` | Set global `CLIENT_LOG_LEVEL` default (no SIGHUP; restart/SIGHUP clients to apply) |
-| `smd diag` | Network, dependencies, and client validation |
-| `smd validate` | Cross-client harmonization rules |
-| `smd config show` | Dump effective coordination config |
-| `smd apply` | Reconcile services with current config |
-| `smd environment list|probe|describe` | Situational awareness of network peers |
+| `smd start [<component> [<instance>]]` | Start managed services |
+| `smd stop [<component> [<instance>]]` | Stop managed services |
+| `smd restart [<component> [<instance>]]` | Restart with reset-failed |
+| `smd reload [--via=auto\|systemd\|socket] [<component>]` | Reload via SIGHUP or restart |
+| `smd status [<component>]` | Service health + client inventory |
+| `smd enable <name>...` | Set `enabled = true` in topology |
+| `smd disable <name>...` | Set `enabled = false` and stop the units |
+| `smd apply` | Reconcile running services with current config |
 
-All lifecycle commands (`start`, `stop`, `restart`, `reload`, `status`,
-`list`) accept `--components X,Y` to filter to specific components.
+**Install & components**
+
+| Command | Description |
+|---------|-------------|
+| `smd install [<client>]` | Install + configure a client, or run the full-suite install |
+| `smd bringup` | Guided station bring-up from a catalog profile |
+| `smd component list [--catalog]` | Per-component status (lifecycle + git ref + version policy); `--catalog` lists what's installable |
+| `smd component update [<name>]` | Pull latest and reapply per topology version policy (root) |
+| `smd component add\|remove <name>` | Clone/remove a component repo and its topology entry |
+| `smd config show\|migrate` | Inspect or migrate coordination config |
+| `smd config init\|edit <client>` | Run a client's first-run wizard or edit flow |
+
+**Observe & diagnose** — most diagnostics now live under the `admin` group.
+
+| Command | Description |
+|---------|-------------|
+| `smd watch <target>` | Live tail for `wspr`, `psk`, `hfdl`, `codar`, `hf-tec`, `mag`, `ka9q`, `radiod`, `uploads`, `verifier` |
+| `smd admin log [<client>] [--files] [--level L]` | Follow journal (or `--files` for file logs); `--level` sets the client's level via `coordination.env` + SIGHUP |
+| `smd admin diag [net\|cpu-affinity\|cpu-freq]` | Network / CPU diagnostics |
+| `smd admin validate` | Cross-client harmonization rules |
+| `smd admin environment list\|probe\|describe` | Situational awareness of network peers (KIWISDRs, GPSDOs, NTP) |
+| `smd admin verifier\|storage\|sources\|timing\|radiod\|instance\|rac …` | Specialized maintenance — see `smd admin --help` |
+| `smd tui` | Launch the interactive TUI configurator |
+
+> **CLI v2 note.** The verb surface was reorganized into `component` /
+> `admin` / `config` groups. The old flat verbs **`smd list`, `smd log`,
+> `smd diag`, `smd validate`, and `smd environment` no longer exist** — use
+> `smd component list` and `smd admin {log,diag,validate,environment}`
+> instead. `smd install` and `smd apply` remain available at the top level.
+> Lifecycle scope is now positional (`smd start psk-recorder`); the old
+> `--components X,Y` flag still works but is deprecated. Full mapping in
+> [docs/CLI-V2-SPEC.md](docs/CLI-V2-SPEC.md).
 
 ## Monitoring
 
@@ -267,13 +283,13 @@ channels, active modes, and any reported issues.
 Follow the systemd journal for a client:
 
 ```bash
-smd log psk-recorder
+smd admin log psk-recorder
 ```
 
 Tail the client's file logs (spot logs, decode output):
 
 ```bash
-smd log psk-recorder --files
+smd admin log psk-recorder --files
 ```
 
 ### Runtime log level
@@ -281,7 +297,7 @@ smd log psk-recorder --files
 Change a client's verbosity without restarting:
 
 ```bash
-sudo smd log set-level psk-recorder DEBUG
+sudo smd admin log psk-recorder --level DEBUG
 ```
 
 This writes `PSK_RECORDER_LOG_LEVEL=DEBUG` to `/etc/sigmond/coordination.env`
@@ -292,7 +308,7 @@ To set a default level for all clients (no SIGHUP — restart or SIGHUP each
 client to apply):
 
 ```bash
-sudo smd log set-level WARNING
+sudo smd admin log --level WARNING
 ```
 
 ## Debugging
@@ -300,7 +316,7 @@ sudo smd log set-level WARNING
 ### Run diagnostics
 
 ```bash
-smd diag
+smd admin diag
 ```
 
 Checks:
@@ -312,8 +328,8 @@ Checks:
 ### Check multicast / IGMP readiness
 
 ```bash
-smd diag net              # unprivileged; uses /proc/net/igmp state
-sudo smd diag net         # adds passive raw-socket listen for queriers
+smd admin diag net        # unprivileged; uses /proc/net/igmp state
+sudo smd admin diag net   # adds passive raw-socket listen for queriers
 ```
 
 Classifies your network for multi-host radiod safety and tells you
@@ -324,7 +340,7 @@ guide.
 ### Cross-client validation
 
 ```bash
-smd validate
+smd admin validate
 ```
 
 Runs harmonization rules across all enabled clients: CPU core isolation,
@@ -335,7 +351,7 @@ and timing chain verification.
 
 ```bash
 # See what's available
-smd list --catalog
+smd component list --catalog
 
 # Install it
 sudo smd install wspr-recorder
@@ -343,11 +359,11 @@ sudo smd install wspr-recorder
 # Edit its config
 sudo vi /etc/wspr-recorder/wspr-recorder.toml
 
-# Enable it in topology
+# Enable it in topology (or: sudo smd enable wspr-recorder)
 sudo vi /etc/sigmond/topology.toml
 
 # Start it
-sudo smd start --components wspr-recorder
+sudo smd start wspr-recorder
 
 # Verify
 smd status
@@ -388,6 +404,18 @@ reads its magnetometer directly over USB-I²C, not through radiod.  Each
 client runs in its own Python venv and manages its own systemd services.
 Decoded spots / products are written to the shared SQLite sink
 (`/var/lib/sigmond/sink.db`) and shipped upstream by `hs-uploader`.
+
+> **Why a station is worth more as part of a network:** each DASI2 node already
+> carries several GPS-co-registered ionospheric instruments — `hf-timestd`
+> (dTEC), `hf-tec` (coded-beacon absolute TEC), `codar-sounder` (oblique
+> sounding / MUF), `hfdl-recorder` (dense opportunistic paths), and
+> `mag-recorder` (the geomagnetic *driver*) — so a single node is already a
+> multi-modal observatory. Replicated across the map, the mesh becomes a
+> distributed-aperture instrument that can *image* travelling ionospheric
+> disturbances, sense TEC gradients by differencing receivers that share a
+> transmitter, and feed tomographic TEC — and it is resilient to the steady loss
+> of the HF time standards it listens to (CHU included). See
+> [**docs/STATION-NETWORK-CAPABILITIES.md**](docs/STATION-NETWORK-CAPABILITIES.md).
 
 ## How it works
 
@@ -456,10 +484,14 @@ if that fails, it re-execs into the production venv at `/opt/git/sigmond/sigmond
 
 ### Production venv
 
-On a root install (`sudo smd install`), sigmond creates
-`/opt/git/sigmond/sigmond/venv/` and `pip install -e '<repo>[tui]'`s itself into it.
-Only the TUI subcommand ever enters that venv; all other `smd` verbs stay
-on the system Python.
+The installer creates `/opt/git/sigmond/sigmond/venv/` and installs sigmond
+(editable, with the `tui` extra) into it. When that venv exists, `smd`
+re-execs into its interpreter on **every** invocation — not just `tui` — so
+the full dependency closure (including `ka9q-python`, which the
+harmonization rules import) is always available. The re-exec is skipped only
+when the venv is absent (a fresh or dev checkout), when `smd` is already
+running from it, or when `SIGMOND_NO_VENV_REEXEC=1` is set. Keeping the core
+stdlib-only is what lets that pre-venv bootstrap and the escape hatch work.
 
 ## Project
 
