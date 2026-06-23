@@ -42,20 +42,17 @@ class ComponentTree(Tree):
         self.root.add_leaf("\u25a3 Overview", data={"screen": "overview"})
 
         # Installation leads — everything that happens before a component can
-        # run on this host \u2014 pin a version, build/install, configure
-        # per-instance, tune host policy (CPU / FFT wisdom).  Workflow
-        # ordering is install \u2192 configure \u2192 enable; the screens here
-        # follow that same arc top to bottom.
+        # run on this host \u2014 in the three-step arc an operator follows
+        # once, top to bottom: \u2460 download & install (which also enables
+        # the component in topology), \u2461 configure, \u2462 enable/start/stop.
+        # Topology is no longer a leaf \u2014 it's derived state, surfaced by
+        # step \u2462.  Guided bring-up runs all three for a whole profile.
+        # Under-the-hood knobs live under Advanced, below.
         installation = self.root.add("Installation", expand=True)
-        installation.add_leaf("\u2728 Guided bring-up",   data={"screen": "greenfield"})
-        installation.add_leaf("\u2630 Topology",          data={"screen": "topology"})
-        installation.add_leaf("\u2691 Software versions", data={"screen": "components"})
-        installation.add_leaf("\u2795 Install",           data={"screen": "install"})
-        installation.add_leaf("\u229e SDR inventory",     data={"screen": "sdr_inventory"})
-        installation.add_leaf("\u2699 Configuration",     data={"screen": "configuration"})
-        installation.add_leaf("\u2699 CPU affinity",      data={"screen": "cpu_affinity"})
-        installation.add_leaf("\u21f5 CPU frequency",     data={"screen": "cpu_freq"})
-        installation.add_leaf("\u2a09 FFT Wisdom",        data={"screen": "fft_wisdom"})
+        installation.add_leaf("\u2728 Guided bring-up",        data={"screen": "greenfield"})
+        installation.add_leaf("\u2460 Download & install",     data={"screen": "install"})
+        installation.add_leaf("\u2461 Configure",              data={"screen": "configuration"})
+        installation.add_leaf("\u2462 Enable / start / stop",  data={"screen": "lifecycle"})
 
         monitoring = self.root.add("Monitoring", expand=True)
         monitoring.add_leaf("\u2316 Environment",        data={"screen": "environment"})
@@ -71,10 +68,10 @@ class ComponentTree(Tree):
 
 
         # Maintenance: ongoing operational changes once components are
-        # running \u2014 lifecycle verbs, apply config edits, per-instance
-        # source assignment, save/restore the host's overall config.
+        # running \u2014 apply config edits, per-instance source assignment,
+        # save/restore the host's overall config.  (Lifecycle moved up to
+        # Installation step \u2462 Enable / start / stop.)
         maintenance = self.root.add("Maintenance", expand=True)
-        maintenance.add_leaf("\u21bb Lifecycle",        data={"screen": "lifecycle"})
         maintenance.add_leaf("\u21c4 Apply",            data={"screen": "apply"})
         maintenance.add_leaf("\u2604 Sources",          data={"screen": "sources"})
         maintenance.add_leaf("\u2193 Backup",           data={"screen": "backup"})
@@ -86,6 +83,16 @@ class ComponentTree(Tree):
         debugging.add_leaf("\u2714 Validate",           data={"screen": "validate"})
         debugging.add_leaf("\u2726 Diag: net",          data={"screen": "diag_net"})
         debugging.add_leaf("\u25ce ka9q-watch",         data={"screen": "ka9q_watch"})
+
+        # Advanced / under-the-hood: knobs you set rarely, displaced from the
+        # Installation arc so the three steps stay uncluttered (install-redesign
+        # \u00a75 \u2014 SDR inventory stays here, NOT folded into Configure).
+        advanced = self.root.add("Advanced", expand=False)
+        advanced.add_leaf("\u2691 Software versions", data={"screen": "components"})
+        advanced.add_leaf("\u229e SDR inventory",     data={"screen": "sdr_inventory"})
+        advanced.add_leaf("\u2699 CPU affinity",      data={"screen": "cpu_affinity"})
+        advanced.add_leaf("\u21f5 CPU frequency",     data={"screen": "cpu_freq"})
+        advanced.add_leaf("\u2a09 FFT Wisdom",        data={"screen": "fft_wisdom"})
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         data = event.node.data

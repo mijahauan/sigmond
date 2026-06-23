@@ -28,8 +28,8 @@ Do these in order. Each phase assumes the previous one succeeded.
 |---|-------|-----------|----------------|
 | 0 | Bootstrap | `./install.sh` | Gets `smd`, the venv, the two repos. |
 | 1 | Identity | `smd config identity` | Callsign/grid feed every client's reporter id. |
-| 2 | Topology | `smd enable <component>` | Declares what this host runs. |
-| 3 | Install | `smd install <component>` | Clones, builds native deps, runs `apply`. |
+| 2 | Topology | *(usually skip)* | `smd install` enables the component for you; pre-`enable` only to stage config first. |
+| 3 | Install | `smd install <component>` | Clones, builds native deps, runs `apply` — **and enables the component in topology**. |
 | 4 | radiod config | `smd config init radiod` | The SDR daemon needs a `[global]`+`[rx888]` conf. |
 | 5 | FFT wisdom | `smd admin wisdom plan` | **Long, manual, one-time.** radiod won't start cleanly without it. |
 | 6 | Host tuning | (mostly automatic via `apply`) + `smd admin validate` | rmem_max, CPU affinity, governor — radiod RT correctness. |
@@ -57,27 +57,31 @@ smd config identity            # prompts for callsign + Maidenhead grid
 Grid lands in `/etc/sigmond/coordination.toml`; callsign threads into each
 client's reporter id (phase 7).
 
-## Phase 2 — Topology
+## Phase 2 — Topology (usually skip)
 
-Enable only what this host runs. Everything ships disabled.
+Topology records what this host runs (`/etc/sigmond/topology.toml`).
+**You normally don't touch it directly** — `smd install <component>` enables
+the component as part of installing it (phase 3). Reach for `smd enable` /
+`smd disable` only to:
 
-```bash
-smd enable ka9q-radio          # the SDR daemon — always first (start_priority 0)
-smd enable wspr-recorder
-smd enable hf-timestd
-# leave the rest disabled:  smd disable psk-recorder   (etc.)
-smd list                       # confirm enabled/disabled
-```
+- pre-`enable` a component before installing (rare — to stage config first), or
+- take an installed component offline without uninstalling it
+  (`smd disable <name>` stops its units and flips the flag; reversible).
 
-`enable`/`disable` edit `/etc/sigmond/topology.toml`. Note the canonical name is
-`ka9q-radio` (alias `radiod`); `smd enable radiod` resolves to it.
+The canonical name is `ka9q-radio` (alias `radiod`); `smd enable radiod`
+resolves to it.
 
 ## Phase 3 — Install
+
+Installing a component also **enables** it in topology (pass `--no-enable` to
+opt out). For a whole station at once, prefer `smd bringup dasi2` (add
+`--with-optional` to include the discretionary clients).
 
 ```bash
 smd install ka9q-radio         # native build: apt deps + make install
 smd install wspr-recorder      # clones callhash/hs-uploader siblings as needed
 smd install hf-timestd
+# discretionary, on demand:    smd install hfdl-recorder   (installs + enables)
 ```
 
 Each install clones to `/opt/git/sigmond/<name>`, builds any native binary per
@@ -320,12 +324,12 @@ them if they recur.
 # 0. bootstrap (see install-quickstart.md)
 git clone https://github.com/mijahauan/sigmond ~/sigmond && cd ~/sigmond && ./install.sh
 
-# 1-3. identity, topology, install
+# 1-3. identity + install (install enables each component; topology is automatic)
 smd config identity                       # AC0G / EM38ww
-smd enable ka9q-radio wspr-recorder hf-timestd
 smd install ka9q-radio
 smd install wspr-recorder
 smd install hf-timestd
+#   or bring up the whole core station at once:  smd bringup dasi2
 
 # 4-5. radiod config + wisdom (wisdom is slow — let it finish)
 smd config init radiod

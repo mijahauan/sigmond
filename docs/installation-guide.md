@@ -210,18 +210,27 @@ The `deps.conf` notice is normal at this stage.
 
 ---
 
-## 6. Configure and Install Components
+## 6. Install Components
 
-Edit `/etc/sigmond/topology.toml` to enable the components you want, then
-install them. All components are disabled by default.
+**Installing a component enables it** in `/etc/sigmond/topology.toml` — you
+don't edit topology by hand first. The core DASI2 clients (hf-timestd,
+wspr-recorder, psk-recorder, mag-recorder) are the default station; the
+additional clients (codar-sounder, hf-tec, hfdl-recorder, meteor-scatter)
+are installed at your discretion.
 
-### Option A — Interactive TUI (recommended)
+### Option A — Guided bring-up (recommended)
+
+```bash
+smd bringup dasi2                 # core station: install + configure + start
+smd bringup dasi2 --with-optional # also install the discretionary clients
+```
+
+Or the interactive TUI, whose Installation arc is **Guided bring-up →
+① Download & install → ② Configure → ③ Enable / start / stop**:
 
 ```bash
 smd tui
 ```
-
-Use the Install screen to browse and enable components visually.
 
 ### Option B — Install a specific component
 
@@ -230,9 +239,13 @@ smd install radiod
 smd install wspr-recorder
 smd install psk-recorder
 smd install hf-timestd
+smd install hfdl-recorder         # discretionary — installs AND enables it
 ```
 
-### Option C — Install everything in the catalog
+Pass `--no-enable` to install without enabling (stage config first); take a
+component offline later with `smd disable <name>`.
+
+### Option C — Install everything enabled in the catalog
 
 ```bash
 smd install

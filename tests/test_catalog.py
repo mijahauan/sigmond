@@ -32,14 +32,15 @@ class TestLoadCatalog:
         expected = {
             'ka9q-radio', 'ka9q-web',
             'wspr-recorder', 'psk-recorder', 'hf-timestd',
-            'hfdl-recorder', 'codar-sounder', 'hf-tec',
+            'hfdl-recorder', 'codar-sounder', 'hf-tec', 'meteor-scatter',
             'mag-recorder', 'hs-uploader', 'callhash',
-            'gpsdo-monitor', 'igmp-querier', 'ka9q-update',
+            'gpsdo-monitor', 'igmp-querier', 'rac',
         }
         missing = expected - set(entries.keys())
         assert not missing, f'catalog missing expected entries: {missing}'
         # Deprecated names must never surface as live entries.
         assert 'wsprdaemon-client' not in entries
+        assert 'ka9q-update' not in entries
 
     def test_entry_fields_populated(self):
         entries = load_catalog(REPO_CATALOG)

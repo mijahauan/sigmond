@@ -4,7 +4,9 @@
 and coordinator for the [HamSCI](https://hamsci.org/) SDR observation suite.
 
 Sigmond manages a family of independent clients that share the DASI2
-station hardware — a [ka9q-radio](https://github.com/ka9q/ka9q-radio)
+station hardware. **DASI2** is the NSF-funded *Distributed Array of Small
+Instruments, Track 2* project — a station is a
+[ka9q-radio](https://github.com/ka9q/ka9q-radio)
 receiver on an RX888 SDR (GPSDO-disciplined, TS-1 time-injected) plus a
 magnetometer.  Each client records a different signal type — WSPR,
 FT8/FT4, HF time standards, magnetic field, CODAR, HFDL, beacon TEC,
@@ -96,19 +98,18 @@ smd component list --catalog
     ✓  ka9q-web               Web interface for ka9q-radio (radiod status UI)
 
   Clients (8)
-    ✓  codar-sounder          Opportunistic ionospheric sounder using CODAR chirp transmissions
-    ✓  hf-tec                 HF PRN-coded beacon recorder for ionospheric specification
-    ✓  hf-timestd             HF time-standard analyzer (WWV/WWVH/CHU/BPM)
-    ✓  hfdl-recorder          HFDL (High Frequency Data Link) recorder — one dumphfdl subprocess per band
-    ✓  mag-recorder           RM3100 magnetometer recorder + PSWS uploader
-    ✓  meteor-scatter         Meteor-scatter ping recorder/decoder (jt9 --msk144)
-    ✓  psk-recorder           FT4/FT8 spot recorder for PSKReporter
-    ✓  wspr-recorder          WSPR/FST4W audio recorder (period-aligned WAVs)
+    ✓  codar-sounder          Opportunistic ionospheric sounder using CODAR chirp transmissions  contract=0.8
+    ✓  hf-tec                 HF PRN-coded beacon recorder for ionospheric specification  contract=0.8
+    ✓  hf-timestd             HF time-standard analyzer (WWV/WWVH/CHU/BPM)  contract=0.8
+    ✓  hfdl-recorder          HFDL (High Frequency Data Link) recorder — one dumphfdl subprocess per band  contract=0.8
+    ✓  mag-recorder           RM3100 magnetometer recorder + PSWS uploader  contract=0.8
+    ✓  meteor-scatter         Meteor-scatter ping recorder/decoder (jt9 --msk144)  contract=0.7
+    ✓  psk-recorder           FT4/FT8 spot recorder for PSKReporter  contract=0.8
+    ✓  wspr-recorder          WSPR/FST4W audio recorder (period-aligned WAVs)  contract=0.8
 
-  Infra (4)
+  Infra (3)
     ✓  gpsdo-monitor          Leo Bodnar GPSDO health monitor + mDNS advertiser
     ✓  igmp-querier           Robust IGMP querier for radiod multicast on home switches
-    ✓  ka9q-update            Standalone ka9q-radio / ka9q-web install + update utility
     ✓  rac                    Remote Access Channel (frpc reverse tunnel)
 ```
 
@@ -347,33 +348,44 @@ Runs harmonization rules across all enabled clients: CPU core isolation,
 frequency coverage vs. radiod sample rate, radiod reference resolution,
 and timing chain verification.
 
-## Adding a client after initial setup
+## Adding a discretionary client later
+
+The additional clients (codar-sounder, hf-tec, hfdl-recorder, meteor-scatter)
+are installed at your discretion. **Installing a client enables it** — there is
+no separate enable step:
 
 ```bash
 # See what's available
 smd component list --catalog
 
-# Install it
-sudo smd install wspr-recorder
+# Install it — this also enables it in topology
+sudo smd install hfdl-recorder
 
-# Edit its config
-sudo vi /etc/wspr-recorder/wspr-recorder.toml
-
-# Enable it in topology (or: sudo smd enable wspr-recorder)
-sudo vi /etc/sigmond/topology.toml
+# Configure it for your station (first-run wizard, or $EDITOR fallback)
+sudo smd config init hfdl-recorder
 
 # Start it
-sudo smd start wspr-recorder
+sudo smd start hfdl-recorder
 
 # Verify
 smd status
 ```
 
+Pass `--no-enable` to install a client without enabling it (e.g. to stage its
+config before first run); enable it later with `smd enable <name>`. To take a
+client offline without uninstalling it, `smd disable <name>` (reversible — it
+stops the units and flips the topology flag; re-enable with `smd enable`).
+
 ## Available clients
 
 Clients fall into two groups. **Core clients** are the DASI2 grant
-station's primary instruments; **additional clients** extend the same
-station to other HF science.
+station's primary instruments — they install and run by default (the
+`dasi2` profile: hf-timestd, wspr-recorder, psk-recorder, mag-recorder).
+**Additional clients** extend the same station to other HF science and are
+installed **at your discretion** — either all at once during guided
+bring-up (`smd bringup dasi2 --with-optional`) or one at a time
+(`smd install <name>`, which installs *and* enables it). See
+[Adding a discretionary client later](#adding-a-discretionary-client-later).
 
 | Core client | What it does | Repo |
 |--------|-------------|------|

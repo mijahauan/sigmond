@@ -140,7 +140,7 @@ description     = "Meteor-scatter ping recorder/decoder (jt9 --msk144)"
 repo            = "https://github.com/mijahauan/meteor-scatter"
 uses            = ["ka9q-python"]
 requires        = ["ka9q-python", "ka9q-radio"]
-contract        = "0.7"
+contract        = "0.8"                               # matches meteor-scatter/deploy.toml contract_version
 install_script  = "/opt/git/sigmond/meteor-scatter/scripts/install.sh"
 # Previously surfaced only via discovery (its deploy.toml); pinned here so
 # the repo-default catalog lists it even when the checkout is absent.
@@ -233,7 +233,10 @@ extra_paths = ["/etc/wsprdaemon"]
 description        = "DASI2 grant core station (GRAPE + WSPR + PSK + magnetometer)"
 clients            = ["hf-timestd", "wspr-recorder", "psk-recorder", "mag-recorder"]
 local_radiod_infra = ["igmp-querier", "gpsdo-monitor", "ka9q-web"]
-optional           = []
+# Discretionary HF-science clients: NOT installed by default.  `smd bringup
+# dasi2 --with-optional` adds them; `smd install <name>` installs+enables one
+# on demand (install implies enable — see bin/smd _enable_after_install).
+optional           = ["codar-sounder", "hf-tec", "hfdl-recorder", "meteor-scatter"]
 
 [profile.base]
 description        = "Base SDR station — local radiod + web + timing, no recording clients"

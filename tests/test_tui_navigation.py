@@ -93,8 +93,30 @@ class ComponentTreeStructureTests(unittest.TestCase):
         self.assertIn("Maintenance", labels)
         self.assertIn("Debugging", labels)
         self.assertIn("Installation", labels)
+        self.assertIn("Advanced", labels)
         # Overview is a leaf at root level, not a group.
         self.assertTrue(any("Overview" in lbl for lbl in labels))
+
+    def test_installation_is_the_three_step_arc(self):
+        """Installation collapses to the guided + ①②③ arc; Topology is no
+        longer a leaf (derived state, surfaced by step ③).  See
+        docs/install-redesign.md Stage 3."""
+        from sigmond.tui.widgets.component_tree import ComponentTree
+        from sigmond.topology import load_topology
+
+        tree = ComponentTree()
+        tree.populate(load_topology(), {})
+
+        inst = next(n for n in tree.root.children
+                    if str(n.label) == "Installation")
+        screens = [leaf.data.get("screen") for leaf in inst.children]
+        self.assertEqual(
+            screens, ["greenfield", "install", "configuration", "lifecycle"])
+        # Topology must not appear as a primary nav leaf anywhere.
+        all_screens = [leaf.data.get("screen")
+                       for grp in tree.root.children
+                       for leaf in grp.children if leaf.data]
+        self.assertNotIn("topology", all_screens)
 
 
 if __name__ == '__main__':

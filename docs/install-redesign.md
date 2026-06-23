@@ -1,19 +1,25 @@
 # Install redesign — station patterns, hardware-aware install, 3-step IA
 
-_Status (2026-06-12, session 4 wrap): **Stage 0 + Stage 1 shipped** (`3406557`,
-`9c4fc26` on `origin/main`). **Stages 2 + 3 are PROVISIONAL / on hold** — see the
-banner below. Captures the design agreed in the greenfield-install thread.
-Supersedes the "daisy/dasi2" profile split and extends
-`install-orchestration-design.md`, `RADIOD-IDENTIFICATION.md`, and the nav
-proposal in `TUI-FUNCTION-INVENTORY.md` §4._
+_Status (2026-06-23): **Stages 0–3 shipped.** Stages 0+1 (canonical dasi2,
+hostname-derived radiod name, hardware-aware install) landed earlier (`3406557`,
+`9c4fc26`). The multi-site deployment-readiness pass committed the remaining
+direction: **install now implies enable** (the vocabulary fix — see below), the
+**core/discretionary split is encoded** (`[profile.dasi2].optional`), the
+**Guided bring-up screen carries the optional-clients picker** (`--with-optional`),
+and the **Installation nav was collapsed to the ①②③ arc + Advanced group**
+(Stage 3). Extends `install-orchestration-design.md`, `RADIOD-IDENTIFICATION.md`,
+and the nav proposal in `TUI-FUNCTION-INVENTORY.md` §4._
 
-> ⚠️ **Stages 2–3 are NOT settled work.** Install development may take a
-> different direction altogether. Stages 0–1 (canonical dasi2, hostname-derived
-> radiod name, hardware-aware install) stand on their own and are shipped. The
-> base/client guided assistants (Stage 2) and the Installation nav reorg
-> (Stage 3) below are the *current* design intent, **not a committed plan** —
-> re-confirm the direction before implementing either. Decisions §1 and the
-> three-pattern model (§2) may themselves be revisited.
+> ✅ **Direction confirmed & shipped.** The vocabulary question — *why are
+> `install` and `enable` separate?* — resolved to: they are not, for the common
+> path. `smd install <name>` sets `enabled = true` in topology by default
+> (`--no-enable` opts out); `enable`/`disable` remain the reversible runtime
+> toggle for an already-installed component (disable-not-delete). The mental
+> model is now **download → install → configure → start**. The `base`/`client`
+> guided assistants remain TUI flows composing the existing Install / Configure /
+> Lifecycle screens (the dasi2 Guided bring-up screen is the reference); no CLI
+> entry point — the CLI equivalent is the documented install → config → start
+> sequence.
 
 ## 0. Why
 
@@ -211,28 +217,29 @@ FFT wisdom. SDR inventory is Advanced, NOT folded into Configure.
   --dry-run` on this host (mag + GPSDO both absent → both warnings, both
   install dormant; rx888 present → proceeds).
 
-**Stage 2 — base & client guided assistants (the real build) — PENDING / PROVISIONAL**
-_(Not started. Re-confirm the direction before building — see the ⚠️ banner.)_
-- base: detect → install matching foundation (rx888→ka9q-radio+ka9q-web+
-  igmp-querier; gpsdo→gpsdo-monitor; mag→mag-recorder) → client picker
-  (wspr/psk/grape/hfdl/codar/hf-tec) → configure/enable/start.
-- client: remote radiod status DNS → client picker → configure/enable/start.
-- TUI-only guided assistants that COMPOSE existing screens (Topology-enable,
-  Install, Configuration, Lifecycle); replace the static `[profile.base]` /
-  `[profile.client]` client-lists with the assistant flows; keep dasi2 as the
-  one static bundle.
-- OPEN: client-picker UI = new widget vs reuse Topology-enable + Install chrome.
+**Stage 2 — base & client guided assistants — SHIPPED (core)**
+- The Guided bring-up screen (`tui/screens/greenfield.py`) is the reference
+  assistant: pick a profile (dasi2/base/client), enter identity once, preview
+  the staged plan, Begin. It composes install → configure → enable → start via
+  the `bringup` plan engine (`lib/sigmond/bringup.py`).
+- **Optional-clients picker shipped**: profiles that declare `optional` show an
+  "Optional clients" section; checking it passes `--with-optional` so the
+  discretionary set (codar-sounder, hf-tec, hfdl-recorder, meteor-scatter for
+  dasi2) installs alongside the core. A single discretionary client is added
+  later with `smd install <name>` (installs + enables).
+- base/client stay assistant-driven (no CLI entry point); the static
+  `[profile.dasi2]` remains the one canonical bundle.
 
-**Stage 3 — Installation IA reorg (nav) — PENDING / PROVISIONAL**
-_(Not started. Re-confirm the direction before building — see the ⚠️ banner.)_
-- Collapse Installation to ①②③ (① Download&install absorbs Guided bring-up +
-  Install + the 3 patterns; ② Configure; ③ Enable/disable&start/stop = the
-  Lifecycle screen moved up from Maintenance).
-- Remove the Topology leaf (topology = derived state surfaced by ③).
-- Relocate the under-the-hood five — Software versions, **SDR inventory**, CPU
-  affinity, CPU frequency, FFT wisdom — into one **Advanced** group. (SDR
-  inventory is Advanced, NOT folded into Configure — see §5.)
-- Reconcile with `TUI-FUNCTION-INVENTORY.md` §4.
+**Stage 3 — Installation IA reorg (nav) — SHIPPED**
+- Installation collapsed to **✨ Guided bring-up · ① Download & install ·
+  ② Configure · ③ Enable / start / stop** (Lifecycle moved up from Maintenance).
+- **Topology leaf removed** — topology is derived state, surfaced by step ③.
+- The under-the-hood five — Software versions, **SDR inventory**, CPU affinity,
+  CPU frequency, FFT wisdom — moved into one **Advanced** group (SDR inventory
+  stays Advanced, NOT folded into Configure — see §5).
+- Implemented in `tui/widgets/component_tree.py`; pinned by
+  `tests/test_tui_navigation.py::test_installation_is_the_three_step_arc`.
+- TODO: reconcile the prose in `TUI-FUNCTION-INVENTORY.md` §4 with the shipped tree.
 
 ## 7. Decisions resolved + remaining
 - ✓ dasi2 absent-hardware → **install-dormant**; base → detection-gated (§3).

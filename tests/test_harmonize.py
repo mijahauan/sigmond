@@ -353,6 +353,7 @@ class TestRuleCpuIsolationRuntime(unittest.TestCase):
                 "rule_hardware_gated_core",
                 "rule_secrets",
                 "rule_upload_enabled",
+                "rule_upload_credentials",
             ],
         )
 

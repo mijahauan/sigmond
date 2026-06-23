@@ -29,26 +29,70 @@ smd_bin = "/usr/local/sbin/smd"
 # this assignment.  See docs/HOST-CAPACITY-PLANNING.md for the broader
 # discussion of how workload tiers map onto host topology.
 
+# ── Core station ──────────────────────────────────────────────────────────
+# The default DASI2 station: enabled out of the box.  These match the `dasi2`
+# catalog profile.  On a host that binds a REMOTE radiod, set ka9q-radio,
+# ka9q-web, igmp-querier and gpsdo-monitor to enabled = false (the `client`
+# profile) and leave the recorders enabled.
+
 [component.ka9q-radio]
 enabled = true
 description = "ka9q-radio SDR daemon — receives and multicasts RF channels"
 managed = true
 
+[component.ka9q-web]
+enabled = true
+description = "ka9q-web radiod status web UI"
+
+[component.igmp-querier]
+enabled = true
+description = "IGMP querier so radiod multicast survives on home-network switches"
+
+[component.gpsdo-monitor]
+enabled = true
+description = "Leo Bodnar GPSDO health monitor + mDNS advertiser"
+# Hardware-gated: installs enabled-but-dormant when no USB GPSDO is attached.
+
 [component.hf-timestd]
 enabled = true
-description = "HF time-standard analyzer (WWV/WWVH/CHU/BPM)"
+description = "HF time-standard analyzer (WWV/WWVH/CHU/BPM) — suite timing authority"
 # hf-timestd manages its own systemd units via its own deploy mechanism.
 # smd install will verify the service is running but does not install hf-timestd.
 managed = false
+
+[component.wspr-recorder]
+enabled = true
+description = "WSPR/FST4W audio recorder (period-aligned WAVs)"
 
 [component.psk-recorder]
 enabled = true
 description = "FT4/FT8 spot recorder for PSKReporter"
 
-[component.wspr-recorder]
-enabled = false
-description = "WSPR/FST4W audio recorder (period-aligned WAVs)"
-
-[component.ka9q-web]
+[component.mag-recorder]
 enabled = true
-description = "ka9q-web radiod status web UI"
+description = "RM3100 magnetometer recorder + PSWS uploader"
+# Hardware-gated: installs enabled-but-dormant when no magnetometer is present.
+
+# ── Discretionary clients ───────────────────────────────────────────────────
+# Additional HF-science clients, installed at the operator's discretion.  Left
+# disabled here so they're advertised but off.  To run one:
+#   sudo smd install <name>        # installs AND enables it (flips enabled=true)
+#   sudo smd config init <name>
+#   sudo smd start <name>
+# (Flip enabled=true here by hand only if it's already installed.)
+
+[component.codar-sounder]
+enabled = false
+description = "Opportunistic ionospheric sounder using CODAR chirp transmissions"
+
+[component.hf-tec]
+enabled = false
+description = "HF PRN-coded beacon recorder for ionospheric specification (TEC)"
+
+[component.hfdl-recorder]
+enabled = false
+description = "HFDL recorder — one dumphfdl subprocess per band"
+
+[component.meteor-scatter]
+enabled = false
+description = "Meteor-scatter ping recorder/decoder (jt9 --msk144)"

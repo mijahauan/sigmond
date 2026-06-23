@@ -31,7 +31,7 @@ import sys
 
 from textual.containers import Horizontal, Vertical
 from textual.widgets import (
-    Button, Input, Label, RadioButton, RadioSet, Static,
+    Button, Checkbox, Input, Label, RadioButton, RadioSet, Static,
 )
 from textual.worker import WorkerState
 
@@ -115,6 +115,9 @@ class GreenfieldScreen(Vertical):
     GreenfieldScreen .gf-field Input { width: 36; }
     GreenfieldScreen #gf-remote-row { display: none; }
     GreenfieldScreen #gf-remote-row.show { display: block; }
+    GreenfieldScreen #gf-optional { display: none; }
+    GreenfieldScreen #gf-optional.show { display: block; }
+    GreenfieldScreen #gf-optional-list { color: $text-muted; }
     GreenfieldScreen #gf-actions { height: 3; margin-top: 1; }
     GreenfieldScreen #gf-actions Button { margin-right: 1; }
     GreenfieldScreen #gf-status { margin-top: 1; }
@@ -166,6 +169,15 @@ class GreenfieldScreen(Vertical):
             yield Label("Remote radiod DNS")
             yield Input(placeholder="e.g. bee3-status.local", id="gf-remote")
 
+        # Optional / discretionary clients — shown only for profiles that
+        # declare any.  All-or-nothing (mirrors bringup's --with-optional);
+        # install a single one later with `smd install <name>`.
+        with Vertical(id="gf-optional"):
+            yield Static("3 · Optional clients", classes="gf-section")
+            yield Checkbox("Also install this profile's optional clients",
+                           id="gf-with-optional")
+            yield Static("", id="gf-optional-list")
+
         with Horizontal(id="gf-actions"):
             yield Button("Preview plan", id="gf-preview", variant="default")
             yield Button("Begin bring-up", id="gf-begin", variant="success")
@@ -191,6 +203,10 @@ class GreenfieldScreen(Vertical):
     def _profile_clients(self, name: str) -> list:
         prof = self._profiles.get(name)
         return list(getattr(prof, "clients", []) or [])
+
+    def _profile_optional(self, name: str) -> list:
+        prof = self._profiles.get(name)
+        return list(getattr(prof, "optional", []) or [])
 
     def _profile_is_local(self, name: str) -> bool:
         prof = self._profiles.get(name)
@@ -219,6 +235,15 @@ class GreenfieldScreen(Vertical):
         row = self.query_one("#gf-remote-row")
         row.set_class(not is_local, "show")
 
+        # Optional clients section: only for profiles that declare any.
+        optional = self._profile_optional(name)
+        opt_box = self.query_one("#gf-optional")
+        opt_box.set_class(bool(optional), "show")
+        if optional:
+            self.query_one("#gf-optional-list", Static).update(
+                "Adds: " + ", ".join(optional))
+            self.query_one("#gf-with-optional", Checkbox).value = False
+
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
         self._sync_required_hints()
         self.query_one("#gf-status", Static).update("")
@@ -228,13 +253,17 @@ class GreenfieldScreen(Vertical):
     def _gather(self) -> dict:
         def val(wid: str) -> str:
             return self.query_one(wid, Input).value.strip()
+        profile = self._selected_profile()
+        with_optional = bool(self._profile_optional(profile)) and \
+            self.query_one("#gf-with-optional", Checkbox).value
         return {
-            "profile": self._selected_profile(),
+            "profile": profile,
             "reporter": val("#gf-reporter"),
             "grid": val("#gf-grid"),
             "callsign": val("#gf-callsign"),
             "psws": val("#gf-psws"),
             "remote": val("#gf-remote"),
+            "with_optional": with_optional,
         }
 
     def _missing_required(self, g: dict) -> list:
@@ -260,6 +289,8 @@ class GreenfieldScreen(Vertical):
             argv += ["--psws-station-id", g["psws"]]
         if not self._profile_is_local(g["profile"]) and g["remote"]:
             argv += ["--remote-radiod", g["remote"]]
+        if g.get("with_optional"):
+            argv.append("--with-optional")
         if dry_run:
             argv.append("--dry-run")
         return argv
@@ -303,10 +334,15 @@ class GreenfieldScreen(Vertical):
 
         is_local = self._profile_is_local(g["profile"])
         clients = ", ".join(self._profile_clients(g["profile"])) or "(none)"
+        opt_line = ""
+        if g.get("with_optional"):
+            opt = ", ".join(self._profile_optional(g["profile"])) or "(none)"
+            opt_line = f"  optional: {opt}\n"
         body = (
             f"Install, configure, and start the [bold]{g['profile']}[/] station "
             f"({'LOCAL' if is_local else 'REMOTE'} radiod).\n\n"
             f"  clients:  {clients}\n"
+            f"{opt_line}"
             f"  reporter: {g['reporter'] or '—'}\n"
             f"  grid:     {g['grid'] or '—'}\n"
             f"  callsign: {g['callsign'] or '—'}\n\n"

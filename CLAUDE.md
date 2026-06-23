@@ -4,17 +4,23 @@
 
 **Sigmond** ("Dr. SigMonD" — a play on Sigmund Freud) is the unified
 installer, configurator, and lifecycle manager for the HamSCI SDR suite:
-wsprdaemon, hf-timestd, ka9q-radio, ka9q-web, and future HamSCI clients.
+ka9q-radio / ka9q-web plus the ka9q-python decode clients (wspr-recorder,
+psk-recorder, hf-timestd, mag-recorder, codar-sounder, hfdl-recorder,
+hf-tec, meteor-scatter) and future HamSCI clients.
 
 The CLI entry point is **`smd`**.
 
 ## Authors
 
-- Rob Robinett (AI6VN, GitHub: rrobinett) — wsprdaemon architect
-- Michael Hauan (AC0G, GitHub: mijahauan) — hf-timestd / ka9q-python / wspr-recorder /ka9q-update / psk-recorder author
+- Rob Robinett (AI6VN, GitHub: rrobinett) 
+- Michael Hauan (AC0G, GitHub: mijahauan) 
 - Repo: https://github.com/mijahauan/sigmond
 
 ## Architecture reference
+
+**DASI2** = *Distributed Array of Small Instruments, Track 2*, the NSF-funded
+project this station serves (not "daisy" — that was a bad invented term, since
+deleted; see `docs/install-redesign.md`).
 
 For the whole-suite picture (DASI2 hardware → radiod → core/additional
 clients → shared sink → uploaders, under sigmond oversight) see
@@ -276,7 +282,10 @@ ClickHouse install, use `smd admin storage migrate-to-sqlite` to clean it up.
 
 10. **Catalog walk install** — `smd install` (no args) iterates the catalog
     + topology. Clients with `install_script` go through the catalog path;
-    C projects (radiod, ka9q-web) delegate to ka9q-update's `install-ka9q.sh`.
+    the C projects are built in-tree by `smd` — radiod via
+    `_install_radiod_native` and ka9q-web via `_build_ka9q_web_with_onion`
+    (the standalone `ka9q-update` updater is deprecated, see
+    `[deprecated.ka9q-update]` in `etc/catalog.toml`).
 
 11. **TUI configurator** (`lib/sigmond/tui/`, Textual) — three-panel layout
     accessed via `smd tui`. Left: component tree with health indicators.
@@ -349,6 +358,25 @@ enabled = false
 Old topology names (`grape`, `wspr`) are accepted as aliases with deprecation
 warnings.  The canonical names match `etc/catalog.toml`.
 
+### Install implies enable; core vs discretionary
+
+`smd install <name>` sets `enabled = true` in topology by default
+(`_enable_after_install` in `bin/smd`; `--no-enable` opts out).  So the operator
+mental model is **download → install → configure → start** — there is no
+separate manual enable step after install.  `enable`/`disable` remain the
+**reversible runtime toggle** for an already-installed component (disable-not-
+delete: `smd disable` stops the units and flips the flag; `smd enable` undoes
+it).  Don't reintroduce a mandatory post-install `enable` step.
+
+Clients split into a **core set** that installs by default and a
+**discretionary set** installed at the operator's choice.  This is encoded in
+the catalog profiles (`etc/catalog.toml`): `[profile.dasi2].clients` is the core
+(hf-timestd, wspr-recorder, psk-recorder, mag-recorder) and
+`[profile.dasi2].optional` is the discretionary set (codar-sounder, hf-tec,
+hfdl-recorder, meteor-scatter).  `smd bringup dasi2` installs core;
+`--with-optional` adds the optional set; the TUI Guided bring-up screen exposes
+the same choice as an "Optional clients" checkbox.
+
 ## Catalog layering
 
 `load_catalog()` merges three layers, lowest precedence first, via
@@ -419,8 +447,9 @@ to preview).
 ## Fleet upgrade pattern
 
 Sigmond consumers (`mag-recorder`, `psk-recorder`, `wspr-recorder`,
-`hf-timestd`, `codar-sounder`, `hfdl-recorder`, plus the
-`hs-uploader` + `gpsdo-monitor` non-Python clients-with-CLIs) all use
+`hf-timestd`, `codar-sounder`, `hfdl-recorder`, `hf-tec`,
+`meteor-scatter`, plus the `hs-uploader` + `gpsdo-monitor`
+clients-with-CLIs) all use
 **uv** ([astral.sh/uv](https://astral.sh/uv)) as both their development
 and production installer.  Each per-consumer `install.sh`:
 
@@ -488,10 +517,10 @@ sudo systemctl restart <consumer>             # to load new in-memory code
 
 ### The shared install helper
 
-The seven consumer `install.sh` files (`hs-uploader`, `gpsdo-monitor`,
+The nine consumer `install.sh` files (`hs-uploader`, `gpsdo-monitor`,
 `mag-recorder`, `psk-recorder`, `wspr-recorder`, `codar-sounder`,
-`hfdl-recorder`) each source `scripts/install/ensure_uv.sh` from this
-repo via:
+`hfdl-recorder`, `hf-tec`, `meteor-scatter`) each source
+`scripts/install/ensure_uv.sh` from this repo via:
 
 ```bash
 _ENSURE_UV_SH="/opt/git/sigmond/sigmond/scripts/install/ensure_uv.sh"

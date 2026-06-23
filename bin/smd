@@ -2281,9 +2281,9 @@ def cmd_add(args) -> int:
         return 1
 
     _ok(f'{name}: added')
-    _info(f'  next: smd install {name}')
+    _info(f'  next: smd install {name}   (installs + enables it in topology)')
     _info(f'        smd config init {name}')
-    _info(f'        smd enable {name}')
+    _info(f'        smd start {name}')
     return 0
 
 
@@ -3138,6 +3138,32 @@ def cmd_install(args) -> int:
     return _install_full_suite(args)
 
 
+def _enable_after_install(entry, args) -> None:
+    """Enable a just-installed component in topology unless --no-enable.
+
+    A single-client install (``smd install <name>``) means "I want this
+    component on this host", so it should be enabled in topology by default —
+    otherwise ``smd start <name>`` skips it ("not enabled in topology") and the
+    operator hits a dead end.  ``enable``/``disable`` remain the reversible
+    runtime toggle for an already-installed component (the disable-not-delete
+    pattern).  ``--no-enable`` opts out (e.g. staging config before first run).
+    """
+    if getattr(args, 'no_enable', False):
+        _info(f'--no-enable: leaving {entry.name} disabled in topology '
+              f'(enable later: smd enable {entry.name})')
+        return
+    try:
+        from sigmond.topology import set_component_enabled
+        changed = set_component_enabled(entry.name, True, TOPOLOGY_PATH,
+                                        description=entry.description)
+    except Exception as exc:
+        _warn(f'{entry.name}: could not enable in topology — {exc} '
+              f'(enable manually: smd enable {entry.name})')
+        return
+    if changed:
+        _ok(f'{entry.name}: enabled in topology')
+
+
 def _install_single_client(args) -> int:
     """Catalog-driven install of a single client: smd install <client>."""
     client = args.client
@@ -3190,7 +3216,10 @@ def _install_single_client(args) -> int:
                 return 1
             _netdiag_auto_refresh('install')
             _heading('ka9q-web (onion + make install)')
-            return 0 if _install_ka9q_web_native(catalog, force=getattr(args, 'force', False)) else 1
+            if not _install_ka9q_web_native(catalog, force=getattr(args, 'force', False)):
+                return 1
+            _enable_after_install(entry, args)
+            return 0
         # Otherwise we expect to discover install.sh in the cloned repo
         # post-clone (the mag-recorder pattern).  install_client() handles
         # this fall-through; it needs a repo URL to clone from.
@@ -3212,6 +3241,10 @@ def _install_single_client(args) -> int:
 
     if dry_run:
         _info('(dry-run) would clone repo and run install.sh')
+        if getattr(args, 'no_enable', False):
+            _info('(dry-run) --no-enable: would leave it disabled in topology')
+        else:
+            _info(f'(dry-run) would enable {entry.name} in topology')
         return 0
 
     if _need_root('install'):
@@ -3228,7 +3261,9 @@ def _install_single_client(args) -> int:
 
     if result:
         _ok(f'{entry.name} installed successfully')
-        _info(f'next: edit /etc/{entry.name}/ config, then: smd start --components {entry.name}')
+        _enable_after_install(entry, args)
+        _info(f'next: smd config init {entry.name}')
+        _info(f'      smd start {entry.name}')
         return 0
     else:
         _err(f'{entry.name} install failed')
@@ -6862,8 +6897,8 @@ _smd_complete() {
     # this list from argparse rather than hand-maintaining it.
     local top_cmds="install apply enable disable start stop restart reload status config tui watch bringup component admin"
     local admin_cmds="diag validate verifier wisdom storage environment sources public-ip log rac timing radiod instance uninstall completion"
-    local components="radiod wspr-recorder hf-timestd psk-recorder wsprdaemon-client ka9q-web wd-rac"
-    local log_clients="wspr-recorder hf-timestd psk-recorder wsprdaemon-client"
+    local components="ka9q-radio radiod ka9q-web hf-timestd wspr-recorder psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter gpsdo-monitor igmp-querier rac"
+    local log_clients="wspr-recorder hf-timestd psk-recorder mag-recorder codar-sounder hf-tec hfdl-recorder meteor-scatter"
     local profiles="dasi2 base client"
 
     if [[ "$prev" == "--components" ]]; then
@@ -6900,7 +6935,7 @@ _smd_complete() {
         2)
             case "${words[1]}" in
                 install)
-                    COMPREPLY=($(compgen -W "$components --components --client-dir --dry-run --yes --topology" -- "$cur"))
+                    COMPREPLY=($(compgen -W "$components --components --profile --client-dir --dry-run --yes --force --no-enable --topology" -- "$cur"))
                     ;;
                 bringup)
                     COMPREPLY=($(compgen -W "$profiles --remote-radiod --with-optional --non-interactive --dry-run" -- "$cur"))
@@ -6992,7 +7027,7 @@ _smd_complete() {
                             COMPREPLY=($(compgen -W "--components --catalog --no-fetch --json --topology" -- "$cur"))
                             ;;
                         install)
-                            COMPREPLY=($(compgen -W "$components --components --client-dir --dry-run --yes --force --topology" -- "$cur"))
+                            COMPREPLY=($(compgen -W "$components --components --profile --client-dir --dry-run --yes --force --no-enable --topology" -- "$cur"))
                             ;;
                         update)
                             COMPREPLY=($(compgen -W "$components --components --fetch --ref --dry-run --json --topology" -- "$cur"))
@@ -14148,6 +14183,10 @@ def main() -> int:
         p.add_argument('--force', '-f', action='store_true',
                        help='rebuild/reinstall even if the binary appears current '
                             '(skips SHA short-circuits and `make` rebuild gating)')
+        p.add_argument('--no-enable', action='store_true', dest='no_enable',
+                       help='do not enable the component in topology after install '
+                            '(default: a single-client install enables it so '
+                            '`smd start <name>` runs it)')
 
     def _add_apply_args(p):
         p.add_argument('--dry-run', action='store_true')
