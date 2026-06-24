@@ -60,16 +60,15 @@ client's reporter id (phase 7).
 ## Phase 2 — Topology (usually skip)
 
 Topology records what this host runs (`/etc/sigmond/topology.toml`).
-**You normally don't touch it directly** — `smd install <component>` enables
-the component as part of installing it (phase 3). Reach for `smd enable` /
-`smd disable` only to:
+**You normally don't touch it directly.** `smd install <component>` enables the
+component as part of installing it (phase 3), and `smd start <component>`
+enables an installed-but-disabled one. The only verb you reach for here is
+`smd disable <name>` — take an installed component offline without uninstalling
+it (stops its units and clears the flag, reversibly; `smd start <name>` brings
+it back).
 
-- pre-`enable` a component before installing (rare — to stage config first), or
-- take an installed component offline without uninstalling it
-  (`smd disable <name>` stops its units and flips the flag; reversible).
-
-The canonical name is `ka9q-radio` (alias `radiod`); `smd enable radiod`
-resolves to it.
+The canonical name is `ka9q-radio` (alias `radiod`); the name resolves
+through aliases everywhere.
 
 ## Phase 3 — Install
 

@@ -463,6 +463,58 @@ def _resolve_only_list(args, topology):
     return [c for c in combined if c in enabled_set]
 
 
+def _autoenable_named_on_start(args, topology_path) -> bool:
+    """`smd start <name>` on an installed-but-disabled component enables it.
+
+    Naming a component to `start` expresses "I want this running here", so
+    there's no reason to make the operator run `smd enable` first — start
+    auto-enables it (the forward path collapses to install → start).
+    `disable` remains the reversible off-switch; this never touches the
+    bare `smd start` (no args) path, which still acts only on what's
+    already enabled.  Returns True if any topology flag was flipped (the
+    caller reloads topology so the new enables take effect).
+
+    Only *installed* components are auto-enabled — a named-but-not-installed
+    component falls through to the usual "not enabled / not installed"
+    gate rather than leaving a stray enabled=true for absent software.
+    """
+    if not _HAS_SIGMOND_LIB:
+        return False
+    positional = list(getattr(args, 'names', None) or [])
+    legacy_arg = getattr(args, 'components', None)
+    legacy = [c.strip() for c in legacy_arg.split(',')] if legacy_arg else []
+    combined = [c for c in positional + legacy if c]
+    if not combined or 'all' in combined:
+        return False
+    try:
+        from sigmond.catalog import load_catalog, get_entry
+        from sigmond.component_state import compute_state
+        from sigmond.topology import set_component_enabled
+        catalog = load_catalog()
+    except (FileNotFoundError, OSError, ImportError):
+        return False
+
+    topology = _load_topology(topology_path)
+    enabled_set = set(_enabled_components(topology) or [])
+    changed = False
+    for raw in combined:
+        entry = get_entry(raw, catalog)
+        name = entry.name if entry is not None else resolve_name(raw, catalog)
+        if entry is None or name in enabled_set:
+            continue
+        try:
+            st = compute_state(name, topology)
+        except Exception:
+            continue
+        if not getattr(st, 'installed', False):
+            continue  # let the start gate report "not installed"
+        if set_component_enabled(name, True, topology_path,
+                                 description=entry.description):
+            _ok(f'{name}: enabled (start)')
+            changed = True
+    return changed
+
+
 def _need_root(cmd_name: str) -> bool:
     """Auto-elevate to root via sudo when invoked as a normal user.
 
@@ -4322,7 +4374,12 @@ def _ensure_other_affinity_drop_ins(topology_cpu_affinity=None) -> bool:
 def cmd_start(args) -> int:
     if _need_root('start'):
         return 1
-    topology = _load_topology(Path(args.topology) if args.topology else TOPOLOGY_PATH)
+    # Naming a component to start enables it if it's installed-but-disabled,
+    # so the forward path is just install → start (no separate `smd enable`).
+    # Writes topology.toml; the load below then sees the new enables.
+    _topo_path = Path(args.topology) if args.topology else TOPOLOGY_PATH
+    _autoenable_named_on_start(args, _topo_path)
+    topology = _load_topology(_topo_path)
     only = _resolve_only_list(args, topology)
     if only is not None and not only:
         return 0  # operator named only not-enabled components; already warned
@@ -14123,11 +14180,14 @@ def main() -> int:
 
               Operator (mutating — needs sudo):
                 start / stop / restart / reload   systemd-aligned lifecycle
+                           (start <name> also enables an installed component)
+                disable    take a component offline (reversible; stops + un-enables)
                 apply      reconcile running services with current config
-                enable / disable                  toggle component in topology
 
               Installer / maintenance:
-                install    install and configure components
+                install    install + configure + enable a component
+                enable     re-enable a disabled component (rarely needed —
+                           install and start enable for you)
                 component  per-component status + catalog (list | install | update | add | remove | enable | disable)
                 config     show / migrate / init / edit per-client config
                 bringup    guided station bring-up from a catalog profile

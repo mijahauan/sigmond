@@ -371,10 +371,13 @@ sudo smd start hfdl-recorder
 smd status
 ```
 
-Pass `--no-enable` to install a client without enabling it (e.g. to stage its
-config before first run); enable it later with `smd enable <name>`. To take a
-client offline without uninstalling it, `smd disable <name>` (reversible — it
-stops the units and flips the topology flag; re-enable with `smd enable`).
+The forward path is just **install → configure → start** — there is no
+separate `enable` step. `smd install` enables the component, and naming a
+component to `smd start` enables it too if it was installed-but-disabled. The
+only off-switch you need is `smd disable <name>`, which takes a component
+offline reversibly (stops its units and clears the topology flag); `smd start
+<name>` brings it back. Pass `smd install --no-enable` to install without
+enabling (e.g. to stage config first).
 
 ## Available clients
 

@@ -361,12 +361,16 @@ warnings.  The canonical names match `etc/catalog.toml`.
 ### Install implies enable; core vs discretionary
 
 `smd install <name>` sets `enabled = true` in topology by default
-(`_enable_after_install` in `bin/smd`; `--no-enable` opts out).  So the operator
-mental model is **download → install → configure → start** — there is no
-separate manual enable step after install.  `enable`/`disable` remain the
-**reversible runtime toggle** for an already-installed component (disable-not-
-delete: `smd disable` stops the units and flips the flag; `smd enable` undoes
-it).  Don't reintroduce a mandatory post-install `enable` step.
+(`_enable_after_install` in `bin/smd`; `--no-enable` opts out), and naming a
+component to `smd start` auto-enables it if it's installed-but-disabled
+(`_autoenable_named_on_start`; bare `smd start` with no args only acts on what's
+already enabled).  So the operator mental model is **download → install →
+configure → start** — `enable` is never a required step.  The remaining
+off-switch is `smd disable <name>` (disable-not-delete: stop the units + clear
+the flag, reversibly; `smd start <name>` brings it back).  `smd enable` still
+exists for scripting and is emitted internally by the bring-up planner, but it's
+demoted in the operator help — don't reintroduce a mandatory manual `enable`
+step in the forward path.
 
 Clients split into a **core set** that installs by default and a
 **discretionary set** installed at the operator's choice.  This is encoded in
