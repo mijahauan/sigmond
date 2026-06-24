@@ -14,7 +14,7 @@ The CLI entry point is **`smd`**.
 
 - Rob Robinett (AI6VN, GitHub: rrobinett) 
 - Michael Hauan (AC0G, GitHub: mijahauan) 
-- Repo: https://github.com/mijahauan/sigmond
+- Repo: https://github.com/HamSCI/sigmond
 
 ## Architecture reference
 
