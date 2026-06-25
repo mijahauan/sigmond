@@ -50,7 +50,7 @@ Current sigmond clients:
 | `wspr-recorder` | `wsprd`, `jt9` | **both** (prebuilt + script) | Qt + boost + fftw, ~5 min build |
 | `mag-recorder` | `mag-usb` | **both** (prebuilt + script) | small build but likely RPi target (ARM); ship x86_64 prebuilt, build-fresh covers ARM |
 | `hf-timestd` | PHaRLAP | **external only** | closed-source (DST), can't redistribute — operator-staged via the client's `scripts/install-pharlap.sh` (or baked into the **controlled** DASI2 golden image as single-licensee internal use). GCC/gfortran-built static libs in 4.7.4 — no Intel Fortran, no MATLAB MCR. |
-| `hf-timestd` | pyLAP | **build-on-install (pinned)** | open fork (`mijahauan/PyLap`) built into the venv; pin (`PYLAP_REF`) lives in the client's `scripts/ensure-pylap.sh` — the single idempotent builder run by both `install.sh` and `deploy.toml` `[build].steps`, so clones self-heal raytracing after a venv rebuild. Stand-alone: paths derive from the script's own location, no sigmond required. |
+| `hf-timestd` | pyLAP | **build-on-install (pinned)** | open fork (`HamSCI/PyLap`) built into the venv; pin (`PYLAP_REF`) lives in the client's `scripts/ensure-pylap.sh` — the single idempotent builder run by both `install.sh` and `deploy.toml` `[build].steps`, so clones self-heal raytracing after a venv rebuild. Stand-alone: paths derive from the script's own location, no sigmond required. |
 
 `iri2020` is a pip-installable git dep handled by `uv` — it doesn't fit
 the binary `.provenance` contract, but the same *pin the source* principle

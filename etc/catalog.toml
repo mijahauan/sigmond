@@ -33,7 +33,7 @@ start_priority  = 0                                   # always start first
 [client.wspr-recorder]
 kind            = "client"
 description     = "WSPR/FST4W audio recorder (period-aligned WAVs)"
-repo            = "https://github.com/mijahauan/wspr-recorder"
+repo            = "https://github.com/HamSCI/wspr-recorder"
 uses            = ["ka9q-python"]
 requires        = ["ka9q-python", "ka9q-radio"]
 contract        = "0.8"
@@ -42,7 +42,7 @@ install_script  = "/opt/git/sigmond/wspr-recorder/install.sh"
 [client.psk-recorder]
 kind            = "client"
 description     = "FT4/FT8 spot recorder for PSKReporter"
-repo            = "https://github.com/mijahauan/psk-recorder"
+repo            = "https://github.com/HamSCI/psk-recorder"
 uses            = ["ka9q-python"]
 requires        = ["ka9q-python", "ka9q-radio"]
 contract        = "0.8"
@@ -62,7 +62,7 @@ start_priority  = 50                                  # timing authority: start 
 [client.mag-recorder]
 kind            = "client"
 description     = "RM3100 magnetometer recorder + PSWS uploader (non-radiod, §16 'other')"
-repo            = "https://github.com/mijahauan/mag-recorder"
+repo            = "https://github.com/HamSCI/mag-recorder"
 uses            = []
 requires        = ["hs-uploader"]                     # sibling pkg for uv editable install
 contract        = "0.8"
@@ -83,7 +83,7 @@ hardware_gated  = "magnetometer (RM3100 / Pololu USB-I2C)"  # Phase D: dormant w
 [client.hs-uploader]
 kind            = "library"                           # source-only dep from the catalog's perspective
 description     = "HamSCI PSWS uploader (sibling Python pkg used by mag-recorder via uv editable install)"
-repo            = "https://github.com/mijahauan/hs-uploader"
+repo            = "https://github.com/HamSCI/hs-uploader"
 # No install_script: mag-recorder's pyproject.toml [tool.uv.sources] points at
 # ../hs-uploader as an editable install — only the source tree needs to exist.
 # `smd install hs-uploader` still works thanks to find_install_script's post-clone
@@ -102,7 +102,7 @@ repo            = "https://github.com/HamSCI/hamsci-dsp"
 [client.callhash]
 kind            = "library"                           # source-only dep: sibling Python pkg
 description     = "WSPR/FST4W callsign-hash resolution library (wspr-recorder + psk-recorder dep)"
-repo            = "https://github.com/mijahauan/callhash"
+repo            = "https://github.com/HamSCI/callhash"
 # No install_script: wspr-recorder and psk-recorder declare callhash in their
 # pyproject.toml [tool.uv.sources] as `path = "../callhash", editable = true`.
 # Sigmond must clone it to /opt/git/sigmond/callhash before invoking either
@@ -114,7 +114,7 @@ repo            = "https://github.com/mijahauan/callhash"
 [client.hfdl-recorder]
 kind            = "client"
 description     = "HFDL (High Frequency Data Link) recorder — one dumphfdl subprocess per band"
-repo            = "https://github.com/mijahauan/hfdl-recorder"
+repo            = "https://github.com/HamSCI/hfdl-recorder"
 uses            = ["ka9q-python"]
 requires        = ["ka9q-python", "ka9q-radio"]
 contract        = "0.8"
@@ -138,7 +138,7 @@ start_priority  = 200                                 # parallel with decoder ch
 [client.hf-tec]
 kind            = "client"
 description     = "HF PRN-coded beacon recorder for ionospheric specification"
-repo            = "https://github.com/mijahauan/hf-tec"
+repo            = "https://github.com/HamSCI/hf-tec"
 uses            = ["ka9q-python"]
 requires        = ["ka9q-python", "ka9q-radio"]
 contract        = "0.8"
@@ -147,7 +147,7 @@ install_script  = "/opt/git/sigmond/hf-tec/scripts/install.sh"
 [client.meteor-scatter]
 kind            = "client"
 description     = "Meteor-scatter ping recorder/decoder (jt9 --msk144)"
-repo            = "https://github.com/mijahauan/meteor-scatter"
+repo            = "https://github.com/HamSCI/meteor-scatter"
 uses            = ["ka9q-python"]
 requires        = ["ka9q-python", "ka9q-radio"]
 contract        = "0.8"                               # matches meteor-scatter/deploy.toml contract_version
@@ -185,7 +185,7 @@ start_priority  = 200
 [client.gpsdo-monitor]
 kind            = "infra"
 description     = "Leo Bodnar GPSDO health monitor + mDNS advertiser"
-repo            = "https://github.com/mijahauan/gpsdo-monitor"
+repo            = "https://github.com/HamSCI/gpsdo-monitor"
 uses            = []
 requires        = []
 install_script  = "/opt/git/sigmond/gpsdo-monitor/install.sh"
@@ -196,7 +196,7 @@ hardware_gated  = "GPSDO (Leo Bodnar, USB/HID)"       # Phase D: dormant when no
 [client.igmp-querier]
 kind            = "infra"
 description     = "Robust IGMP querier so radiod multicast survives on home-network switches"
-repo            = "https://github.com/mijahauan/igmp-querier"
+repo            = "https://github.com/HamSCI/igmp-querier"
 uses            = []
 requires        = []
 install_script  = "/opt/git/sigmond/igmp-querier/install.sh"

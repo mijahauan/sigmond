@@ -248,7 +248,7 @@ for _lib in callhash hs-uploader; do
     _lib_dir="/opt/git/sigmond/$_lib"
     if [[ ! -f "$_lib_dir/pyproject.toml" && ! -d "$_lib_dir/.git" ]]; then
         info "Cloning $_lib substrate → $_lib_dir"
-        if $SUDO git clone "https://github.com/mijahauan/$_lib" "$_lib_dir"; then
+        if $SUDO git clone "https://github.com/HamSCI/$_lib" "$_lib_dir"; then
             ok "$_lib cloned"
         else
             info "$_lib clone skipped (will be pulled at client install time)"

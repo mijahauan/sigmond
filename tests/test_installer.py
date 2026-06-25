@@ -178,7 +178,7 @@ class TestInstallClient:
                        requires=('hs-uploader',))
         dep = CatalogEntry(
             name='hs-uploader', kind='library', description='Python source dep',
-            repo='https://github.com/mijahauan/hs-uploader',
+            repo='https://github.com/HamSCI/hs-uploader',
             install_script=None,
         )
         catalog = {'mag-recorder': entry, 'hs-uploader': dep}

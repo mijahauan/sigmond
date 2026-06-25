@@ -1006,7 +1006,7 @@ Concrete pointers:
 - Bump `contract_version` in inventory output from `"0.2"` to `"0.3"`.
 
 **v0.3 greenfield reference: psk-recorder v0.1.0.**
-[`psk-recorder`](https://github.com/mijahauan/psk-recorder) is the
+[`psk-recorder`](https://github.com/HamSCI/psk-recorder) is the
 first client built against v0.3 from day one.  It implements §7
 (no `destination=`), §10 (log paths in inventory), and §11 (runtime
 log level) natively.
@@ -1053,7 +1053,7 @@ as the unit's `ExecStart`, but `cli.py` had no `__main__` guard.  The
 module loaded and returned, systemd saw a clean exit 0 in ~100 ms
 with no log output, and `Type=notify` reported failure with no
 diagnostic.  See
-[psk-recorder 520e39f](https://github.com/mijahauan/psk-recorder/commit/520e39f).
+[psk-recorder 520e39f](https://github.com/HamSCI/psk-recorder/commit/520e39f).
 
 *Acceptance:* a reference check is "import the CLI module under a
 sentinel `__name__` and assert `main()` is registered as the entry";
@@ -1080,7 +1080,7 @@ provisioned" but only 19 active; the FT4 160 m sink was silently
 dead.  FT4 has no standard 160 m calling frequency, so the entry was
 bogus — but a uniqueness check would have caught it at first
 `validate` run.  See
-[psk-recorder be4a050](https://github.com/mijahauan/psk-recorder/commit/be4a050).
+[psk-recorder be4a050](https://github.com/HamSCI/psk-recorder/commit/be4a050).
 
 #### 12.3 Deployed config path disclosure (MUST)
 

@@ -107,13 +107,13 @@ environment. Run radiod and consumers on the same host with `ttl=0`.
 
 ## Installing `igmp-querier`
 
-See: https://github.com/mijahauan/igmp-querier
+See: https://github.com/HamSCI/igmp-querier
 
 Short version:
 
 ```
 sudo mkdir -p /opt/git/sigmond
-sudo git clone https://github.com/mijahauan/igmp-querier /opt/git/sigmond/igmp-querier
+sudo git clone https://github.com/HamSCI/igmp-querier /opt/git/sigmond/igmp-querier
 sudo /opt/git/sigmond/igmp-querier/install.sh
 sudo systemctl edit igmp-querier        # set IGMP_INTERFACE=eth0
 sudo systemctl enable --now igmp-querier
