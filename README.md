@@ -110,7 +110,7 @@ smd component list --catalog
   Infra (3)
     ✓  gpsdo-monitor          Leo Bodnar GPSDO health monitor + mDNS advertiser
     ✓  igmp-querier           Robust IGMP querier for radiod multicast on home switches
-    ✓  rac                    Remote Access Channel (frpc reverse tunnel)
+    ✓  sigmond-rac            Remote Access Channel (frpc reverse tunnel)
 ```
 
 > **Setting up a new host end to end?** See the
@@ -410,7 +410,7 @@ bring-up (`smd bringup dasi2 --with-optional`) or one at a time
 | Component | What it does | Repo |
 |-----------|-------------|------|
 | **igmp-querier** | IGMPv2 querier daemon — keeps multicast streams alive on LANs without a router | [HamSCI/igmp-querier](https://github.com/HamSCI/igmp-querier) |
-| **rac** | Remote Access Channel — frpc reverse tunnel to gw2.wsprdaemon.org for admin SSH/web behind NAT | [HamSCI/rac](https://github.com/HamSCI/rac) |
+| **sigmond-rac** | Remote Access Channel — frpc reverse tunnel to gw2.wsprdaemon.org for admin SSH/web behind NAT | [HamSCI/sigmond-rac](https://github.com/HamSCI/sigmond-rac) |
 | **gpsdo-monitor** | Leo Bodnar GPSDO health monitor + mDNS advertiser | [HamSCI/gpsdo-monitor](https://github.com/HamSCI/gpsdo-monitor) |
 
 The RF clients use [ka9q-python](https://github.com/HamSCI/ka9q-python)

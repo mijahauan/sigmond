@@ -1023,7 +1023,7 @@ def rule_secrets(view: SystemView) -> RuleResult:
             problems.append(f'earthdata-netrc: {p}')
             affected.append(str(_SECRET_EARTHDATA))
 
-    rac_on = view.is_enabled('rac')
+    rac_on = view.is_enabled('sigmond-rac')
     if rac_on and not _SECRET_FRPC.exists():
         problems.append('rac enabled but /etc/sigmond/frpc.toml is missing')
         affected.append(str(_SECRET_FRPC))

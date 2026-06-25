@@ -747,9 +747,9 @@ done
 # gw2 assignment from the WsprDaemon admin).  Belongs on every install so a
 # NAT'd station is reachable for support even before the station clients come up.
 [[ -f /etc/sigmond/coordination.env ]] && source /etc/sigmond/coordination.env
-if [[ -x /opt/git/sigmond/rac/install.sh ]]; then
+if [[ -x /opt/git/sigmond/sigmond-rac/install.sh ]]; then
     info "Installing RAC (remote access channel)…"
-    if $SUDO env STATION_CALL="${STATION_CALL:-}" SIGMOND_INSTANCE="${SIGMOND_INSTANCE:-}"             bash /opt/git/sigmond/rac/install.sh; then
+    if $SUDO env STATION_CALL="${STATION_CALL:-}" SIGMOND_INSTANCE="${SIGMOND_INSTANCE:-}"             bash /opt/git/sigmond/sigmond-rac/install.sh; then
         ok "  RAC installed (inert until configured with the gw2 assignment)"
     else
         warn "  RAC install failed (non-fatal)"

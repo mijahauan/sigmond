@@ -202,13 +202,13 @@ requires        = []
 install_script  = "/opt/git/sigmond/igmp-querier/install.sh"
 start_priority  = 0                                   # multicast querier: up before clients subscribe
 
-[client.rac]
+[client.sigmond-rac]
 kind            = "infra"
 description     = "Remote Access Channel — frpc reverse tunnel to gw2.wsprdaemon.org for admin SSH/web behind NAT"
 repo            = "https://github.com/HamSCI/sigmond-rac"
 uses            = []
 requires        = []
-install_script  = "/opt/git/sigmond/rac/install.sh"
+install_script  = "/opt/git/sigmond/sigmond-rac/install.sh"
 start_priority  = 0                                   # admin access: up early so a broken install is reachable
 
 # ---------------------------------------------------------------------------

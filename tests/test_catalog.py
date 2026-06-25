@@ -34,7 +34,7 @@ class TestLoadCatalog:
             'wspr-recorder', 'psk-recorder', 'hf-timestd',
             'hfdl-recorder', 'codar-sounder', 'hf-tec', 'meteor-scatter',
             'mag-recorder', 'hs-uploader', 'callhash',
-            'gpsdo-monitor', 'igmp-querier', 'rac',
+            'gpsdo-monitor', 'igmp-querier', 'sigmond-rac',
         }
         missing = expected - set(entries.keys())
         assert not missing, f'catalog missing expected entries: {missing}'
