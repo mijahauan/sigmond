@@ -146,13 +146,16 @@ line falls:
 Be honest about what is *named* but not yet *specified*. These are the
 negotiation targets, not finished surfaces:
 
-- **The heartbeat.** Items #19, #20, #33, #39 all assume a station→server
-  heartbeat carrying health/availability and (for #19) accepting
-  requests. Today's interface is *upload-only* (push). There is no
-  defined heartbeat payload or request channel. If the network wants
-  #19's "request Level-0 on next heartbeat," **this is the missing
-  interface to design first.** Natural sigmond source: contract
-  `inventory --json`.
+- **The heartbeat.** The board's network-health query, station-availability
+  view, down-alerts, and "request Level-0 on next heartbeat" items all
+  assume a station→server heartbeat carrying health/availability and
+  accepting requests. Today's interface is *upload-only* (push). **This
+  is now specified** as a concrete proposal in
+  [PSWS-HEARTBEAT-SPEC.md](PSWS-HEARTBEAT-SPEC.md) — a station-level
+  roll-up of the existing `inventory --json` contract, reusing the PSWS
+  identity, with an optional response channel for `level0_pull`. It is
+  the first request/response widening of this boundary; the server side
+  is UA's to build.
 - **Registration metadata.** #25 covers keys today; the *metadata*
   half (station capabilities, instrument list, PII-compliant location
   per #10) is not yet a defined payload.
