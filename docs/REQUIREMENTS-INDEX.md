@@ -28,20 +28,20 @@ maturity fingerprint: mostly `[DOC]/[CODE]✅` = mature-but-was-undocumented; lo
 | **sigmond** | `SIG` | overseer | Mature | [sigmond/docs/REQUIREMENTS.md](REQUIREMENTS.md) ✅ |
 | **hf-timestd** | `HFT` | client (timing authority) | Mature | [hf-timestd/docs/REQUIREMENTS.md](https://github.com/HamSCI/hf-timestd/blob/main/docs/REQUIREMENTS.md) ✅ |
 | **superdarn-sounder** | `SDS` | client | Early | [superdarn-sounder/docs/REQUIREMENTS.md](https://github.com/HamSCI/superdarn-sounder/blob/main/docs/REQUIREMENTS.md) ✅ |
-| **wspr-recorder** | `WSP` | client | Mature | [wspr-recorder/docs/REQUIREMENTS.md](https://github.com/HamSCI/wspr-recorder/blob/main/docs/REQUIREMENTS.md) |
-| **psk-recorder** | `PSK` | client | Mature | [psk-recorder/docs/REQUIREMENTS.md](https://github.com/HamSCI/psk-recorder/blob/main/docs/REQUIREMENTS.md) |
-| **mag-recorder** | `MAG` | client (non-radiod) | Active | [mag-recorder/docs/REQUIREMENTS.md](https://github.com/HamSCI/mag-recorder/blob/main/docs/REQUIREMENTS.md) |
-| **codar-sounder** | `CDR` | client | Active | [codar-sounder/docs/REQUIREMENTS.md](https://github.com/HamSCI/codar-sounder/blob/main/docs/REQUIREMENTS.md) |
-| **hfdl-recorder** | `HFD` | client | Active | [hfdl-recorder/docs/REQUIREMENTS.md](https://github.com/HamSCI/hfdl-recorder/blob/main/docs/REQUIREMENTS.md) |
-| **hf-tec** | `TEC` | client | Early | [hf-tec/docs/REQUIREMENTS.md](https://github.com/HamSCI/hf-tec/blob/main/docs/REQUIREMENTS.md) |
-| **meteor-scatter** | `MTS` | client | Active | [meteor-scatter/docs/REQUIREMENTS.md](https://github.com/HamSCI/meteor-scatter/blob/main/docs/REQUIREMENTS.md) |
-| **ka9q-python** | `KQP` | library | Mature | [ka9q-python/docs/REQUIREMENTS.md](https://github.com/HamSCI/ka9q-python/blob/main/docs/REQUIREMENTS.md) |
-| **hamsci-dsp** | `DSP` | library | Active | [hamsci-dsp/docs/REQUIREMENTS.md](https://github.com/HamSCI/hamsci-dsp/blob/main/docs/REQUIREMENTS.md) |
-| **hs-uploader** | `HSU` | library | Active | [hs-uploader/docs/REQUIREMENTS.md](https://github.com/HamSCI/hs-uploader/blob/main/docs/REQUIREMENTS.md) |
-| **callhash** | `CLH` | library | Mature | [callhash/docs/REQUIREMENTS.md](https://github.com/HamSCI/callhash/blob/main/docs/REQUIREMENTS.md) |
-| **gpsdo-monitor** | `GDM` | infra | Active | [gpsdo-monitor/docs/REQUIREMENTS.md](https://github.com/HamSCI/gpsdo-monitor/blob/main/docs/REQUIREMENTS.md) |
-| **igmp-querier** | `IGQ` | infra | Stub/Infra | [igmp-querier/docs/REQUIREMENTS.md](https://github.com/HamSCI/igmp-querier/blob/main/docs/REQUIREMENTS.md) |
-| **sigmond-rac** | `RAC` | infra | Stub/Infra | [sigmond-rac/docs/REQUIREMENTS.md](https://github.com/HamSCI/sigmond-rac/blob/main/docs/REQUIREMENTS.md) |
+| **wspr-recorder** | `WSP` | client | Mature | [wspr-recorder/docs/REQUIREMENTS.md](https://github.com/HamSCI/wspr-recorder/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **psk-recorder** | `PSK` | client | Mature | [psk-recorder/docs/REQUIREMENTS.md](https://github.com/HamSCI/psk-recorder/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **mag-recorder** | `MAG` | client (non-radiod) | Active | [mag-recorder/docs/REQUIREMENTS.md](https://github.com/HamSCI/mag-recorder/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **codar-sounder** | `CDR` | client | Active | [codar-sounder/docs/REQUIREMENTS.md](https://github.com/HamSCI/codar-sounder/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **hfdl-recorder** | `HFD` | client | Active | [hfdl-recorder/docs/REQUIREMENTS.md](https://github.com/HamSCI/hfdl-recorder/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **hf-tec** | `TEC` | client | Early | [hf-tec/docs/REQUIREMENTS.md](https://github.com/HamSCI/hf-tec/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **meteor-scatter** | `MTS` | client | Active | [meteor-scatter/docs/REQUIREMENTS.md](https://github.com/HamSCI/meteor-scatter/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **ka9q-python** | `KQP` | library | Mature | [ka9q-python/docs/REQUIREMENTS.md](https://github.com/HamSCI/ka9q-python/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **hamsci-dsp** | `DSP` | library | Active | [hamsci-dsp/docs/REQUIREMENTS.md](https://github.com/HamSCI/hamsci-dsp/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **hs-uploader** | `HSU` | library | Active | [hs-uploader/docs/REQUIREMENTS.md](https://github.com/HamSCI/hs-uploader/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **callhash** | `CLH` | library | Mature | [callhash/docs/REQUIREMENTS.md](https://github.com/HamSCI/callhash/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **gpsdo-monitor** | `GDM` | infra | Active | [gpsdo-monitor/docs/REQUIREMENTS.md](https://github.com/HamSCI/gpsdo-monitor/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **igmp-querier** | `IGQ` | infra | Stub/Infra | [igmp-querier/docs/REQUIREMENTS.md](https://github.com/HamSCI/igmp-querier/blob/main/docs/REQUIREMENTS.md) ✅ |
+| **sigmond-rac** | `RAC` | infra | Stub/Infra | [sigmond-rac/docs/REQUIREMENTS.md](https://github.com/HamSCI/sigmond-rac/blob/main/docs/REQUIREMENTS.md) ✅ |
 
 > Upstream/vendored C projects (`ka9q-radio`, `ka9q-web`, `onion`, `ft8_lib`) are
 > out of scope for suite requirements docs — their requirements live with their

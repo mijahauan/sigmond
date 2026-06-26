@@ -1,5 +1,13 @@
 # HamSCI Client Contract
 
+> **Role in the requirements framework.** This contract IS the suite's
+> **interface-requirements specification** — the single authoritative
+> statement of the sigmond↔component seam. Each component's
+> `docs/REQUIREMENTS.md` (indexed in [REQUIREMENTS-INDEX.md](REQUIREMENTS-INDEX.md))
+> specifies that component's *domain* requirements and **references** this
+> contract for its *integration* surface rather than restating it. Method,
+> provenance/status tags, and IDs: [REQUIREMENTS-TEMPLATE.md](REQUIREMENTS-TEMPLATE.md).
+
 **Version:** 0.8
 **Status:** Adopted. First full v0.2 implementation is `hf-timestd`
 v7.0.0 — see §9.  First greenfield v0.3 implementation is
