@@ -20,7 +20,8 @@ def _healthy():
             'chrony_active': True, 'sources': t.parse_sources(SOURCES),
             'tracking': {'stratum': '1', 'ref': 'PPS'},
             'metrology': {'expected': 9, 'running': 9},
-            'radiod': {'fresh': True, 'lag_s': 1.0, 'instance': 'radiod@test.service'}}
+            'radiod': {'fresh': True, 'lag_s': 1.0, 'instance': 'radiod@test.service'},
+            'ring_alarm': {'fresh': True, 'present': True, 'ok': True, 'failed': []}}
 
 
 def test_parse_sources():
@@ -135,7 +136,7 @@ def test_assess_radiod_stale_status_never_acts():
 
 
 def test_reconcile_radiod_slide_restarts_radiod(monkeypatch):
-    monkeypatch.setattr(t, '_read_restart_state', lambda: {})   # no cooldown
+    monkeypatch.setattr(t, '_read_restart_state', lambda path: {})   # no cooldown
     f = _healthy(); f['radiod'] = _radiod(lag=5510.0)
     acts = t.reconcile(f, dry_run=True, run=_ok_run)
     assert any('would restart radiod@test.service' in a for a in acts)
@@ -164,3 +165,62 @@ def test_radiod_restart_decision_escalates_after_cap():
 def test_radiod_restart_decision_no_instance():
     d, _ = t.radiod_restart_decision({}, None, now=10_000.0)
     assert d == 'no-instance'
+
+
+# --- hot-ring ownership alarm + guarded recovery ---------------------------
+
+def test_ring_alarm_facts_healthy():
+    import datetime as _dt
+    wall = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    txt = json.dumps({'timestamp': wall.isoformat(),
+                      'ring_alarm': {'ok': True, 'failed_channels': {}}})
+    f = t.ring_alarm_facts(txt, now=wall.timestamp() + 5)
+    assert f['present'] and f['fresh'] and f['ok'] and f['failed'] == []
+
+
+def test_ring_alarm_facts_foreign_owned():
+    import datetime as _dt
+    wall = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    txt = json.dumps({'timestamp': wall.isoformat(),
+                      'ring_alarm': {'ok': False,
+                                     'failed_channels': {'SHARED_10000': 'foreign-owned-shm'}}})
+    f = t.ring_alarm_facts(txt, now=wall.timestamp() + 5)
+    assert f['present'] and not f['ok'] and f['failed'] == ['SHARED_10000']
+
+
+def test_ring_alarm_facts_absent_field_is_not_present():
+    import datetime as _dt
+    wall = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    txt = json.dumps({'timestamp': wall.isoformat()})   # older recorder, no ring_alarm
+    f = t.ring_alarm_facts(txt, now=wall.timestamp() + 5)
+    assert f['present'] is False and f['ok'] is True
+
+
+def test_assess_ring_foreign_owned_fails_with_recover_action():
+    f = _healthy()
+    f['ring_alarm'] = {'fresh': True, 'present': True, 'ok': False, 'failed': ['SHARED_10000']}
+    link = next(l for l in t.assess(f) if l.name == 'ring-shm')
+    assert link.status == 'fail' and link.action == 'recover-rings'
+
+
+def test_assess_ring_absent_field_emits_no_link():
+    f = _healthy()
+    f.pop('ring_alarm', None)
+    assert not any(l.name == 'ring-shm' for l in t.assess(f))
+
+
+def test_assess_ring_stale_status_never_acts():
+    f = _healthy()
+    f['ring_alarm'] = {'fresh': False, 'present': True, 'ok': False, 'failed': ['x']}
+    link = next(l for l in t.assess(f) if l.name == 'ring-shm')
+    assert link.status == 'warn' and link.action == ''
+
+
+def test_reconcile_ring_alarm_restarts_recorder_only(monkeypatch):
+    monkeypatch.setattr(t, '_read_restart_state', lambda path: {})   # no cooldown
+    f = _healthy()
+    f['ring_alarm'] = {'fresh': True, 'present': True, 'ok': False, 'failed': ['SHARED_10000']}
+    acts = t.reconcile(f, dry_run=True, run=_ok_run)
+    assert any('would restart timestd-core-recorder.service' in a for a in acts)
+    assert not any('radiod' in a for a in acts)           # own component, not the shared SDR
+    assert not any('restart chrony' in a for a in acts)

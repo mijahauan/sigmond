@@ -17,6 +17,11 @@ scapegoat-a-shared-dep anti-pattern.  The restart is guarded: it fires only when
 recorder's status file is fresh (recorder alive) and the measured lag exceeds the
 recorder's own stale-drop limit, and it is rate-limited by a cooldown + an
 escalation cap (after which it suspends and asks for a human).
+
+It also watches the recorder's `ring_alarm` (hot-ring ownership) and, on a
+foreign-owned-shm alarm, restarts the recorder — an hf-timestd OWN component,
+so fully within the own-only rule — whose root ExecStartPre clears the stale
+segment.  Same cooldown/escalation guard.
 """
 from __future__ import annotations
 
@@ -46,6 +51,11 @@ RECORDER_STATUS_FRESH_S = 120.0    # only trust the lag if the status file is th
 RADIOD_RESTART_STATE = Path('/run/sigmond/radiod-restart.json')
 RADIOD_RESTART_COOLDOWN_S = 600.0  # ≥10 min between radiod restarts (it needs time to re-sync)
 RADIOD_RESTART_MAX_PER_HOUR = 3    # after this many in an hour: suspend + escalate to a human
+# The recorder also publishes a `ring_alarm` field when a channel's hot ring
+# (the metrology feed) is unavailable — typically a foreign-owned stale SysV
+# segment it cannot reclaim.  Recovery = restart the recorder, whose root
+# ExecStartPre `clean-stale-rings` removes the foreign segment.
+RING_RECOVER_STATE = Path('/run/sigmond/ring-recover.json')
 
 
 @dataclass
@@ -133,6 +143,27 @@ def radiod_rtp_facts(status_text: str, now: float) -> dict:
                and c.get('last_sample_time') > 0]
     lag = (wall - min(samples)) if samples else None
     return {'fresh': fresh, 'lag_s': lag, 'file_age_s': file_age}
+
+
+def ring_alarm_facts(status_text: str, now: float) -> dict:
+    """Parse core-recorder-status.json -> hot-ring ownership/health.
+
+    Returns {'fresh': bool, 'present': bool, 'ok': bool, 'failed': [chan,...]}.
+    ``present`` is False for an older recorder that doesn't emit ``ring_alarm``
+    (so we never act on its absence); ``fresh`` mirrors radiod_rtp_facts.
+    """
+    try:
+        d = json.loads(status_text)
+    except (ValueError, TypeError):
+        return {'fresh': False, 'present': False, 'ok': True, 'failed': []}
+    wall = _parse_iso_epoch(d.get('timestamp'))
+    fresh = wall is not None and 0 <= (now - wall) < RECORDER_STATUS_FRESH_S
+    alarm = d.get('ring_alarm')
+    if not isinstance(alarm, dict):
+        return {'fresh': fresh, 'present': False, 'ok': True, 'failed': []}
+    failed = sorted((alarm.get('failed_channels') or {}).keys())
+    return {'fresh': fresh, 'present': True,
+            'ok': bool(alarm.get('ok', True)) and not failed, 'failed': failed}
 
 
 def radiod_restart_decision(state: dict, instance: Optional[str], now: float) -> tuple:
@@ -230,6 +261,21 @@ def assess(facts: dict) -> list:
         links.append(Link('radiod-rtp', 'warn', f'radiod RTP {lag:.0f}s behind UTC (watching)', ''))
     else:
         links.append(Link('radiod-rtp', 'ok', f'radiod RTP {lag:.0f}s behind UTC'))
+
+    # Hot-ring ownership: a foreign-owned stale SysV segment starves a
+    # channel's metrology feed (frozen L1).  Only act when the recorder is
+    # fresh and explicitly reports the alarm (older recorders omit it).
+    ra = facts.get('ring_alarm', {})
+    if not ra.get('present'):
+        pass  # field absent (older recorder) — nothing to assert
+    elif not ra.get('fresh'):
+        links.append(Link('ring-shm', 'warn', 'recorder status stale — ring health unknown', ''))
+    elif not ra.get('ok'):
+        links.append(Link('ring-shm', 'fail',
+                          f"hot ring unavailable for {', '.join(ra.get('failed', [])) or '?'} "
+                          f"(foreign-owned shm) — metrology starving", 'recover-rings'))
+    else:
+        links.append(Link('ring-shm', 'ok', 'hot rings owned + healthy'))
     return links
 
 
@@ -271,8 +317,10 @@ def gather_facts(run: Callable = _run, quick: bool = False) -> dict:
         status_text = RECORDER_STATUS_FILE.read_text()
     except OSError:
         status_text = ''
-    f['radiod'] = radiod_rtp_facts(status_text, time.time())
+    now = time.time()
+    f['radiod'] = radiod_rtp_facts(status_text, now)
     f['radiod']['instance'] = _radiod_instance(run)
+    f['ring_alarm'] = ring_alarm_facts(status_text, now)
     return f
 
 
@@ -287,17 +335,17 @@ def _radiod_instance(run) -> Optional[str]:
     return None
 
 
-def _read_restart_state() -> dict:
+def _read_restart_state(path: Path) -> dict:
     try:
-        return json.loads(RADIOD_RESTART_STATE.read_text())
+        return json.loads(path.read_text())
     except (OSError, ValueError):
         return {}
 
 
-def _write_restart_state(state: dict) -> None:
+def _write_restart_state(path: Path, state: dict) -> None:
     try:
-        RADIOD_RESTART_STATE.parent.mkdir(parents=True, exist_ok=True)
-        RADIOD_RESTART_STATE.write_text(json.dumps(state))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state))
     except OSError:
         pass
 
@@ -311,7 +359,8 @@ def _restart_radiod(facts, dry_run, run) -> str:
     """
     instance = facts.get('radiod', {}).get('instance')
     now = time.time()
-    decision, detail = radiod_restart_decision(_read_restart_state(), instance, now)
+    decision, detail = radiod_restart_decision(
+        _read_restart_state(RADIOD_RESTART_STATE), instance, now)
     if decision == 'no-instance':
         return f'radiod RTP behind UTC but {detail}'
     if decision == 'cooldown':
@@ -323,11 +372,44 @@ def _restart_radiod(facts, dry_run, run) -> str:
     r = run(['systemctl', 'restart', instance])
     succeeded = getattr(r, 'returncode', 1) == 0
     if succeeded:
-        state = _read_restart_state()
+        state = _read_restart_state(RADIOD_RESTART_STATE)
         history = [t for t in state.get('history', []) if now - t < 3600]
         history.append(now)
-        _write_restart_state({'last_restart': now, 'history': history})
+        _write_restart_state(RADIOD_RESTART_STATE, {'last_restart': now, 'history': history})
     return (f'restart {instance} (radiod RTP behind UTC): '
+            + ('ok' if succeeded else 'FAILED: ' + (getattr(r, 'stderr', '') or '').strip()))
+
+
+def _recover_rings(facts, dry_run, run) -> str:
+    """Guarded recovery of the core-recorder hot rings on a ring-ownership alarm.
+
+    A foreign-owned SysV ring segment (e.g. a stale `radio`-owned segment at an
+    hf-timestd ring key) can only be removed by its owner or root, so the
+    timestd recorder cannot reclaim it and its metrology consumer starves.
+    Restarting the recorder runs its root ExecStartPre `clean-stale-rings`,
+    which clears the foreign segment so the recorder recreates a self-owned
+    ring.  Cooldown + escalation-capped, same as the radiod-rtp guard.
+    """
+    unit = 'timestd-core-recorder.service'
+    now = time.time()
+    decision, detail = radiod_restart_decision(
+        _read_restart_state(RING_RECOVER_STATE), unit, now)
+    chans = ', '.join(sorted(facts.get('ring_alarm', {}).get('failed', []))) or 'recorder'
+    if decision == 'cooldown':
+        return f'ring ownership alarm ({chans}) — {detail}; not restarting again'
+    if decision == 'escalate':
+        return (f'ring ownership alarm ({chans}) PERSISTS — {detail}; MANUAL '
+                f'INTERVENTION needed (check `ipcs -m` for foreign-owned ring keys)')
+    if dry_run:
+        return f'(dry-run) would restart {unit} to clean foreign rings ({chans})'
+    r = run(['systemctl', 'restart', unit])
+    succeeded = getattr(r, 'returncode', 1) == 0
+    if succeeded:
+        state = _read_restart_state(RING_RECOVER_STATE)
+        history = [t for t in state.get('history', []) if now - t < 3600]
+        history.append(now)
+        _write_restart_state(RING_RECOVER_STATE, {'last_restart': now, 'history': history})
+    return (f'restart {unit} to clean foreign rings ({chans}): '
             + ('ok' if succeeded else 'FAILED: ' + (getattr(r, 'stderr', '') or '').strip()))
 
 
@@ -371,6 +453,9 @@ def reconcile(facts: dict, *, dry_run: bool, run: Callable = _run) -> list:
             continue
         if rem == 'restart-radiod':
             actions.append(_restart_radiod(facts, dry_run, run))
+            continue
+        if rem == 'recover-rings':
+            actions.append(_recover_rings(facts, dry_run, run))
             continue
         cmd, desc = _REMEDIES[rem]
         if dry_run:
