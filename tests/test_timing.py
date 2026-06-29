@@ -224,3 +224,54 @@ def test_reconcile_ring_alarm_restarts_recorder_only(monkeypatch):
     assert any('would restart timestd-core-recorder.service' in a for a in acts)
     assert not any('radiod' in a for a in acts)           # own component, not the shared SDR
     assert not any('restart chrony' in a for a in acts)
+
+
+# --- radiod RTP↔UTC thrash watchdog (radiod-timing link) -------------------
+
+def _incident(verdict='GPS_SOURCE_BAD_EPOCH', severity='fail', ts='2026-06-29T18:00:00+00:00'):
+    import json
+    return json.dumps({'ts': ts, 'verdict': verdict, 'severity': severity,
+                       'detail': 'gpsd reports an epoch 3658 days off', 'delta_sec': -489.0})
+
+
+def test_radiod_timing_facts_parses_incident():
+    ep = t._parse_iso_epoch('2026-06-29T18:00:00+00:00')
+    f = t.radiod_timing_facts(_incident(), now=ep + 120.0)
+    assert f['present'] and f['verdict'] == 'GPS_SOURCE_BAD_EPOCH'
+    assert f['severity'] == 'fail' and abs(f['age_s'] - 120.0) < 1e-6
+
+
+def test_radiod_timing_facts_bad_json():
+    assert t.radiod_timing_facts('not json', now=1.0) == {'present': False}
+
+
+def test_assess_recent_fail_incident_is_fail():
+    f = _healthy()
+    ep = t._parse_iso_epoch('2026-06-29T18:00:00+00:00')
+    f['radiod_timing'] = t.radiod_timing_facts(_incident(severity='fail'), now=ep + 300.0)
+    link = next(l for l in t.assess(f) if l.name == 'radiod-timing')
+    assert link.status == 'fail' and 'GPS_SOURCE_BAD_EPOCH' in link.detail
+
+
+def test_assess_warn_incident_is_warn():
+    f = _healthy()
+    ep = t._parse_iso_epoch('2026-06-29T18:00:00+00:00')
+    f['radiod_timing'] = t.radiod_timing_facts(
+        _incident(verdict='MAPPING_JUMP', severity='warn'), now=ep + 60.0)
+    link = next(l for l in t.assess(f) if l.name == 'radiod-timing')
+    assert link.status == 'warn'
+
+
+def test_assess_old_incident_is_ok():
+    f = _healthy()
+    ep = t._parse_iso_epoch('2026-06-29T18:00:00+00:00')
+    # > WATCHDOG_INCIDENT_RECENT_S old → no longer surfaced
+    f['radiod_timing'] = t.radiod_timing_facts(_incident(), now=ep + 7200.0)
+    link = next(l for l in t.assess(f) if l.name == 'radiod-timing')
+    assert link.status == 'ok'
+
+
+def test_assess_no_watchdog_file_is_ok():
+    f = _healthy()  # no 'radiod_timing' key at all (watchdog never tripped)
+    link = next(l for l in t.assess(f) if l.name == 'radiod-timing')
+    assert link.status == 'ok'

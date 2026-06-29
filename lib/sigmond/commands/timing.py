@@ -56,6 +56,12 @@ RADIOD_RESTART_MAX_PER_HOUR = 3    # after this many in an hour: suspend + escal
 # segment it cannot reclaim.  Recovery = restart the recorder, whose root
 # ExecStartPre `clean-stale-rings` removes the foreign segment.
 RING_RECOVER_STATE = Path('/run/sigmond/ring-recover.json')
+# hf-timestd's RadiodTimingWatchdog publishes the latest GROSS RTP↔UTC mapping
+# jump here (a >2 s thrash, distinct from the ordinary sub-second slide).  The
+# lag check above can't see a thrash — the mapping is momentarily self-consistent
+# so `last_sample_time` stays current — so this is a separate, complementary link.
+WATCHDOG_STATUS_FILE = Path('/var/lib/timestd/status/radiod-timing-watchdog.json')
+WATCHDOG_INCIDENT_RECENT_S = 3600.0   # surface a thrash incident for an hour after it fires
 
 
 @dataclass
@@ -143,6 +149,29 @@ def radiod_rtp_facts(status_text: str, now: float) -> dict:
                and c.get('last_sample_time') > 0]
     lag = (wall - min(samples)) if samples else None
     return {'fresh': fresh, 'lag_s': lag, 'file_age_s': file_age}
+
+
+def radiod_timing_facts(status_text: str, now: float) -> dict:
+    """Parse radiod-timing-watchdog.json -> latest gross RTP↔UTC thrash incident.
+
+    Written by hf-timestd's RadiodTimingWatchdog on a >2 s mapping jump (the
+    thrash), carrying a verdict that isolates GPS-source-bad from radiod-bad.
+    Returns {'present': bool, 'age_s': float|None, 'verdict', 'severity',
+    'detail', 'delta_sec'}.
+    """
+    try:
+        d = json.loads(status_text)
+    except (ValueError, TypeError):
+        return {'present': False}
+    epoch = _parse_iso_epoch(d.get('ts'))
+    return {
+        'present': True,
+        'age_s': (now - epoch) if epoch is not None else None,
+        'verdict': d.get('verdict'),
+        'severity': d.get('severity'),
+        'detail': d.get('detail', ''),
+        'delta_sec': d.get('delta_sec'),
+    }
 
 
 def ring_alarm_facts(status_text: str, now: float) -> dict:
@@ -262,6 +291,20 @@ def assess(facts: dict) -> list:
     else:
         links.append(Link('radiod-rtp', 'ok', f'radiod RTP {lag:.0f}s behind UTC'))
 
+    # radiod RTP↔UTC THRASH watchdog (complements radiod-rtp lag above): a gross
+    # mapping jump — seconds to minutes (the 2026-06-29 outage) — that the lag
+    # check can't see because the mapping stays momentarily self-consistent.
+    # hf-timestd's watchdog captures a gpsd/chrony evidence bundle + a
+    # GPS-source-vs-radiod verdict on each episode; we surface it for an hour.
+    rt = facts.get('radiod_timing', {})
+    rt_age = rt.get('age_s')
+    if rt.get('present') and rt_age is not None and rt_age <= WATCHDOG_INCIDENT_RECENT_S:
+        sev = 'fail' if rt.get('severity') == 'fail' else 'warn'
+        links.append(Link('radiod-timing', sev,
+                          f"{rt.get('verdict')} {rt_age / 60:.0f}m ago — {rt.get('detail', '')}", ''))
+    else:
+        links.append(Link('radiod-timing', 'ok', 'no recent RTP↔UTC thrash incident'))
+
     # Hot-ring ownership: a foreign-owned stale SysV segment starves a
     # channel's metrology feed (frozen L1).  Only act when the recorder is
     # fresh and explicitly reports the alarm (older recorders omit it).
@@ -321,6 +364,11 @@ def gather_facts(run: Callable = _run, quick: bool = False) -> dict:
     f['radiod'] = radiod_rtp_facts(status_text, now)
     f['radiod']['instance'] = _radiod_instance(run)
     f['ring_alarm'] = ring_alarm_facts(status_text, now)
+    try:
+        wd_text = WATCHDOG_STATUS_FILE.read_text()
+    except OSError:
+        wd_text = ''
+    f['radiod_timing'] = radiod_timing_facts(wd_text, now)
     return f
 
 
