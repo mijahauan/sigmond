@@ -187,6 +187,7 @@ def collect_pipelines(topology: Optional[Topology] = None,
     call = reporter_call(coord)
 
     pipelines: list = []
+    by_name: dict = {}
     for client in topology.enabled_components():
         deploy = find_deploy_toml(client)
         if not deploy:
@@ -206,6 +207,17 @@ def collect_pipelines(topology: Optional[Topology] = None,
                     "unresolved identity: %s",
                     name, client, ", ".join(sorted(missing)))
                 continue
+            # Dedup by name: two clients may declare the SAME shared pipeline
+            # (e.g. psk-recorder + meteor-scatter both declare psk-pskreporter
+            # because MSK144 rides the psk.spots stream).  Emit it once; warn
+            # if the resolved bodies actually differ (keep the first).
+            if name in by_name:
+                if rendered != by_name[name]:
+                    logger.warning(
+                        "uploader-manifest: pipeline %s declared twice with "
+                        "differing bodies (%s); keeping the first", name, client)
+                continue
+            by_name[name] = rendered
             pipelines.append(rendered)
     return pipelines
 

@@ -171,6 +171,37 @@ name = "psws-grape-sftp:host:{station_id}"
         self.assertEqual(parsed["identity"]["station_id"], "S000418")
         self.assertEqual([p["name"] for p in parsed["pipeline"]], ["grape-psws"])
 
+    # Shared pipeline both psk-recorder and meteor-scatter declare (MSK144
+    # rides the psk.spots stream) — must dedup to exactly one.
+    SHARED = """
+[[hs_uploader.pipeline]]
+name = "psk-pskreporter"
+batch_limit = 500
+[hs_uploader.pipeline.source]
+type = "sqlite"
+database = "psk"
+table = "spots"
+extra_where = [["mode", "IN", ["ft8", "ft4", "msk144"]]]
+[hs_uploader.pipeline.transport]
+type = "pskreporter"
+decoding_software = "psk-recorder/0.1 (radiod={radiod_status})"
+"""
+
+    def test_dedup_shared_pipeline_by_name(self):
+        deploy = self._write_deploy(self.SHARED)
+        # both clients resolve to identical declarations
+        with mock.patch.object(um, "find_deploy_toml", return_value=deploy), \
+             mock.patch.object(um, "list_instances", return_value=[]):
+            pls = um.collect_pipelines(
+                _Topo(["psk-recorder", "meteor-scatter"]), _coord())
+        self.assertEqual([p["name"] for p in pls], ["psk-pskreporter"])
+        self.assertEqual(
+            pls[0]["source"]["extra_where"],
+            [["mode", "IN", ["ft8", "ft4", "msk144"]]])
+        # {radiod_status} substituted from coordination's radiod
+        self.assertIn("sigma-status.local",
+                      pls[0]["transport"]["decoding_software"])
+
 
 if __name__ == "__main__":
     unittest.main()
