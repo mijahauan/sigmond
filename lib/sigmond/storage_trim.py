@@ -83,6 +83,11 @@ class RetentionTooShort(ValueError):
 #   wspr.spots  — WSPR spots from wspr-recorder.  Longer (24h) because
 #                 the verifier's cross-server diff currently needs that
 #                 window to catch wd20-style backlog catch-ups.
+#   superdarn.detections — no hs-uploader transport wired yet (VT egress
+#                 pending), so rows queue with nothing to drain them.
+#                 30 days bounds the growth; when a transport does land
+#                 it will start_at="now", so aged rows have archive
+#                 value only, never delivery value.
 #   timestd.events / hfdl.spots — no external consumer wired today; the
 #                 sink is the archive.  Operators choose how long to
 #                 keep before truncating.
@@ -90,12 +95,14 @@ _DEFAULT_RETENTION_MINUTES: Dict[Tuple[str, str], int] = {
     ("psk",  "spots"):  60,
     ("wspr", "spots"):  24 * 60,
     ("wspr", "noise"):  24 * 60,
+    ("superdarn", "detections"):  30 * 24 * 60,
 }
 
 _ENV_OVERRIDES: Dict[Tuple[str, str], str] = {
     ("psk",  "spots"):  "PSK_RETENTION_MIN",
     ("wspr", "spots"):  "WSPR_RETENTION_MIN",
     ("wspr", "noise"):  "WSPR_RETENTION_MIN",
+    ("superdarn", "detections"):  "SUPERDARN_RETENTION_MIN",
 }
 
 

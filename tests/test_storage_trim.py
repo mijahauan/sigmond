@@ -409,6 +409,9 @@ class TestPolicyFromEnv(unittest.TestCase):
                          24 * 60 * 60)        # default 24 h
         self.assertEqual(by_target[("wspr", "noise")].max_age_seconds,
                          24 * 60 * 60)
+        self.assertEqual(
+            by_target[("superdarn", "detections")].max_age_seconds,
+            30 * 24 * 60 * 60)                # default 30 days
         for p in policies:
             self.assertEqual(p.source, "default")
 
@@ -440,6 +443,13 @@ class TestPolicyFromEnv(unittest.TestCase):
                == ("psk", "spots")][0]
         # 0 means "use default" (60 min), which is above the floor.
         self.assertEqual(psk.max_age_seconds, 60 * 60)
+
+    def test_superdarn_env_override_applies(self):
+        policies = policy_from_env(env={"SUPERDARN_RETENTION_MIN": "1440"})
+        sd = [p for p in policies if (p.target_db, p.target_table)
+              == ("superdarn", "detections")][0]
+        self.assertEqual(sd.max_age_seconds, 1440 * 60)
+        self.assertEqual(sd.source, "env:SUPERDARN_RETENTION_MIN")
 
     def test_garbage_env_falls_back_to_default(self):
         policies = policy_from_env(env={"PSK_RETENTION_MIN": "tomorrow"})
