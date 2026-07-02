@@ -14531,6 +14531,132 @@ def cmd_personalize(args) -> int:
     return 0
 
 
+def cmd_capture_prep(args) -> int:
+    """`smd admin capture-prep` — the inverse of personalize: strip this
+    VM of everything per-site so it's fit to capture as the golden image
+    (PROVISIONING-INPUTS.md §9).  Plan-first; --yes executes."""
+    import shutil as _shutil
+
+    from sigmond.capture_prep import build_capture_plan
+    from sigmond.instance import list_instances
+
+    will_execute = bool(getattr(args, 'yes', False))
+    keep_data = bool(getattr(args, 'keep_data', False))
+
+    try:
+        instances = [(i.client, i.reporter_id,
+                      str(i.paths.config) if i.has_config else None,
+                      str(i.paths.env) if i.has_env else None)
+                     for i in list_instances()]
+    except Exception as e:                                # noqa: BLE001
+        _warn(f'could not enumerate per-instance configs: {e}')
+        instances = []
+
+    plan = build_capture_plan(keep_data=keep_data, instances=instances)
+
+    _heading('capture-prep (strip per-site state before golden-image capture)')
+    _info('services will be STOPPED first; the capture gate runs at the end.')
+    print()
+    print('  plan:')
+    for a in plan:
+        mark = '…' if a.kind == 'note' else '✂'
+        print(f'    {mark} {a.label}')
+    print()
+
+    if not will_execute:
+        _info('plan only — re-run with --yes to execute '
+              '(this DESTROYS per-site identity, secrets and data on this VM)')
+        return 0
+
+    if _need_root('capture-prep'):
+        return 1
+
+    # Quiet the disk: no recorder mid-write during the wipe or capture.
+    _info('stopping managed services…')
+    _run_smd('stop')
+    subprocess.run(['systemctl', 'stop', 'hs-uploader.service'], check=False)
+
+    failures = 0
+    for a in plan:
+        try:
+            if a.kind == 'remove':
+                Path(a.payload).unlink(missing_ok=True)
+            elif a.kind == 'clear-tree':
+                d = Path(a.payload)
+                for child in d.iterdir():
+                    if child.is_dir() and not child.is_symlink():
+                        _shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink(missing_ok=True)
+            elif a.kind == 'truncate':
+                Path(a.payload).write_text('')
+            elif a.kind == 'reset-template':
+                from sigmond.site_profile import TEMPLATE
+                Path(a.payload).write_text(TEMPLATE)
+            elif a.kind == 'clear-coordination':
+                # write_host_identity deliberately never clears (empty
+                # args merge with current values), so drop the [host] and
+                # [station] blocks by text-splice, preserving [radiod.*]
+                # and everything else verbatim.
+                from sigmond.coordination import load_coordination, render_env
+                from sigmond.paths import COORDINATION_ENV, COORDINATION_PATH
+                if COORDINATION_PATH.exists():
+                    _lines = COORDINATION_PATH.read_text().splitlines(
+                        keepends=True)
+                    _out, _skip = [], False
+                    for _ln in _lines:
+                        _s = _ln.strip()
+                        if _s in ('[host]', '[station]'):
+                            _skip = True
+                            continue
+                        if _skip and _s.startswith('['):
+                            _skip = False
+                        if not _skip:
+                            _out.append(_ln)
+                    COORDINATION_PATH.write_text(''.join(_out))
+                COORDINATION_ENV.write_text(
+                    render_env(load_coordination(COORDINATION_PATH)))
+            elif a.kind == 'psws-placeholders':
+                from sigmond import psws
+                spec = psws.RECORDERS[a.payload]
+                if spec['config'].exists():
+                    psws._set_fields(a.payload, [
+                        ('.'.join(spec['station'][:-1]),
+                         spec['station'][-1], '<YOUR_PSWS_STATION_ID>'),
+                    ])
+            elif a.kind == 'vacuum-journal':
+                subprocess.run(['journalctl', '--rotate'], check=False,
+                               capture_output=True)
+                subprocess.run(['journalctl', '--vacuum-time=1s'],
+                               check=False, capture_output=True)
+            elif a.kind == 'note':
+                continue
+            _ok(a.label)
+        except Exception as e:                            # noqa: BLE001
+            _err(f'{a.label}: {e}')
+            failures += 1
+
+    print()
+    _info('running the capture gate…')
+    gate_rc = _run_smd('admin', 'readiness', '--gate', 'capture')
+
+    print()
+    if failures or gate_rc != 0:
+        _err('capture-prep finished with issues — resolve the failures/'
+             'gate findings above before capturing.')
+        return 1
+    _heading('READY TO CAPTURE')
+    _info('• shut this VM down NOW:  sudo shutdown -h now')
+    _info('  (do not reboot — first boot must happen on a clone; this VM '
+          'has no machine-id/SSH host keys until personalized)')
+    _info('• on the Proxmox host, capture the template:')
+    _info('    scripts/proxmox/golden-image.sh capture <vmid> '
+          '--name dasi2-golden')
+    _info('• per new site: golden-image.sh clone, boot, then '
+          '`smd admin personalize --reset-identity --yes`')
+    return 0
+
+
 def main() -> int:
     # v2 canonical `smd admin log set-level [<client>] <level>` — pre-argparse
     # intercept because argparse can't cleanly mix a sub-verb with the
@@ -15199,6 +15325,18 @@ def main() -> int:
     p_personalize.add_argument('--force', action='store_true',
         help='repeat identity-reset even if already personalized')
 
+    # capture-prep — the inverse of personalize: strip per-site state so
+    # the VM passes `smd admin readiness --gate capture` and can be
+    # captured as the golden image (PROVISIONING-INPUTS.md §9).
+    p_capture = admin_sub.add_parser('capture-prep',
+        help='strip per-site identity/secrets/data before golden-image '
+             'capture (inverse of personalize); plan-first, --yes to execute')
+    p_capture.add_argument('--yes', action='store_true',
+        help='execute (default: plan only). DESTRUCTIVE: removes identity, '
+             'secrets and accumulated data from this VM')
+    p_capture.add_argument('--keep-data', action='store_true',
+        help='keep sink/watermark/science data (debug captures only)')
+
     # storage — local sink backend management (SQLite is now the default;
     # this verb removes leftover ClickHouse installs on migrated hosts).
     # smd admin verifier report — windowed audit of "uploaded but never
@@ -15837,6 +15975,9 @@ def main() -> int:
 
     if args.command == 'personalize':
         return cmd_personalize(args)
+
+    if args.command == 'capture-prep':
+        return cmd_capture_prep(args)
 
     if args.command == 'sources':
         sub_cmd = getattr(args, 'sources_command', None)

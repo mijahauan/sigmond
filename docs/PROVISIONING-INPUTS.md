@@ -249,15 +249,27 @@ radiod mDNS names follow); with `--reset-identity`, regenerates `/etc/machine-id
 `/etc/sigmond/.personalized` sentinel; and prints the remaining manual steps. Run
 without `--yes` to preview the plan.
 
-**Before capturing the image (on the reference host):**
-- [ ] Remove all §4 secrets (PSWS key, earthdata-netrc, RAC token).
-- [ ] Clear identity: truncate `/etc/machine-id`; remove `/etc/ssh/ssh_host_*`;
-      remove `/etc/sigmond/.personalized`.
-- [ ] Reset `site-profile.toml` to placeholders (or remove it).
-- [ ] Clear logs / data roots / FFT wisdom that are host-specific.
+**Before capturing the image (on the reference host):** this checklist is
+now IMPLEMENTED as **`smd admin capture-prep`** (plan-first; `--yes`
+executes; `--keep-data` for debug captures). It stops all managed services,
+then: removes §4 secrets + every station SSH key; resets `site-profile.toml`
+to the scaffold; clears coordination `[host]`/`[station]`; resets PSWS ids in
+the recorder configs to placeholders; removes per-instance recorder
+configs/env files (from the instance registry); clears data roots, upload
+cursors, learned callsign hashes, per-CPU FFT wisdom, logs + journal; and
+LAST wipes OS identity (truncate `/etc/machine-id`, remove SSH host keys,
+remove `.personalized`). It finishes by running
+`smd admin readiness --gate capture` as the verdict, then instructs:
+**shut down (do not reboot)** and capture on the Proxmox host with
+`scripts/proxmox/golden-image.sh capture <vmid>` (full-clone → `qm template`,
+date-stamped name). Per site: `golden-image.sh clone <template-id> <site>`
+(strips inherited hookscript/hostpci — the proxmox bootstrap re-creates them
+per host), boot, `smd admin personalize --reset-identity --yes`.
+
 - [ ] **Keep PHaRLAP baked in** — `/opt/pharlap_4.7.4` (with its DST licence
       files + `.provenance`) and the built pyLAP in the venv stay in the image
-      (decided 2026-06-14). Verify: `hf-timestd data sources` → `Raytrace: available`.
+      (decided 2026-06-14; capture-prep never touches it). Verify:
+      `hf-timestd data sources` → `Raytrace: available`.
 
 **On first boot of each clone** — `smd admin personalize --reset-identity --yes`
 does the automatable steps; the operator still:

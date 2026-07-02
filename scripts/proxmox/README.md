@@ -36,6 +36,26 @@ state.
 `/etc/sigmond/install-state.env` (mode 0600). One state value plus all
 discovered/operator-supplied parameters. Survives reboots.
 
+## Golden image (capture / clone)
+
+`golden-image.sh` — run ON the Proxmox host as root — captures a prepared
+reference VM as a Proxmox template and instantiates per-site VMs from it:
+
+```bash
+# inside the reference VM first (strips per-site state, then shut down):
+sudo smd admin capture-prep --yes && sudo shutdown -h now
+
+# on the Proxmox host:
+./golden-image.sh capture <vmid> --name dasi2-golden   # full clone -> qm template
+./golden-image.sh clone <template-id> <site-name>      # per new site
+```
+
+`clone` strips the inherited hookscript + hostpci passthrough entries —
+those are host-specific and re-created by `bootstrap.sh` from inside the
+new VM. First boot of a clone: `smd admin personalize --reset-identity
+--yes`, fill `/etc/sigmond/site-profile.toml`, `smd config render`, then
+run `bootstrap.sh`. Gate everything with `smd admin readiness`.
+
 ## Prerequisites
 
 - BIOS configured per `docs/proxmox/wsprdaemon-proxmox-bios-checklist.md`
