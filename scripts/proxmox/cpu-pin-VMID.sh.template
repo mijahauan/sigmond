@@ -20,17 +20,32 @@ VCPU_TO_PCPU=(@@VCPU_TO_PCPU@@)
 EVT_VMID=$1
 PHASE=$2
 
+# Pin a single pCPU to a single frequency: min == max.  A max-only cap is
+# a ceiling, not a floor — amd-pstate-epp + nohz_full parks an isolated
+# pCPU at scaling_min_freq under sustained load (the suppressed tick means
+# the driver never sees load, so it never boosts, even with
+# governor=performance).  See docs/proxmox CLAUDE.md + tuning doc Part 12c.
+# Writes max first then min so the kernel never sees a transient min>max
+# (which would fail the write).
+pin_freq() {
+    local cpu=$1 khz=$2 role=$3
+    local sysmax=/sys/devices/system/cpu/cpufreq/policy${cpu}/scaling_max_freq
+    local sysmin=/sys/devices/system/cpu/cpufreq/policy${cpu}/scaling_min_freq
+    if echo "$khz" > "$sysmax" 2>/dev/null \
+       && echo "$khz" > "$sysmin" 2>/dev/null; then
+        echo "cpu-cap: pCPU ${cpu} pinned at $((khz/1000)) MHz (${role})"
+    else
+        echo "cpu-cap: pCPU ${cpu} FAILED to pin at $((khz/1000)) MHz (${role})"
+    fi
+}
+
 if [ "$PHASE" = "post-start" ] && [ "$EVT_VMID" = "$VMID" ]; then
     {
         for c in "${RADIOD_CPUS[@]}"; do
-            echo "$RADIOD_FREQ_KHZ" \
-                > /sys/devices/system/cpu/cpufreq/policy${c}/scaling_max_freq \
-                && echo "cpu-cap: pCPU ${c} max=$((RADIOD_FREQ_KHZ/1000)) MHz (radiod)"
+            pin_freq "$c" "$RADIOD_FREQ_KHZ" radiod
         done
         for c in "${WORKER_CPUS[@]}"; do
-            echo "$WORKER_FREQ_KHZ" \
-                > /sys/devices/system/cpu/cpufreq/policy${c}/scaling_max_freq \
-                && echo "cpu-cap: pCPU ${c} max=$((WORKER_FREQ_KHZ/1000)) MHz (worker)"
+            pin_freq "$c" "$WORKER_FREQ_KHZ" worker
         done
     } | logger -t cpu-pin-${VMID}
 

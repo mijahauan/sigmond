@@ -370,8 +370,40 @@ EOF
 }
 
 # ─── phase: SIGMOND_INSTALLED → cleanup ───────────────────────────────────────
+install_host_rac() {
+    # Host-side Remote Access Channel: a second, independent frpc on the
+    # HYPERVISOR so the site stays reachable when the VM is down or being
+    # rebuilt (the guest RAC covers only the VM).  Inert until the operator
+    # fills /etc/sigmond/frpc-host.toml on the host (admin-assigned
+    # user/token/remotePort, distinct from the guest's).  Payload comes
+    # from the sigmond-rac checkout in the guest.  Skip with
+    # SIGMOND_SKIP_HOST_RAC=1.
+    if [[ "${SIGMOND_SKIP_HOST_RAC:-0}" = 1 ]]; then
+        info "host RAC skipped (SIGMOND_SKIP_HOST_RAC=1)"
+        return 0
+    fi
+    local rac_dir="/opt/git/sigmond/sigmond-rac"
+    if [[ ! -x "$rac_dir/install-host.sh" ]]; then
+        warn "sigmond-rac checkout not found ($rac_dir) — host RAC not installed."
+        warn "  install it later:  push $rac_dir to the host + run install-host.sh"
+        return 0
+    fi
+    info "installing host-side RAC (frpc) on ${PROXMOX_HOST:-<host>}…"
+    if tar -C "$rac_dir" -cf - install-host.sh frps-ca.crt bin config systemd \
+        | ssh_host "rm -rf /tmp/rac-host && mkdir -p /tmp/rac-host \
+                    && tar -C /tmp/rac-host -xf - \
+                    && STATION_CALL='${STATION_CALL:-}' bash /tmp/rac-host/install-host.sh \
+                    && rm -rf /tmp/rac-host"; then
+        ok "host RAC installed (inert until /etc/sigmond/frpc-host.toml is filled on the host)"
+    else
+        warn "host RAC install failed — install manually from $rac_dir/install-host.sh"
+    fi
+}
+
 phase_finalize() {
     info "Phase 4: finalizing…"
+
+    install_host_rac
 
     if [[ -f "$RESUME_UNIT_PATH" ]]; then
         systemctl disable "$RESUME_UNIT" >/dev/null 2>&1 || true
