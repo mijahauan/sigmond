@@ -6441,13 +6441,50 @@ def _print_catalog(args) -> int:
     return 0
 
 
+def _rebuild_component(name: str, entry, repo_dir, catalog):
+    """Rebuild + reinstall ONE component from its CURRENT checkout — no re-pull,
+    no re-clone, no repin (the pull already happened in _apply_updates).  A bare
+    `git pull` leaves compiled binaries (radiod, ka9q-web) stale and newly-added
+    Python deps (e.g. hamsci-dsp) uninstalled, so the running code silently lags
+    source.  Returns True (rebuilt), False (failed), None (nothing to build).
+    """
+    try:
+        if name == 'ka9q-radio':
+            # make + make install from the checked-out HEAD.  Deliberately NOT
+            # _install_radiod_native / `smd install` — those repin to the
+            # ka9q-python compat commit and would revert a fork/merge checkout.
+            _heading('rebuild ka9q-radio (make install — current HEAD, no repin)')
+            return _build_ka9q_radio(Path(repo_dir))
+        if name == 'ka9q-web':
+            _heading('rebuild ka9q-web (onion + make install)')
+            return _build_ka9q_web_with_onion(Path(repo_dir))
+        # kind=library with no install_script is source-only (editable) — its
+        # consumers read the updated source live; nothing to build.
+        if not entry.install_script and getattr(entry, 'kind', '') == 'library':
+            _info(f'{name}: source-only library — consumers read it live, no rebuild')
+            return None
+        if entry.install_script or entry.repo:
+            _heading(f'reinstall {name} (install.sh / uv sync — current checkout)')
+            # pull=False: build from what's on disk; catalog=… so any newly-added
+            # source-only sibling dep (hamsci-dsp, callhash) gets cloned + synced.
+            return bool(_do_install_client(entry, yes=True, pull=False,
+                                           catalog=catalog))
+        return None
+    except Exception as exc:                       # noqa: BLE001
+        _err(f'{name}: rebuild failed: {exc}')
+        return False
+
+
 def _apply_updates(args, rows: list[dict]) -> int:
-    """Pull each catalog repo per its version policy, then run `smd apply`.
+    """Pull each catalog repo per its version policy, REBUILD+REINSTALL any that
+    advanced, then run `smd apply`.
 
     This is the action half of `smd list` — invoked when --update is given.
     Honors per-component version from topology.toml: 'ignore' is skipped,
     pinned refs are checked out, 'latest' (or absent) does ff-only pull.
-    --ref overrides the policy.  Refuses to clobber dirty repos.
+    --ref overrides the policy.  Refuses to clobber dirty repos.  A pulled
+    component is rebuilt from its new checkout (compiled binaries + venvs),
+    since a source pull alone leaves the running artifact stale.
     """
     if _need_root('component update'):
         return 1
@@ -6471,6 +6508,7 @@ def _apply_updates(args, rows: list[dict]) -> int:
 
     errors = 0
     pulled = 0  # count of repos whose HEAD actually advanced
+    advanced: list = []  # (name, entry, repo_dir) that advanced → rebuild+reinstall
 
     # --- sigmond self-update (only on full apply, not component-targeted) ---
     if not components_filter:
@@ -6554,8 +6592,7 @@ def _apply_updates(args, rows: list[dict]) -> int:
             if after != before:
                 _ok(f'{name}: {before} → {after}')
                 pulled += 1
-                if name == 'ka9q-radio':
-                    _warn('ka9q-radio: source updated — rebuild binaries: smd install --components ka9q-radio')
+                advanced.append((name, entry, repo_dir))
             else:
                 _ok(f'{name}: up to date ({after})')
         except RuntimeError as exc:
@@ -6565,6 +6602,24 @@ def _apply_updates(args, rows: list[dict]) -> int:
     if dry_run:
         _info('(dry-run) no changes made')
         return 0
+
+    # Rebuild + reinstall each component whose source advanced — otherwise the
+    # pull just refreshed source while the running binary/venv stays stale.
+    rebuilt: list = []
+    for _n, _e, _rd in advanced:
+        _rc = _rebuild_component(_n, _e, _rd, catalog)
+        if _rc is True:
+            rebuilt.append(_n)
+        elif _rc is False:
+            errors += 1
+    if rebuilt:
+        # New code only runs after the unit restarts (compiled daemons AND
+        # editable Python both load their code at process start).  Don't
+        # auto-bounce the decode chain here — surface it so the operator picks
+        # the moment (radiod/psk/wspr restarts cost a re-anchor).
+        _info(f'rebuilt + reinstalled: {", ".join(rebuilt)}')
+        _info(f'restart to run the new code:  smd restart --components '
+              f'{",".join(rebuilt)}')
 
     if pulled > 0:
         args.dry_run = False
