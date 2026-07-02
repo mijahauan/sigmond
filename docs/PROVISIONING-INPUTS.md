@@ -156,6 +156,24 @@ address.
 >   a reporter call that differs from `STATION_CALL`; wspr/psk report under the
 >   station callsign today, so nothing consumes them yet.
 
+**Phase 2 (one-file identity, 2026-07-02):** render additionally **pushes
+PSWS ids through** into each installed PSWS recorder's own config file
+(hf-timestd `[station].id`/`instrument_id`, mag-recorder
+`[station].psws_station_id`/`instrument_id`) — the uploader manifest resolves
+`{station_id}`/`{instrument_id}` from those files, so coordination alone was
+not enough. Empty profile values never clobber a hand-configured id. The
+profile gained `[psws.instruments]` (per-recorder ids; the legacy single
+`instrument_id` remains hf-timestd/GRAPE's) and `[reporters].reporter_id`
+(the WSPR/PSK instance id, e.g. `AC0G/S`). When `[psws].enabled`, render also
+ensures the station SSH key (`/etc/hs-uploader/keys/id_ed25519_host`) exists
+and prints the pubkey to register at the PSWS portal. `--if-present` makes
+render a quiet no-op when no profile exists (used by the unconditional
+bring-up step). **`smd bringup` now consumes the profile**: identity flags
+default from it (a filled profile = prompt-free bring-up), the full render
+runs before Stage 3 (so wizards see the PSWS env defaults), and a Stage 4
+re-render pushes ids into the client configs created by Stage 3 before the
+uploader manifest resolves them.
+
 Location: `/etc/sigmond/site-profile.toml` (sigmond-owned, world-readable —
 **non-secret only**; secrets stay in their §4 paths). Schema:
 

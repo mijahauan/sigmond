@@ -240,3 +240,21 @@ def test_stage4_final_sweep_start_then_validate():
     assert s4[-1].kind == 'checkpoint' and s4[-1].check == 'validate'
     sweep = s4[-2]
     assert sweep.kind == 'start' and '--components' not in sweep.argv
+
+
+def test_plan_renders_site_profile_before_manifest():
+    # Phase 2 (one-file identity): after client configs exist, the plan
+    # re-renders site-profile.toml so PSWS station/instrument ids land in
+    # each recorder's own config BEFORE the uploader manifest resolves
+    # {station_id}/{instrument_id} from them.  --if-present keeps it a
+    # quiet no-op on hosts without a site profile.
+    p = build_plan(_dasi2(), local_radiod=True)
+    render = next((i for i, s in enumerate(p.steps)
+                   if 'render' in s.argv and '--if-present' in s.argv), None)
+    manifest = next((i for i, s in enumerate(p.steps)
+                     if 'manifest' in s.argv), None)
+    last_config = max((i for i, s in enumerate(p.steps)
+                       if s.kind == 'config'), default=None)
+    assert render is not None, 'no site-profile render step in the plan'
+    assert manifest is not None and render < manifest
+    assert last_config is not None and last_config < render

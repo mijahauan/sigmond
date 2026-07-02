@@ -2893,6 +2893,27 @@ def cmd_bringup(args) -> int:
     callsign = (getattr(args, 'callsign', None) or '').strip()
     psws_id = (getattr(args, 'psws_station_id', None) or '').strip()
 
+    # site-profile.toml is the one-file identity source (golden-image
+    # model): when present it supplies whatever the flags didn't, so a
+    # filled profile makes bring-up prompt-free.  Flags still win, and
+    # prompts remain only for values neither provides.
+    _site_profile = None
+    if _HAS_SIGMOND_LIB:
+        try:
+            from sigmond.site_profile import load_site_profile
+            _site_profile = load_site_profile()
+        except Exception:
+            _site_profile = None
+    if _site_profile is not None:
+        reporter = reporter or _site_profile.effective_reporter_id
+        grid = grid or _site_profile.grid
+        callsign = callsign or _site_profile.call
+        psws_id = psws_id or _site_profile.psws_station_id
+        _info(f'identity from {_site_profile.source_path}: '
+              f'reporter={reporter or "—"} grid={grid or "—"} '
+              f'call={callsign or "—"}'
+              + (f' psws={psws_id}' if psws_id else ''))
+
     needs_reporter = any(c in prof.clients and c not in skip
                          for c in ('wspr-recorder', 'psk-recorder'))
     needs_grid = ('hf-timestd' in prof.clients and 'hf-timestd' not in skip) or needs_reporter
@@ -3003,6 +3024,16 @@ def cmd_bringup(args) -> int:
         os.environ['STATION_GRID'] = grid
     if psws_id:
         os.environ['STATION_ID'] = psws_id
+
+    # With a site profile, run the full render as well: beyond [host] it
+    # writes coordination [station] (PSWS + reporter identity — the env
+    # bag Stage 3 wizards read as defaults) and the station SSH key.  The
+    # Stage 4 plan step re-renders after client configs exist, pushing the
+    # PSWS ids through into each recorder's own file.
+    if _site_profile is not None:
+        if _run_smd('config', 'render', '--if-present') != 0:
+            _warn('site-profile render failed — client wizards will fall '
+                  'back to prompts/placeholders')
 
     for st in plan.steps:
         if st.kind == 'note':
@@ -15580,6 +15611,9 @@ def main() -> int:
                    help='scaffold a placeholder site-profile.toml (does not overwrite)')
     p.add_argument('--dry-run', action='store_true',
                    help='print what would be published, do not write')
+    p.add_argument('--if-present', action='store_true',
+                   help='exit 0 quietly when site-profile.toml does not exist '
+                        '(for unconditional bring-up steps)')
 
     p = config_sub.add_parser(
         'upload',

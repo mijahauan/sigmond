@@ -535,6 +535,12 @@ def cmd_config_render(args) -> int:
 
     profile = load_site_profile(SITE_PROFILE_PATH)
     if profile is None:
+        if getattr(args, 'if_present', False):
+            # Bring-up plans include an unconditional render step; a host
+            # without a site profile (legacy prompt-driven identity) is a
+            # quiet no-op, not an error.
+            info(f'{SITE_PROFILE_PATH} not present — skipping render')
+            return 0
         err(f'{SITE_PROFILE_PATH} not found')
         info('  scaffold one with:  smd config render --init')
         return 1
@@ -544,8 +550,8 @@ def cmd_config_render(args) -> int:
         problems.append('station.callsign is empty')
     if not profile.grid and not (profile.lat or profile.lon):
         problems.append('need station.grid_square or latitude/longitude')
-    if profile.psws_enabled and not (profile.psws_station_id and profile.psws_instrument_id):
-        problems.append('psws.enabled but station_id/instrument_id missing')
+    if profile.psws_enabled and not profile.psws_station_id:
+        problems.append('psws.enabled but station_id missing')
     if problems:
         for p in problems:
             err(p)
@@ -553,7 +559,8 @@ def cmd_config_render(args) -> int:
 
     station = Station(
         psws_id=profile.psws_station_id if profile.psws_enabled else '',
-        instrument_id=profile.psws_instrument_id if profile.psws_enabled else '',
+        instrument_id=(profile.instrument_for('hf-timestd')
+                       if profile.psws_enabled else ''),
         wsprnet_call=profile.effective_wsprnet_call,
         pskreporter_call=profile.effective_pskreporter_call,
     )
@@ -588,13 +595,108 @@ def cmd_config_render(args) -> int:
         return 0
     ok(f'rendered {COORDINATION_ENV}')
 
+    if profile.psws_enabled:
+        _push_psws_identity(profile)
+        _report_station_key(profile)
+
     print()
     loc = profile.grid or f'{profile.lat},{profile.lon}'
     info(f'operator: {profile.call} / {loc}')
     if profile.psws_enabled:
-        info(f'PSWS: station {profile.psws_station_id} / instrument {profile.psws_instrument_id}')
+        info(f'PSWS: station {profile.psws_station_id}'
+             + ''.join(f' / {rec}={profile.instrument_for(rec)}'
+                       for rec in ('hf-timestd', 'mag-recorder')
+                       if profile.instrument_for(rec)))
     info('clients pick up the new values on next service start or reload.')
     return 0
+
+
+def plan_psws_updates(profile, recorder: str, state) -> list:
+    """(section, key, value) writes that bring one PSWS recorder's own
+    config file in line with the site profile.
+
+    The uploader manifest resolves ``{station_id}``/``{instrument_id}``
+    from each recorder's config (psws.read_state), so the profile must
+    be pushed THROUGH to those files — coordination [station] alone
+    only feeds wizard defaults. Empty desired values never clobber a
+    configured one (a hand-configured host keeps its ids when the
+    profile leaves them blank)."""
+    from .. import psws
+    spec = psws.RECORDERS[recorder]
+    updates = []
+    want_station = profile.psws_station_id
+    want_instrument = profile.instrument_for(recorder)
+    if want_station and state.station != want_station:
+        updates.append(('.'.join(spec['station'][:-1]),
+                        spec['station'][-1], want_station))
+    if want_instrument and state.instrument != want_instrument:
+        updates.append(('.'.join(spec['instrument'][:-1]),
+                        spec['instrument'][-1], want_instrument))
+    return updates
+
+
+def _push_psws_identity(profile) -> None:
+    """Push PSWS station/instrument ids into each installed recorder."""
+    from .. import psws
+    for recorder in psws.RECORDERS:
+        try:
+            state = psws.read_state(recorder)
+        except Exception as exc:                          # noqa: BLE001
+            warn(f'psws: could not read {recorder} state: {exc}')
+            continue
+        if not state.config_exists:
+            info(f'psws: {recorder} config not present yet — skipped '
+                 '(re-run `smd config render` after its config init)')
+            continue
+        updates = plan_psws_updates(profile, recorder, state)
+        if not updates:
+            info(f'psws: {recorder} already current')
+            continue
+        try:
+            psws._set_fields(recorder, updates)
+        except Exception as exc:                          # noqa: BLE001
+            warn(f'psws: could not write {recorder} config: {exc}')
+            continue
+        ok('psws: ' + recorder + ' ← '
+           + ', '.join(f'{key}={val}' for _, key, val in updates))
+
+
+def _report_station_key(profile) -> None:
+    """Ensure the station SSH key exists and remind the operator to
+    register its pubkey on the PSWS portal.
+
+    One host key serves every SFTP destination (single-host uploader
+    model); hs-uploader also self-generates it on first ship, but
+    generating it HERE gives the operator the pubkey to register
+    BEFORE the first upload attempt."""
+    import subprocess
+    from .. import psws
+    key = Path('/etc/hs-uploader/keys/id_ed25519_host')
+    pub = Path(str(key) + '.pub')
+    if not key.exists():
+        try:
+            key.parent.mkdir(parents=True, exist_ok=True)
+            import socket
+            subprocess.run(
+                ['ssh-keygen', '-q', '-t', 'ed25519', '-f', str(key),
+                 '-N', '', '-C', f'hs-uploader@{socket.gethostname()}'],
+                check=True)
+            subprocess.run(['chown', 'hsupload:hsupload', str(key),
+                            str(pub)], check=False)
+            os.chmod(key, 0o600)
+            ok(f'generated station SSH key {key}')
+        except Exception as exc:                          # noqa: BLE001
+            warn(f'could not generate station key {key}: {exc} — '
+                 'hs-uploader will self-generate on first upload')
+            return
+    try:
+        pubkey = pub.read_text().strip()
+    except OSError:
+        return
+    print()
+    info(f'REGISTER this public key for station {profile.psws_station_id} '
+         f'at {psws.PSWS_PORTAL}:')
+    print(f'    {pubkey}')
 
 
 def _patch_station_block(path: Path, station: Station) -> None:

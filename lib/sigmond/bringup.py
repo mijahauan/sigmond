@@ -202,6 +202,18 @@ def build_plan(profile, *, local_radiod: bool,
                       argv=['install', '-d', '-m', '2775', '-o', 'root',
                             '-g', 'sigmond', '/var/lib/hs-uploader']))
 
+    # Re-render the site profile now that stages 1-3 created every client's
+    # config: this pushes the PSWS station/instrument ids from
+    # site-profile.toml THROUGH into each recorder's own config file — the
+    # earlier pre-config render could only seed coordination (the client
+    # files didn't exist yet).  Quiet no-op on hosts without a site profile
+    # (legacy prompt-driven identity) and idempotent otherwise.  MUST come
+    # before the manifest step, which resolves {station_id}/{instrument_id}
+    # from those client configs.
+    steps.append(Step(STAGE4, 'render site profile (PSWS ids into client '
+                              'configs)', 'tune',
+                      argv=[smd, 'config', 'render', '--if-present']))
+
     # Generate the single-host uploader manifest from each enabled client's
     # deploy.toml [[hs_uploader.pipeline]] declarations (identity substituted
     # from coordination + per-client configs), then enable + start the daemon.

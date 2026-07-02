@@ -41,10 +41,15 @@ description  = ""                  # free text (antenna / receiver)
 
 [psws]                             # HamSCI PSWS / GRAPE (optional)
 enabled       = false
-station_id    = ""                 # e.g. S000082
-instrument_id = ""                 # e.g. 172
+station_id    = ""                 # e.g. S000082 — one per site
+instrument_id = ""                 # legacy single id (= hf-timestd/GRAPE's)
+
+[psws.instruments]                 # per-recorder instrument/device ids
+# "hf-timestd"   = "172"           # GRAPE instrument id from the portal
+# "mag-recorder" = "RM3100"        # magnetometer device id
 
 [reporters]                        # default to [station].callsign when blank
+reporter_id      = ""              # WSPR/PSK reporter instance id, e.g. AC0G/S
 wsprnet_call     = ""
 pskreporter_call = ""
 
@@ -75,6 +80,8 @@ class SiteProfile:
     psws_enabled: bool = False
     psws_station_id: str = ""
     psws_instrument_id: str = ""
+    psws_instruments: dict = field(default_factory=dict)
+    reporter_id: str = ""
     wsprnet_call: str = ""
     pskreporter_call: str = ""
     hostname: str = ""
@@ -93,6 +100,24 @@ class SiteProfile:
     @property
     def effective_pskreporter_call(self) -> str:
         return self.pskreporter_call or self.call
+
+    @property
+    def effective_reporter_id(self) -> str:
+        return self.reporter_id or self.call
+
+    def instrument_for(self, recorder: str) -> str:
+        """Per-recorder PSWS instrument/device id.
+
+        ``[psws.instruments]`` wins; the legacy single
+        ``[psws].instrument_id`` remains the GRAPE (hf-timestd) id for
+        profiles written before the map existed.
+        """
+        v = str(self.psws_instruments.get(recorder, "") or "").strip()
+        if v:
+            return v
+        if recorder == "hf-timestd":
+            return self.psws_instrument_id
+        return ""
 
 
 def _f(v) -> float:
@@ -131,6 +156,12 @@ def load_site_profile(path: Path = SITE_PROFILE_PATH) -> Optional[SiteProfile]:
         psws_enabled=bool(psws.get("enabled", False)),
         psws_station_id=_clean(psws.get("station_id")),
         psws_instrument_id=_clean(psws.get("instrument_id")),
+        psws_instruments={
+            str(k): _clean(v)
+            for k, v in (psws.get("instruments", {}) or {}).items()
+            if _clean(v)
+        },
+        reporter_id=_clean(rep.get("reporter_id")).upper(),
         wsprnet_call=_clean(rep.get("wsprnet_call")).upper(),
         pskreporter_call=_clean(rep.get("pskreporter_call")).upper(),
         hostname=_clean(host.get("hostname")),
