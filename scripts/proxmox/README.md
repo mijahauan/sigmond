@@ -1,15 +1,37 @@
-# Proxmox VM Bootstrap
+# Proxmox host + VM setup
 
-Scripts that turn a fresh Debian 13 VM running under Proxmox VE into a
-fully-configured Sigmond/wsprdaemon station with PCIe USB-controller
-passthrough, CPU isolation, vfio binding, and the cpu-pin hookscript —
-in one operator-driven flow.
+The full DASI2 install is **two phases**:
 
-## Entry point
+1. **Host (standalone, before any VM)** — `host-setup.sh`, run as root ON
+   a fresh Proxmox host from a sigmond checkout.  Installs the host RAC
+   (frpc — the site is remotely supportable from this point on, even with
+   no VM), applies the CPU/passthrough base tuning (grub IOMMU +
+   isolcpus/nohz_full flags, vfio modules, initramfs), saves the computed
+   CPU layout to `/etc/sigmond/host-layout.env`, and reboots once.
 
-These scripts are invoked automatically by the top-level `install.sh`
-when it detects a KVM guest and the operator answers "yes" to the
-"Proxmox passthrough setup?" prompt. To invoke directly:
+   ```bash
+   git clone https://github.com/HamSCI/sigmond
+   sudo bash sigmond/scripts/proxmox/host-setup.sh [--radiod-count N]
+   ```
+
+2. **VM (instantiate + tune)** — clone the golden VM
+   (`golden-image.sh clone`), boot it, personalize + site-profile, then
+   `bootstrap.sh` inside it binds THIS host's passthrough + CPU pinning
+   to the VM (hookscript, `qm set`).  When phase 1 already rebooted the
+   host with the base config active, bootstrap detects it
+   (`REBOOT_REQUIRED=0`) and skips the disruptive host reboot — only a
+   one-time VM power-cycle is needed to bind the passthrough.
+
+`bootstrap.sh` also still works standalone on a legacy single-phase
+install (fresh Debian VM, host never prepared): it applies the host base
+itself and reboots the host mid-flow, resuming automatically.
+
+## Entry points
+
+Phase 1: `sudo bash scripts/proxmox/host-setup.sh` (on the host).
+Phase 2: invoked automatically by the top-level `install.sh` when it
+detects a KVM guest and the operator answers "yes" to the "Proxmox
+passthrough setup?" prompt — or directly:
 
 ```bash
 sudo bash scripts/proxmox/bootstrap.sh
@@ -23,12 +45,14 @@ state.
 
 | Script                        | Where it runs            | Purpose                                                |
 |-------------------------------|--------------------------|--------------------------------------------------------|
-| `bootstrap.sh`                | Inside the VM (root)     | Orchestrator — drives the whole flow.                  |
+| `host-setup.sh`               | ON the Proxmox host (root) | Phase 1 orchestrator: host RAC + base tuning + reboot. |
+| `golden-image.sh`             | ON the Proxmox host (root) | Capture the golden template / clone per-site VMs.     |
+| `bootstrap.sh`                | Inside the VM (root)     | Phase 2 orchestrator — binds passthrough/pinning to the VM. |
 | `lib.sh`                      | Sourced by bootstrap     | State, SSH, prompt, logging helpers.                   |
-| `host-discover.sh`            | scp'd to Proxmox host    | Detects VMID, USB controllers, IOMMU groups, CPU.      |
-| `host-apply.sh`               | scp'd to Proxmox host    | Writes vfio/grub/qm config, hookscript, initramfs.     |
+| `host-discover.sh`            | scp'd to host (or run locally by host-setup, `--no-vm`) | Detects VMID, USB controllers, IOMMU groups, CPU. |
+| `host-apply.sh`               | scp'd to host (or run locally by host-setup) | Base: vfio/grub/initramfs. With VMID: hookscript + qm config. |
 | `host-verify.sh`              | scp'd to Proxmox host    | Post-reboot check that vfio-pci took ownership.        |
-| `cpu-pin-VMID.sh.template`    | Rendered into /var/lib/vz/snippets/ | Per-vCPU pin + per-pCPU freq cap hookscript.|
+| `cpu-pin-VMID.sh.template`    | Rendered into /var/lib/vz/snippets/ | Per-vCPU pin + per-pCPU freq pin (min==max) hookscript.|
 | `sigmond-install-resume.service` | Installed in /etc/systemd/system/ | Oneshot that resumes bootstrap after reboot.   |
 
 ## State file

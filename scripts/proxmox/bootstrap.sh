@@ -248,16 +248,33 @@ print(layout_shell_vars(lay))
     scp_to_host "$SCRIPT_DIR/host-apply.sh" "$SCRIPT_DIR/cpu-pin-VMID.sh.template"
 
     info "running host-apply on host (this can take ~30s for initramfs)…"
-    ssh_host "VMID='$vmid' USB_VID_DID='$usb_vid_did' CPU_VENDOR='$cpu_vendor' \
+    local apply_out
+    apply_out="$(ssh_host "VMID='$vmid' USB_VID_DID='$usb_vid_did' CPU_VENDOR='$cpu_vendor' \
               HOST_CPU_COUNT='$host_cpu_count' VM_VCPU_COUNT='$VM_VCPU_COUNT' \
               VM_CORES='$VM_CORES' VM_THREADS='$VM_THREADS' \
               ISOLCPUS_RANGE='$ISOLCPUS_RANGE' \
               RADIOD_CPUS='$RADIOD_CPUS' WORKER_CPUS='$WORKER_CPUS' \
               VCPU_TO_PCPU='$VCPU_TO_PCPU' \
               RADIOD_FREQ_KHZ='3200000' WORKER_FREQ_KHZ='1400000' \
-              bash /tmp/host-apply.sh"
+              bash /tmp/host-apply.sh")"
+    printf '%s\n' "$apply_out" | sed 's/^/    /'
 
     ok "host configured"
+
+    # Two-phase model: when host-setup.sh (phase 1) already applied the base
+    # tuning and the host rebooted with it (isolcpus active + vfio-pci bound),
+    # host-apply reports REBOOT_REQUIRED=0 — the VM binding above (qm set +
+    # hookscript) needs no host reboot, only the VM's own next start.  Skip
+    # straight to verification instead of killing this VM with a reboot.
+    if grep -q '^REBOOT_REQUIRED=0' <<<"$apply_out"; then
+        ok "host base config already active (phase-1 host-setup) — skipping host reboot"
+        state_advance HOST_CONFIGURED
+        warn "NOTE: the new passthrough/pinning config binds on this VM's NEXT"
+        warn "      start — after bootstrap completes, power-cycle the VM once"
+        warn "      (qm stop <vmid> && qm start <vmid>; a guest reboot is not enough)."
+        phase_host_rebooted_verify
+        return
+    fi
 
     # ─── install resume unit ──────────────────────────────────────────────────
     info "installing systemd resume unit…"

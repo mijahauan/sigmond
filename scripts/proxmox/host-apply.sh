@@ -6,11 +6,17 @@
 # CPU isolation, idempotently.
 #
 # Required env vars (passed via ssh):
-#   VMID, USB_VID_DID, CPU_VENDOR, HOST_CPU_COUNT, VM_VCPU_COUNT,
-#   VM_CORES, VM_THREADS, ISOLCPUS_RANGE, RADIOD_CPUS, WORKER_CPUS,
-#   VCPU_TO_PCPU, RADIOD_FREQ_KHZ, WORKER_FREQ_KHZ
+#   USB_VID_DID, CPU_VENDOR, ISOLCPUS_RANGE   — always
+#   VMID, VM_VCPU_COUNT, VM_CORES, VM_THREADS, RADIOD_CPUS, WORKER_CPUS,
+#   VCPU_TO_PCPU                              — only for VM binding
 #
-# Reads the cpu-pin template from /tmp/cpu-pin-VMID.sh.template (also scp'd).
+# Two-phase install model: with VMID EMPTY/unset, applies only the
+# VM-independent host base (grub IOMMU/isolcpus flags, vfio modules,
+# initramfs) — Phase 1, run by host-setup.sh BEFORE any VM exists.
+# With VMID set, additionally renders the cpu-pin hookscript and binds
+# the VM (qm set) — Phase 2, run by the guest bootstrap.
+#
+# Reads the cpu-pin template from /tmp/cpu-pin-VMID.sh.template (VM mode).
 #
 # Idempotent: re-runs cleanly. Backup of mutated upstream files written
 # to /root/proxmox-passthrough-backup/.
@@ -18,22 +24,22 @@
 set -euo pipefail
 
 # ─── inputs ───────────────────────────────────────────────────────────────────
-: "${VMID:?VMID required}"
+VMID="${VMID:-}"
 : "${USB_VID_DID:?USB_VID_DID required}"
 : "${CPU_VENDOR:?CPU_VENDOR required}"
-: "${HOST_CPU_COUNT:?HOST_CPU_COUNT required}"
-: "${VM_VCPU_COUNT:?VM_VCPU_COUNT required}"
-: "${VM_CORES:?VM_CORES required}"
-: "${VM_THREADS:?VM_THREADS required}"
 : "${ISOLCPUS_RANGE:?ISOLCPUS_RANGE required}"
-: "${RADIOD_CPUS:?RADIOD_CPUS required}"
-: "${WORKER_CPUS:?WORKER_CPUS required}"
-: "${VCPU_TO_PCPU:?VCPU_TO_PCPU required}"
 : "${RADIOD_FREQ_KHZ:=3200000}"
 : "${WORKER_FREQ_KHZ:=1400000}"
-
-CONF="/etc/pve/qemu-server/${VMID}.conf"
-[[ -f "$CONF" ]] || { echo "ERROR: VM config $CONF does not exist" >&2; exit 1; }
+if [[ -n "$VMID" ]]; then
+    : "${VM_VCPU_COUNT:?VM_VCPU_COUNT required (VM mode)}"
+    : "${VM_CORES:?VM_CORES required (VM mode)}"
+    : "${VM_THREADS:?VM_THREADS required (VM mode)}"
+    : "${RADIOD_CPUS:?RADIOD_CPUS required (VM mode)}"
+    : "${WORKER_CPUS:?WORKER_CPUS required (VM mode)}"
+    : "${VCPU_TO_PCPU:?VCPU_TO_PCPU required (VM mode)}"
+    CONF="/etc/pve/qemu-server/${VMID}.conf"
+    [[ -f "$CONF" ]] || { echo "ERROR: VM config $CONF does not exist" >&2; exit 1; }
+fi
 
 BACKUP_DIR="/root/proxmox-passthrough-backup"
 TEMPLATE="/tmp/cpu-pin-VMID.sh.template"
@@ -95,6 +101,24 @@ log "running update-grub…"
 update-grub >/dev/null
 log "running update-initramfs -u -k all (this can take a minute)…"
 update-initramfs -u -k all >/dev/null
+
+# ─── VM-independent base done — report whether a reboot is still needed ──────
+# The guest bootstrap / host-setup use this to skip a redundant reboot when
+# the base config (isolcpus cmdline + vfio-pci binding) is already active.
+REBOOT_REQUIRED=1
+if grep -qw "isolcpus=${ISOLCPUS_RANGE}" /proc/cmdline; then
+    first_addr="$(lspci -nn | grep "\[${USB_VID_DID}\]" | awk '{print $1; exit}')"
+    if [[ -n "$first_addr" ]] && \
+       [[ "$(basename "$(readlink -f /sys/bus/pci/devices/0000:${first_addr}/driver 2>/dev/null || true)")" == "vfio-pci" ]]; then
+        REBOOT_REQUIRED=0
+    fi
+fi
+echo "REBOOT_REQUIRED=${REBOOT_REQUIRED}"
+
+if [[ -z "$VMID" ]]; then
+    echo "host-apply: base complete (no VM bound — phase 1)"
+    exit 0
+fi
 
 # ─── cpu-pin hookscript ───────────────────────────────────────────────────────
 [[ -f "$TEMPLATE" ]] || { echo "ERROR: $TEMPLATE not found (scp it before running this)" >&2; exit 1; }

@@ -9,6 +9,10 @@
 # Args (optional):
 #   $1 = VM_PRODUCT_SERIAL  — UUID from VM's /sys/class/dmi/id/product_serial
 #                              used to disambiguate when multiple VMs exist.
+#        --no-vm            — Phase-1 host-first mode (host-setup.sh): skip
+#                              VM identification entirely; emits VMID="".
+#                              Used to prepare a bare host BEFORE any VM
+#                              exists (golden-image flow).
 #
 # Exit non-zero on any unrecoverable detection failure (e.g. USB controllers
 # share an IOMMU group with non-USB devices).
@@ -16,16 +20,21 @@
 set -euo pipefail
 
 VM_SERIAL="${1:-}"
+NO_VM=0
+[[ "$VM_SERIAL" == "--no-vm" ]] && { NO_VM=1; VM_SERIAL=""; }
 
 emit() { printf '%s=%q\n' "$1" "$2"; }
 log()  { printf '# %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 # ─── identify the VM ──────────────────────────────────────────────────────────
+VMID=""
+if [[ "$NO_VM" == "1" ]]; then
+    log "--no-vm: skipping VM identification (bare-host phase 1)"
+else
 mapfile -t VM_CONFS < <(ls /etc/pve/qemu-server/*.conf 2>/dev/null || true)
 [[ ${#VM_CONFS[@]} -gt 0 ]] || die "no VMs found in /etc/pve/qemu-server/"
 
-VMID=""
 if [[ -n "$VM_SERIAL" ]]; then
     # Match by SMBIOS serial — Proxmox stores it as smbios1: uuid=<UUID>,...
     for conf in "${VM_CONFS[@]}"; do
@@ -54,6 +63,7 @@ if [[ -z "$VMID" ]]; then
 fi
 
 [[ "$VMID" =~ ^[0-9]+$ ]] || die "computed VMID is not numeric: '$VMID'"
+fi  # NO_VM
 
 # ─── identify USB controllers ─────────────────────────────────────────────────
 # Find USB controllers (class 0c03), grouped by vendor:device id.
