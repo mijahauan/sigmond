@@ -82,10 +82,25 @@ run `bootstrap.sh`. Gate everything with `smd admin readiness`.
 
 ## Prerequisites
 
+**Step 0 (manual, before phase 1)** — these scripts assume a working
+Proxmox VE host:
+
 - BIOS configured per `docs/proxmox/wsprdaemon-proxmox-bios-checklist.md`
   (operator does this once, before any of these scripts run).
-- VM created in Proxmox with the desired memory and disk.
-- Linux user account inside the VM with sudo access.
+- **Proxmox VE installed bare-metal** from the standard ISO (disk,
+  network, root password).  No automation for this today; Proxmox 8.2+'s
+  automated-installer (`proxmox-auto-install-assistant` / answer.toml)
+  is a candidate for zero-touch site kits later.
+- `apt update && apt install -y git` on the host (Proxmox's Debian base
+  doesn't ship git; the sigmond clone needs it).
+
+**For phase 2:**
+
+- VM present — cloned from the golden template (`golden-image.sh clone`),
+  or created fresh in Proxmox with the desired memory and disk for the
+  legacy single-phase path.
+- Linux user account inside the VM with sudo access (baked into the
+  golden image).
 
 ## Reference
 
