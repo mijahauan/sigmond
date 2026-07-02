@@ -107,6 +107,7 @@ for _candidate in (_SCRIPT.parent.parent / 'lib',        # repo layout
 
 try:
     from sigmond.commands.validate    import cmd_validate
+    from sigmond.commands.readiness   import cmd_readiness
     from sigmond.commands.timing      import cmd_timing
     from sigmond.commands.ka9q_watch  import cmd_ka9q_watch
     from sigmond.commands.config      import cmd_config_show, cmd_config_migrate, cmd_config_identity, cmd_config_refresh, cmd_config_render, cmd_config_upload
@@ -15062,6 +15063,28 @@ def main() -> int:
     p.add_argument('--json', action='store_true',
                    help='emit machine-readable JSON')
 
+    # readiness — golden-image / site gate (PROVISIONING-INPUTS.md §9)
+    p_ready = admin_sub.add_parser('readiness',
+        help='machine-checkable gate: is this VM fit to capture as the '
+             'golden image, or fit to run as a station?',
+        description=('capture gate: every profile component installed, venv '
+                     'imports proven via `version --json`, unit files in '
+                     'place, radiod built, and NO per-site identity/secrets '
+                     'baked in. site gate: same structural core plus '
+                     'personalization, station identity, and harmonization '
+                     'with zero failures. Exit 0 = ready.'))
+    p_ready.add_argument('--gate', choices=['auto', 'capture', 'site'],
+                         default='auto',
+                         help='which gate to run (default: auto — site when '
+                              'identity/personalize sentinel present, else '
+                              'capture)')
+    p_ready.add_argument('--profile', default='dasi2',
+                         help='catalog profile to check (default: dasi2)')
+    p_ready.add_argument('--with-optional', action='store_true',
+                         help='also require the profile\'s optional clients')
+    p_ready.add_argument('--json', action='store_true',
+                         help='emit machine-readable JSON')
+
     # secrets — install/validate the few *delivered* per-site secrets
     # (Earthdata netrc, RAC token). SSH-key secrets self-generate on-host and
     # are not handled here. See PROVISIONING-INPUTS.md §10.
@@ -15946,13 +15969,15 @@ def main() -> int:
         p_verifier.print_help()
         return 0
 
-    if args.command in ('validate', 'config', 'environment', 'timing', 'uninstall'):
+    if args.command in ('validate', 'readiness', 'config', 'environment', 'timing', 'uninstall'):
         if not _HAS_SIGMOND_LIB:
             print('smd: sigmond library not found; install lib/sigmond alongside bin/smd',
                   file=sys.stderr)
             return 1
         if args.command == 'validate':
             return cmd_validate(args)
+        if args.command == 'readiness':
+            return cmd_readiness(args)
         if args.command == 'timing':
             return cmd_timing(args)
         if args.command == 'uninstall':
